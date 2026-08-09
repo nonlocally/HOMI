@@ -18,6 +18,12 @@
 #
 #   communicate send <peer-name|socket-path> <message>    raw inject into a peer socket
 #
+#   communicate agents                           the routing table (every reachable agent)
+#   communicate whereis <name>                   resolve a name -> type/device/socket
+#   communicate route   <name> <message>         route to any agent by name
+#   communicate wake    <name> [--every SEC] [--message MSG] [--times N]
+#   communicate wake    stop <name|all> | wake ls
+#
 set -o pipefail
 COMM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export COMM_HOME
@@ -29,8 +35,12 @@ source "$COMM_HOME/lib/claude.sh"
 source "$COMM_HOME/lib/codex.sh"
 # shellcheck source=lib/peer.sh
 source "$COMM_HOME/lib/peer.sh"
+# shellcheck source=lib/router.sh
+source "$COMM_HOME/lib/router.sh"
+# shellcheck source=lib/wake.sh
+source "$COMM_HOME/lib/wake.sh"
 
-usage() { sed -n '2,25p' "$COMM_HOME/bin/communicate" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "$COMM_HOME/bin/communicate" | sed 's/^# \{0,1\}//'; }
 
 cmd_link() {
   local dev="${1:-}"; [ -n "$dev" ] || die "usage: communicate link <device>"
@@ -122,9 +132,14 @@ main() {
     claude)  cmd_claude "$@";;
     codex)   cmd_codex "$@";;
     send)    peer_send "$@";;
+    agents)  router_agents;;
+    whereis) router_whereis "$@" && echo;;
+    route)   router_route "$@";;
+    wake)    wake_cmd "$@";;
     # internal entrypoints (not for humans)
     __supervise-claude) _claude_supervise "$@";;
     __codex-peer-serve) _codex_peer_serve "$@";;
+    __wake-loop)        _wake_loop "$@";;
     ''|-h|--help|help) usage;;
     *) err "unknown command: $cmd"; usage; exit 1;;
   esac

@@ -27,31 +27,6 @@ if best: sys.stdout.write(best["messagingSocketPath"])
 
 _peer_state_dir() { printf '%s/peers/%s\n' "$COMM_STATE" "$1"; }
 
-# Write an adapter sidecar so Claude lists this socket as a named peer.
-_peer_write_sidecar() {
-  local sidecar="$1" sock="$2" name="$3" pid="$4"
-  python3 -c '
-import sys, json, time, uuid
-sidecar, sock, name, pid = sys.argv[1:5]
-now = int(time.time() * 1000)
-json.dump({
-    "pid": int(pid),
-    "sessionId": str(uuid.uuid4()),
-    "cwd": "-",
-    "startedAt": now,
-    "version": "communicate-peer",
-    "peerProtocol": 1,
-    "kind": "interactive",
-    "entrypoint": "cli",
-    "messagingSocketPath": sock,
-    "name": name,
-    "status": "idle",
-    "updatedAt": now,
-    "statusUpdatedAt": now,
-}, open(sidecar, "w"))
-' "$sidecar" "$sock" "$name" "$pid"
-}
-
 # Present a remote (or local) Codex as a native Claude peer.
 # Usage: codex_peer <device> [name] [--dir D] [--auto]
 codex_peer() {
@@ -73,15 +48,16 @@ codex_peer() {
   [ -n "$(codex_probe "$dev")" ] || die "codex is not installed on '$dev'"
 
   local sdir; sdir="$(comm_socket_dir)"; mkdir -p "$sdir" 2>/dev/null; chmod 700 "$sdir" 2>/dev/null || true
-  # A synthetic, collision-checked id for the socket + sidecar filename.
-  local id sock sidecar
+  # A synthetic, collision-checked id for the socket filename. (The sidecar is
+  # named by the daemon's own live pid, so the discovery sweep can't reap it.)
+  local id sock
   while :; do
-    id=$(( 900000 + RANDOM % 90000 ))
-    sock="$sdir/$id.sock"; sidecar="$(comm_sessions_dir)/$id.json"
-    [ -e "$sock" ] || [ -e "$sidecar" ] || break
+    id=$(( 900000 + RANDOM % 90000 )); sock="$sdir/$id.sock"
+    [ -e "$sock" ] || break
   done
 
-  local -a dargs=(serve --socket "$sock" --device "$dev" --name "$name" --communicate "$COMM_HOME/bin/communicate")
+  local -a dargs=(serve --socket "$sock" --device "$dev" --name "$name"
+                  --communicate "$COMM_HOME/bin/communicate" --sessions-dir "$(comm_sessions_dir)")
   [ -n "$dir" ] && dargs+=(--dir "$dir")
   [ "$auto" -eq 1 ] && dargs+=(--auto)
 
@@ -90,12 +66,11 @@ codex_peer() {
   nohup python3 "$CC_PEER_PY" "${dargs[@]}" >"$sd/daemon.log" 2>&1 &
   local dp=$!; echo "$dp" > "$sd/daemon.pid"; disown "$dp" 2>/dev/null || true
 
-  # Wait for the daemon to bind, then plant the sidecar (pid = live daemon pid,
-  # so the peer-sweep never reaps it while the daemon runs).
+  # The daemon binds the socket and plants sessions/<its-pid>.json itself.
+  local sidecar="$(comm_sessions_dir)/$dp.json"
   local i
-  for i in $(seq 1 20); do [ -S "$sock" ] && break; sleep 0.25; done
-  [ -S "$sock" ] || { err "daemon failed to bind $sock (see $sd/daemon.log)"; kill "$dp" 2>/dev/null; return 1; }
-  _peer_write_sidecar "$sidecar" "$sock" "$name" "$dp"
+  for i in $(seq 1 20); do [ -S "$sock" ] && [ -e "$sidecar" ] && break; sleep 0.25; done
+  { [ -S "$sock" ] && [ -e "$sidecar" ]; } || { err "daemon failed to come up (see $sd/daemon.log)"; kill "$dp" 2>/dev/null; return 1; }
   {
     printf 'device=%s\n' "$dev"; printf 'name=%s\n' "$name"
     printf 'socket=%s\n' "$sock"; printf 'sidecar=%s\n' "$sidecar"; printf 'id=%s\n' "$id"

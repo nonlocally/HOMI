@@ -21,7 +21,7 @@ Wire facts (reverse-engineered + verified live):
     connecting to that path and writing another user message.
   * Liveness discovery merely connects to the socket; accepting is enough.
 """
-import argparse, json, os, socket, subprocess, sys, threading, uuid
+import argparse, json, os, signal, socket, subprocess, sys, threading, time, uuid
 
 
 def _extract_text(content):
@@ -149,6 +149,25 @@ def _handle(conn, opts):
         sys.stderr.write("deliver failed: %s\n" % e)
 
 
+def _sidecar_obj(sock, name, pid):
+    now = int(time.time() * 1000)
+    return {
+        "pid": pid,                       # a LIVE pid -> the discovery sweep never reaps us
+        "sessionId": str(uuid.uuid4()),
+        "cwd": "-",
+        "startedAt": now,
+        "version": "communicate-peer",
+        "peerProtocol": 1,
+        "kind": "interactive",
+        "entrypoint": "cli",
+        "messagingSocketPath": sock,
+        "name": name,
+        "status": "idle",
+        "updatedAt": now,
+        "statusUpdatedAt": now,
+    }
+
+
 def serve(opts):
     if os.path.exists(opts.socket):
         os.unlink(opts.socket)
@@ -156,12 +175,47 @@ def serve(opts):
     srv.bind(opts.socket)
     os.chmod(opts.socket, 0o600)
     srv.listen(64)
-    sys.stderr.write("cc_peer serving %s -> codex@%s\n" % (opts.name, opts.device))
+
+    pid = os.getpid()
+    sidecar = os.path.join(opts.sessions_dir, "%d.json" % pid) if opts.sessions_dir else None
+    stop = threading.Event()
+
+    def plant():
+        if not sidecar:
+            return
+        try:
+            tmp = sidecar + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(_sidecar_obj(opts.socket, opts.name, pid), f)
+            os.replace(tmp, sidecar)
+        except Exception as e:  # pragma: no cover
+            sys.stderr.write("plant failed: %s\n" % e)
+
+    def cleanup(*_a):
+        stop.set()
+        for p in (sidecar, opts.socket):
+            try:
+                if p and os.path.exists(p):
+                    os.unlink(p)
+            except OSError:
+                pass
+        os._exit(0)
+
+    def replanter():
+        while not stop.wait(3):
+            plant()
+
+    plant()
+    threading.Thread(target=replanter, daemon=True).start()
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+    sys.stderr.write("cc_peer serving %s (pid %d) -> codex@%s; sidecar=%s\n"
+                     % (opts.name, pid, opts.device, sidecar))
     while True:
         try:
             conn, _ = srv.accept()
         except KeyboardInterrupt:
-            break
+            cleanup()
         except OSError:
             continue
         threading.Thread(target=_handle, args=(conn, opts), daemon=True).start()
@@ -176,6 +230,8 @@ def main():
     s.add_argument("--device", required=True)
     s.add_argument("--name", required=True)
     s.add_argument("--communicate", required=True, help="path to the communicate CLI")
+    s.add_argument("--sessions-dir", dest="sessions_dir", default="",
+                   help="Claude sessions dir; the daemon plants+maintains its own sidecar here")
     s.add_argument("--dir", default="")
     s.add_argument("--auto", action="store_true")
     s.add_argument("--timeout", type=int, default=180)
