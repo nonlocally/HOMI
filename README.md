@@ -53,6 +53,51 @@ git clone git@github.com:aadarwal/communicate.git
 export PATH="$PWD/communicate/bin:$PATH"   # or symlink bin/communicate onto your PATH
 ```
 
+## Try it in 5 minutes
+
+**A. One machine, no SSH — turn Codex into a Claude peer.**
+Run this from inside a Claude Code session (so `SendMessage`/`ListAgents` exist):
+
+```sh
+communicate codex peer local codex-here     # stand up the peer
+# In your Claude session: ListAgents  -> you'll see `codex-here`
+#                         SendMessage to `codex-here`: "reply PONG and say what you are"
+# The Codex CLI answers back as a cross-session message.
+communicate codex unpeer local               # tear it down
+```
+
+The first inbound reply may pause on Claude Code's "held message from another
+session" prompt — that's the safety gate for a bypass-mode session; approve it.
+
+**B. Prove it end-to-end without a Claude session (uses a throwaway listener):**
+
+```sh
+scripts/test-codex-peer.sh     # stands up a peer, sends it a message, checks the codex reply
+scripts/test-codex.sh local    # codex ask + resume continuity
+```
+
+**C. Two machines — talk to a Claude session on another device over Tailscale:**
+
+```sh
+communicate ls aadarshs-mac-mini-2                    # list its Claude sessions
+communicate claude bridge aadarshs-mac-mini-2 newest  # bridge the newest one in
+communicate agents                                    # it now shows as `claude*`
+# In your Claude session: SendMessage to it by name — replies come back.
+communicate claude unbridge aadarshs-mac-mini-2
+```
+
+**D. The router + a wake loop:**
+
+```sh
+communicate agents                       # the routing table: every reachable agent
+communicate route codex-here "status?"   # route to any agent by name
+communicate wake codex-here --every 300  # ping it every 5 min (keep-working / poll)
+communicate wake stop codex-here
+```
+
+If something looks off: `communicate status` shows active bridges/peers, and
+`communicate down` tears everything down cleanly.
+
 ## Usage
 
 ```
@@ -116,9 +161,11 @@ lib/common.sh       device/ssh/logging helpers
 lib/claude.sh       Tier 1: bridge a remote Claude session as a native peer
 lib/codex.sh        Tier 2: ask a Codex agent over ssh (codex exec, with continuity)
 lib/peer.sh         Tier 3: present Codex as a native peer; raw peer sender
-lib/cc_peer.py      the cc-socks wire protocol (serve + send)
+lib/router.sh       the agent-router: name -> socket table, whereis, route
+lib/wake.sh         heartbeat loop over the router
+lib/cc_peer.py      the cc-socks wire protocol (serve / send / recv)
 docs/MECHANISM.md   how Claude Code peer messaging actually works
-scripts/            end-to-end tests
+scripts/            end-to-end tests (codex-peer, codex, claude-bridge)
 ```
 
 ## Status

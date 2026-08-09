@@ -221,6 +221,47 @@ def serve(opts):
         threading.Thread(target=_handle, args=(conn, opts), daemon=True).start()
 
 
+def recv(opts):
+    """Listen on a socket and print the body of the first real message that
+    arrives (ignoring empty liveness probes), then exit. For tests."""
+    if os.path.exists(opts.socket):
+        os.unlink(opts.socket)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(opts.socket)
+    os.chmod(opts.socket, 0o600)
+    srv.listen(8)
+    srv.settimeout(opts.timeout)
+    try:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                sys.stderr.write("recv: timed out\n")
+                return 2
+            raw = _read_line(conn, timeout=1.0)
+            try:
+                conn.close()
+            except OSError:
+                pass
+            line = raw.split(b"\n", 1)[0].strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if msg.get("type") != "user":
+                continue
+            sys.stdout.write(_extract_text((msg.get("message") or {}).get("content")))
+            sys.stdout.flush()
+            return 0
+    finally:
+        try:
+            os.unlink(opts.socket)
+        except OSError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(prog="cc_peer")
     sub = ap.add_subparsers(dest="role", required=True)
@@ -242,9 +283,15 @@ def main():
     d.add_argument("--from", dest="from_sock", required=True, help="our socket path (reply address)")
     d.add_argument("--name", default=None, help="from-name attribution to render")
 
+    r = sub.add_parser("recv")
+    r.add_argument("--socket", required=True)
+    r.add_argument("--timeout", type=float, default=60)
+
     a = ap.parse_args()
     if a.role == "serve":
         serve(a)
+    elif a.role == "recv":
+        sys.exit(recv(a))
     else:
         deliver(a.to, a.text, a.from_sock, from_name=a.name)
 
