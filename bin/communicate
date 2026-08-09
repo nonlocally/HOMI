@@ -19,6 +19,7 @@
 #   communicate send <peer-name|socket-path> <message>    raw inject into a peer socket
 #
 #   communicate agents                           the routing table (every reachable agent)
+#   communicate directory [--json]               the shared registry (name -> capability) + live status
 #   communicate whereis <name>                   resolve a name -> type/device/socket
 #   communicate route   <name> <message>         route to any agent by name
 #   communicate wake    <name> [--every SEC] [--message MSG] [--times N]     timer trigger
@@ -40,6 +41,8 @@ source "$COMM_HOME/lib/peer.sh"
 source "$COMM_HOME/lib/router.sh"
 # shellcheck source=lib/wake.sh
 source "$COMM_HOME/lib/wake.sh"
+# shellcheck source=lib/directory.sh
+source "$COMM_HOME/lib/directory.sh"
 
 usage() { sed -n '2,30p' "$COMM_HOME/bin/communicate" | sed 's/^# \{0,1\}//'; }
 
@@ -134,7 +137,8 @@ main() {
     claude)  cmd_claude "$@";;
     codex)   cmd_codex "$@";;
     send)    peer_send "$@";;
-    agents)  router_agents;;
+    agents)    router_agents;;
+    directory) directory_show "$@";;
     whereis) router_whereis "$@" && echo;;
     route)   router_route "$@";;
     wake)    wake_cmd "$@";;

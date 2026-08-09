@@ -27,3 +27,10 @@ availability: <when the agent answers>
 
 Keep entries honest and dated: an entry describes what the agent can do **now**,
 not aspirationally. Update `updated:` whenever holdings or availability change.
+
+## Tooling
+
+`communicate directory` reads every `registry/*.md`, parses the frontmatter, and
+cross-references the live router (name → socket) to show who is reachable right
+now. `communicate directory --json` emits the whole roster as JSON — the
+machine-readable directory, generated from these entries.
