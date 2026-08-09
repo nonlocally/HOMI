@@ -47,7 +47,7 @@ codex_peer() {
   device_reachable "$dev" || die "device '$dev' not reachable over ssh"
   [ -n "$(codex_probe "$dev")" ] || die "codex is not installed on '$dev'"
 
-  local sdir; sdir="$(comm_socket_dir)"; mkdir -p "$sdir" 2>/dev/null; chmod 700 "$sdir" 2>/dev/null || true
+  local sdir; sdir="$(comm_socket_dir)"; comm_ensure_socket_dir "$sdir"
   # A synthetic, collision-checked id for the socket filename. (The sidecar is
   # named by the daemon's own live pid, so the discovery sweep can't reap it.)
   local id sock

@@ -21,7 +21,8 @@
 #   communicate agents                           the routing table (every reachable agent)
 #   communicate whereis <name>                   resolve a name -> type/device/socket
 #   communicate route   <name> <message>         route to any agent by name
-#   communicate wake    <name> [--every SEC] [--message MSG] [--times N]
+#   communicate wake    <name> [--every SEC] [--message MSG] [--times N]     timer trigger
+#   communicate wake    <name> --on-pr <owner/repo> [--every SEC] [--catchup]  new-PR trigger
 #   communicate wake    stop <name|all> | wake ls
 #
 set -o pipefail
@@ -95,9 +96,10 @@ cmd_status() {
 }
 
 cmd_down() {
+  wake_stop all 2>/dev/null || true
   claude_unbridge all 2>/dev/null || true
   codex_unpeer all 2>/dev/null || true
-  ok "all bridges and peers torn down"
+  ok "all wakes, bridges, and peers torn down"
 }
 
 cmd_claude() {

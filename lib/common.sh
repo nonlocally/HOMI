@@ -51,7 +51,25 @@ die()  { err "$*"; exit 1; }
 #
 # Transport is strictly ssh (over Tailscale or plain). Nothing else.
 
-COMM_SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+# StreamLocalBindMask=0177 makes ssh-forwarded unix sockets mode 0600 instead of
+# inheriting the login umask (which is commonly 022 -> world-readable 0755).
+COMM_SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindMask=0177)
+
+# Ensure a socket dir exists AND is safe (owned by us, mode 700). Refuses to use
+# a pre-existing dir owned by someone else or group/world-accessible — otherwise
+# a hostile local user could pre-create /tmp/cc-socks and read our sockets.
+comm_ensure_socket_dir() {
+  local dir="$1"
+  mkdir -p "$dir" 2>/dev/null || true
+  [ -d "$dir" ] || die "socket dir $dir does not exist and could not be created"
+  chmod 700 "$dir" 2>/dev/null || true
+  # BSD (macOS) vs GNU stat differ; try both.
+  local owner mode
+  owner="$(stat -f '%u' "$dir" 2>/dev/null || stat -c '%u' "$dir" 2>/dev/null)"
+  mode="$(stat -f '%Lp' "$dir" 2>/dev/null || stat -c '%a' "$dir" 2>/dev/null)"
+  [ "$owner" = "$(id -u)" ] || die "refusing socket dir $dir: not owned by us (owner uid=$owner)"
+  case "$mode" in 700|0700) ;; *) die "refusing socket dir $dir: mode $mode is not 700";; esac
+}
 
 comm_is_local() { [ "$1" = "local" ] || [ "$1" = "localhost" ]; }
 

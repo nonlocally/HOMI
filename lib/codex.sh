@@ -90,7 +90,9 @@ codex_ask() {
     # Resume can fail if the stored session rolled off; retry fresh once.
     if [ -n "$tid" ]; then
       warn "codex resume failed on $dev; starting a fresh thread"
-      rm -f "$tf"; codex_ask "$dev" --dir "$dir" --thread "$thread" --new ${auto:+} -- "${msg[@]}"; return $?
+      rm -f "$tf"
+      local -a af=(); [ "$auto" -eq 1 ] && af=(--auto)
+      codex_ask "$dev" --dir "$dir" --thread "$thread" --new "${af[@]}" -- "${msg[@]}"; return $?
     fi
     die "codex exec failed on $dev (exit $rc)"
   fi

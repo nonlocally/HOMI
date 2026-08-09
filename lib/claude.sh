@@ -97,6 +97,21 @@ _bridge_state_dir() {
   printf '%s/bridges/%s\n' "$COMM_STATE" "$(printf '%s' "$dev" | tr '/@: ' '____')"
 }
 
+# Rewrite the messagingSocketPath field of a sidecar JSON (stdin -> stdout), so a
+# planted sidecar points at the local forward path rather than the peer's path.
+_rewrite_sock() {
+  python3 -c 'import sys,json; d=json.load(sys.stdin); d["messagingSocketPath"]=sys.argv[1]; json.dump(d,sys.stdout)' "$1"
+}
+
+# Sanity-check a remote-supplied socket path before we bind/forward/remove it.
+_valid_sockpath() {
+  case "$1" in
+    *../*|*/..) return 1;;
+    */cc-socks/*.sock) return 0;;
+    *) return 1;;
+  esac
+}
+
 # Establish the bridge. Usage: claude_bridge <device> [selector]
 claude_bridge() {
   comm_need_python
@@ -109,6 +124,10 @@ claude_bridge() {
   [ -n "$mysock" ] || die "not inside a Claude session (\$CLAUDE_CODE_MESSAGING_SOCKET unset); bridge from within one"
   local my_sidecar; my_sidecar="$(_claude_my_sidecar)" || die "could not locate my own session sidecar"
 
+  # Replace any existing bridge to this device first (avoid orphaned supervisors).
+  local sd; sd="$(_bridge_state_dir "$dev")"
+  [ -f "$sd/meta" ] && { warn "existing bridge to $dev — replacing it"; claude_unbridge "$dev" >/dev/null 2>&1 || true; }
+
   log "selecting session '$sel' on $dev ..."
   local remote_json; remote_json="$(_claude_pick "$dev" "$sel")"
   [ -n "$remote_json" ] || die "no matching Claude session '$sel' on $dev (try: communicate ls $dev)"
@@ -118,35 +137,33 @@ claude_bridge() {
   rname="$(printf '%s' "$remote_json" | json_get name)"
   rpath="$(printf '%s' "$remote_json" | json_get messagingSocketPath)"
   [ -n "$rpath" ] || die "selected session has no messagingSocketPath"
+  _valid_sockpath "$rpath" || die "remote socket path looks unsafe, refusing: $rpath"
   ok "target: ${rname:-unnamed} (pid $rpid) @ $rpath"
 
-  local mdir rdir
-  mdir="${mysock%/*}"; rdir="${rpath%/*}"
-  if [ "$mdir" != "$rdir" ]; then
-    warn "socket dirs differ (mine=$mdir theirs=$rdir); messages still flow but delivery receipts may be suppressed"
-  fi
+  # Forward each socket into the OTHER host's real socket dir — the dirs can
+  # differ (macOS /tmp/cc-socks vs Linux /run/user/<uid>/cc-socks). The planted
+  # sidecars get messagingSocketPath rewritten to these local paths, so discovery
+  # connects to the right place regardless of the remote's absolute path.
+  local mybase="${mysock##*/}"
+  local mypid="${mybase%.sock}"
+  local ldir rdir lfwd rfwd
+  ldir="$(comm_socket_dir)"; rdir="${rpath%/*}"
+  lfwd="$ldir/$rpid.sock"; rfwd="$rdir/$mypid.sock"
+  [ "$ldir" != "$rdir" ] && warn "socket dirs differ (mine=$ldir theirs=$rdir); messages flow, receipts may be suppressed"
+  [ -n "$(_claude_pick local "$rpid")" ] && die "local pid $rpid collides with the remote session id; cannot bridge safely"
 
-  # Ensure socket parent dirs exist on both ends (mode 700 like Claude uses).
-  mkdir -p "$rdir" 2>/dev/null; chmod 700 "$rdir" 2>/dev/null || true
-  on_device "$dev" "mkdir -p $(comm_shq "$mdir") && chmod 700 $(comm_shq "$mdir")" || true
-
+  comm_ensure_socket_dir "$ldir"
+  on_device "$dev" "mkdir -p $(comm_shq "$rdir") && chmod 700 $(comm_shq "$rdir")" 2>/dev/null || true
   # Clear a stale reverse-bind path on the remote iff no real remote session owns it.
-  local mybase="${mysock##*/}" mypid="${mybase%.sock}"
-  if [ -z "$(_claude_pick "$dev" "$mypid")" ]; then
-    on_device "$dev" "rm -f $(comm_shq "$mysock")" 2>/dev/null || true
-  fi
+  [ -z "$(_claude_pick "$dev" "$mypid")" ] && on_device "$dev" "rm -f $(comm_shq "$rfwd")" 2>/dev/null || true
 
-  local sd; sd="$(_bridge_state_dir "$dev")"; mkdir -p "$sd"
-  # Record everything teardown needs.
+  mkdir -p "$sd"
   {
-    printf 'device=%s\n' "$dev"
-    printf 'remote_pid=%s\n' "$rpid"
-    printf 'remote_name=%s\n' "$rname"
-    printf 'rpath=%s\n' "$rpath"
-    printf 'mpath=%s\n' "$mysock"
+    printf 'device=%s\n' "$dev"; printf 'remote_pid=%s\n' "$rpid"; printf 'remote_name=%s\n' "$rname"
+    printf 'rpath=%s\n' "$rpath"; printf 'mpath=%s\n' "$mysock"
+    printf 'lfwd=%s\n' "$lfwd"; printf 'rfwd=%s\n' "$rfwd"
     printf 'my_sidecar=%s\n' "$my_sidecar"
     printf 'local_planted=%s/%s.json\n' "$(comm_sessions_dir)" "$rpid"
-    printf 'remote_planted=~/.claude/sessions/%s.json\n' "$mypid"
   } > "$sd/meta"
 
   log "planting sidecars + launching supervised tunnel ..."
@@ -159,7 +176,7 @@ claude_bridge() {
   # Wait for the forwarded socket + planted local sidecar to appear.
   local i
   for i in $(seq 1 20); do
-    if [ -S "$rpath" ] && [ -e "$(comm_sessions_dir)/$rpid.json" ]; then
+    if [ -S "$lfwd" ] && [ -e "$(comm_sessions_dir)/$rpid.json" ]; then
       ok "bridge up: '$rname' now reachable via SendMessage/ListAgents"
       log "  tear down with: communicate claude unbridge $dev"
       return 0
@@ -175,45 +192,38 @@ _claude_supervise() {
   local dev="$1"
   local sd; sd="$(_bridge_state_dir "$dev")"
   [ -f "$sd/meta" ] || { err "no bridge state for $dev"; return 1; }
-  # shellcheck disable=SC1090
-  local device remote_pid remote_name rpath mpath my_sidecar local_planted remote_planted
+  local device remote_pid remote_name rpath mpath lfwd rfwd my_sidecar local_planted
   while IFS='=' read -r k v; do
     case "$k" in
       device) device="$v";; remote_pid) remote_pid="$v";; remote_name) remote_name="$v";;
-      rpath) rpath="$v";; mpath) mpath="$v";; my_sidecar) my_sidecar="$v";;
-      local_planted) local_planted="$v";; remote_planted) remote_planted="$v";;
+      rpath) rpath="$v";; mpath) mpath="$v";; lfwd) lfwd="$v";; rfwd) rfwd="$v";;
+      my_sidecar) my_sidecar="$v";; local_planted) local_planted="$v";;
     esac
   done < "$sd/meta"
-
   local mypid="${mpath##*/}"; mypid="${mypid%.sock}"
 
   _replant() {
-    # Local: the remote session's sidecar, so *we* list it.
-    _claude_pick "$dev" "$remote_pid" > "$local_planted" 2>/dev/null || \
-      read_file_on "$dev" "~/.claude/sessions/$remote_pid.json" > "$local_planted" 2>/dev/null
-    # Remote: our own sidecar, so *they* list us (and can name-resolve replies).
-    write_file_on "$dev" "~/.claude/sessions/$mypid.json" < "$my_sidecar" 2>/dev/null || true
+    # Local: remote session's sidecar, socket path rewritten to our forward path.
+    _claude_pick "$dev" "$remote_pid" 2>/dev/null | _rewrite_sock "$lfwd" > "$local_planted" 2>/dev/null || true
+    # Remote: our sidecar, socket path rewritten to the remote forward path.
+    _rewrite_sock "$rfwd" < "$my_sidecar" 2>/dev/null | write_file_on "$dev" ".claude/sessions/$mypid.json" 2>/dev/null || true
   }
 
-  trap 'exit 0' TERM INT
+  local tpid=""
+  trap 'touch "$sd/stop"; [ -n "$tpid" ] && kill "$tpid" 2>/dev/null; exit 0' TERM INT
   while :; do
     _replant
-    # Bidirectional tunnel; mirror each socket to the identical path on the peer.
-    ssh "${COMM_SSH_OPTS[@]}" \
-        -o StreamLocalBindUnlink=yes -o ExitOnForwardFailure=yes -N \
-        -L "$rpath:$rpath" \
-        -R "$mpath:$mpath" \
-        "$dev" &
-    local tpid=$!
+    ssh "${COMM_SSH_OPTS[@]}" -o StreamLocalBindUnlink=yes -o ExitOnForwardFailure=yes -N \
+        -L "$lfwd:$rpath" -R "$rfwd:$mpath" "$dev" &
+    tpid=$!
     echo "$tpid" > "$sd/tunnel.pid"
-    # Re-plant every 5s while the tunnel lives (cheap; self-heals the sweep).
+    # Re-plant every 5s while the tunnel is alive (self-heals the discovery sweep).
     while kill -0 "$tpid" 2>/dev/null; do
       sleep 5
+      [ -f "$sd/stop" ] && break
       [ -e "$local_planted" ] || _replant
-      wait "$tpid" 2>/dev/null && break
     done
     wait "$tpid" 2>/dev/null
-    # Tunnel died; brief backoff then reconnect (unless we're being torn down).
     [ -f "$sd/stop" ] && break
     sleep 2
   done
@@ -234,10 +244,11 @@ claude_unbridge() {
   local sd
   for sd in "${dirs[@]}"; do
     [ -f "$sd/meta" ] || continue
-    local device remote_pid rpath mpath local_planted
+    local device remote_pid rpath mpath lfwd rfwd local_planted
     while IFS='=' read -r k v; do
       case "$k" in device) device="$v";; remote_pid) remote_pid="$v";;
-        rpath) rpath="$v";; mpath) mpath="$v";; local_planted) local_planted="$v";; esac
+        rpath) rpath="$v";; mpath) mpath="$v";; lfwd) lfwd="$v";; rfwd) rfwd="$v";;
+        local_planted) local_planted="$v";; esac
     done < "$sd/meta"
     local mypid="${mpath##*/}"; mypid="${mypid%.sock}"
 
@@ -248,11 +259,10 @@ claude_unbridge() {
     sleep 1
     # Remove the sidecars we planted (never touch real ones).
     [ -n "$local_planted" ] && rm -f "$local_planted" 2>/dev/null || true
-    on_device "$device" "rm -f ~/.claude/sessions/$mypid.json" 2>/dev/null || true
-    # Remove forwarded socket files (they are ours; the real sessions live under
-    # different pids). StreamLocalBindUnlink usually handles the local one.
-    [ -S "$rpath" ] && rm -f "$rpath" 2>/dev/null || true
-    on_device "$device" "rm -f $(comm_shq "$mpath")" 2>/dev/null || true
+    on_device "$device" "rm -f .claude/sessions/$mypid.json" 2>/dev/null || true
+    # Remove forwarded sockets (ours), never a real local session's socket.
+    [ -n "$lfwd" ] && [ -S "$lfwd" ] && [ -z "$(_claude_pick local "$remote_pid")" ] && rm -f "$lfwd" 2>/dev/null || true
+    [ -n "$rfwd" ] && on_device "$device" "rm -f $(comm_shq "$rfwd")" 2>/dev/null || true
     rm -rf "$sd"
     ok "bridge to $device removed"
   done

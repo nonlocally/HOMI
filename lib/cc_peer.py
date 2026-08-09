@@ -105,6 +105,11 @@ def _read_line(conn, timeout=0.4):
     return buf
 
 
+# Cap concurrent codex subprocesses so a burst of messages can't fork-bomb the
+# device with ssh+codex processes. Excess senders get a brief "busy" reply.
+_SLOTS = threading.Semaphore(4)
+
+
 def _handle(conn, opts):
     raw = _read_line(conn)
     try:
@@ -124,6 +129,21 @@ def _handle(conn, opts):
     sender = _addr_from(msg.get("from"))
     if not text or not sender:
         return
+
+    if not _SLOTS.acquire(blocking=False):
+        try:
+            deliver(sender, "[peer busy — too many concurrent requests, retry shortly]",
+                    opts.socket, from_name=opts.name, orig_msg_id=msg.get("msg_id"))
+        except Exception:
+            pass
+        return
+    try:
+        _run_and_reply(text, sender, msg, opts)
+    finally:
+        _SLOTS.release()
+
+
+def _run_and_reply(text, sender, msg, opts):
 
     # Hand the message to the Codex agent on the target device. Reuse the
     # hardened `communicate codex ask` (stdin-safe, thread-continuity). Passing
