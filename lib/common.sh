@@ -115,6 +115,17 @@ write_file_on() {
 # Shell-quote a single argument for safe interpolation into a remote command.
 comm_shq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
+# Like comm_shq, but let a leading ~ (or ~/…) expand on the REMOTE shell.
+# comm_shq single-quotes the whole path and suppresses tilde expansion; this
+# keeps ~ live (as "$HOME") while still quoting the remainder against spaces.
+comm_remote_path() {
+  case "$1" in
+    "~")   printf '"$HOME"';;
+    "~/"*) printf '"$HOME"/%s' "$(comm_shq "${1#\~/}")";;
+    *)     comm_shq "$1";;
+  esac
+}
+
 # Verify a device is reachable over ssh (or is local). Returns 0/1.
 device_reachable() {
   local dev="$1"

@@ -75,9 +75,9 @@ codex_ask() {
   local remote_cmd
   if [ -n "$tid" ]; then
     # Resume: no -s/-C/--color on resume; use config override + remote cd.
-    remote_cmd="cd $(comm_shq "$dir") 2>/dev/null; codex exec resume $(comm_shq "$tid") --json --skip-git-repo-check -c sandbox_mode='\"$sandbox\"' $mopt -"
+    remote_cmd="cd $(comm_remote_path "$dir") 2>/dev/null; codex exec resume $(comm_shq "$tid") --json --skip-git-repo-check -c sandbox_mode='\"$sandbox\"' $mopt -"
   else
-    remote_cmd="codex exec -s $sandbox -C $(comm_shq "$dir") --json --color never --skip-git-repo-check $mopt -"
+    remote_cmd="codex exec -s $sandbox -C $(comm_remote_path "$dir") --json --color never --skip-git-repo-check $mopt -"
   fi
 
   local out rc parsed newtid reply
