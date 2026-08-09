@@ -95,7 +95,7 @@ codex_unpeer() {
     if [ "$target" = "all" ] || [ "$device" = "$target" ] || [ "$(printf '%s' "$device" | tr '/@: ' '____')" = "$devsan" ]; then
       found=1
       log "removing codex peer '$name' ($device) ..."
-      [ -f "$sd/daemon.pid" ] && kill "$(cat "$sd/daemon.pid")" 2>/dev/null || true
+      [ -f "$sd/daemon.pid" ] && comm_kill_hard "$(cat "$sd/daemon.pid")"
       [ -n "$sidecar" ] && rm -f "$sidecar" 2>/dev/null || true
       [ -n "$socket" ] && rm -f "$socket" 2>/dev/null || true
       rm -rf "$sd"

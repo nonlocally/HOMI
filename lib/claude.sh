@@ -254,8 +254,8 @@ claude_unbridge() {
 
     log "tearing down bridge to $device ..."
     touch "$sd/stop"
-    [ -f "$sd/supervisor.pid" ] && kill "$(cat "$sd/supervisor.pid")" 2>/dev/null || true
-    [ -f "$sd/tunnel.pid" ]     && kill "$(cat "$sd/tunnel.pid")"     2>/dev/null || true
+    [ -f "$sd/supervisor.pid" ] && comm_kill_hard "$(cat "$sd/supervisor.pid")"
+    [ -f "$sd/tunnel.pid" ]     && comm_kill_hard "$(cat "$sd/tunnel.pid")"
     sleep 1
     # Remove the sidecars we planted (never touch real ones).
     [ -n "$local_planted" ] && rm -f "$local_planted" 2>/dev/null || true

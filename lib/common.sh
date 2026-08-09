@@ -73,6 +73,18 @@ comm_ensure_socket_dir() {
 
 comm_is_local() { [ "$1" = "local" ] || [ "$1" = "localhost" ]; }
 
+# Kill a pid for real. bash defers a trapped signal until a running `sleep`
+# finishes, so a single SIGTERM can be ignored for the whole nap; escalate to
+# SIGKILL if the process is still alive after a short grace period.
+comm_kill_hard() {
+  local pid="$1"; [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.25; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+
 # Run a command on a device. Args after the device are joined into one remote
 # command string. For local, runs under bash -c.
 on_device() {

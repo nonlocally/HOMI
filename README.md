@@ -86,14 +86,21 @@ communicate agents                                    # it now shows as `claude*
 communicate claude unbridge aadarshs-mac-mini-2
 ```
 
-**D. The router + a wake loop:**
+**D. The router + triggers (wake).** A message already *is* a wake (an inbound
+peer message resumes an idle/finished session), so `wake` isn't about a clock —
+it's about what *triggers* the message. A timer is one trigger; a new PR is another:
 
 ```sh
-communicate agents                       # the routing table: every reachable agent
-communicate route codex-here "status?"   # route to any agent by name
-communicate wake codex-here --every 300  # ping it every 5 min (keep-working / poll)
-communicate wake stop codex-here
+communicate agents                            # routing table: every reachable agent
+communicate route codex-here "status?"        # route to any agent by name
+
+communicate wake codex-here --every 300       # timer: nudge every 5 min (keep-working / poll)
+communicate wake codex-here --on-pr you/repo  # event: notify an agent when the repo gets a NEW PR
+communicate wake ls ; communicate wake stop codex-here
 ```
+
+So "when the repo gets a PR, a Codex reviewer wakes and looks at it" is one line:
+`communicate wake codex-reviewer --on-pr you/repo`.
 
 If something looks off: `communicate status` shows active bridges/peers, and
 `communicate down` tears everything down cleanly.

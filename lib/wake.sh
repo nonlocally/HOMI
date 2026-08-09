@@ -11,6 +11,17 @@
 
 _wake_state_dir() { printf '%s/wakes/%s\n' "$COMM_STATE" "$(printf '%s' "$1" | tr '/@: ' '____')"; }
 
+# Interruptible sleep: return 1 as soon as the stop-file appears. Avoids bash
+# deferring a trapped signal until a long `sleep` returns, so stop is prompt.
+_nap() {
+  local sd="$1" secs="$2" e=0
+  while [ "$e" -lt "$secs" ]; do
+    [ -f "$sd/stop" ] && return 1
+    sleep 1; e=$((e+1))
+  done
+  return 0
+}
+
 # --- pull-request poller (uses gh; still pure local/ssh, no extra transport) ---
 _gh_prs() {  # -> "number\ttitle\tauthor\turl" per open PR
   gh pr list --repo "$1" --state open --json number,title,author,url --limit 50 2>/dev/null | python3 -c '
@@ -90,8 +101,7 @@ _wake_loop() {
       if [ "$catchup" = 1 ]; then : > "$sd/seen"; else _gh_pr_numbers "$repo" > "$sd/seen" 2>/dev/null || : > "$sd/seen"; fi
     fi
     while :; do
-      [ -f "$sd/stop" ] && break
-      sleep "$every"; [ -f "$sd/stop" ] && break
+      _nap "$sd" "$every" || break
       local prs
       if ! prs="$(_gh_prs "$repo" 2>/dev/null)"; then
         fails=$((fails+1)); [ "$fails" -ge "$MAXFAIL" ] && { warn "wake '$name': gh failing repeatedly, exiting"; break; }; continue
@@ -112,8 +122,7 @@ _wake_loop() {
     done
   else
     while :; do
-      [ -f "$sd/stop" ] && break
-      sleep "$every"; [ -f "$sd/stop" ] && break
+      _nap "$sd" "$every" || break
       if router_route "$name" -- "$message" >/dev/null 2>&1; then
         n=$((n+1)); echo "$n" > "$sd/count"; fails=0
       else
@@ -134,7 +143,7 @@ wake_stop() {
     local nm; nm="$(sed -n 's/^name=//p' "$sd/meta")"
     if [ "$target" = all ] || [ "$nm" = "$target" ]; then
       found=1; touch "$sd/stop"
-      [ -f "$sd/loop.pid" ] && kill "$(cat "$sd/loop.pid")" 2>/dev/null || true
+      [ -f "$sd/loop.pid" ] && comm_kill_hard "$(cat "$sd/loop.pid")"
       rm -rf "$sd"; ok "stopped waking '$nm'"
     fi
   done
