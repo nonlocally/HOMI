@@ -49,6 +49,28 @@ Dispatch → Valves) to `/Users/aadarwal/src/aadarwal/communicate/bin/communicat
 3. `communicate codex peer local <peer-name> --dir <workdir> --auto`.
 4. Nothing else — the orchestrator discovers it on its next `list_agents`.
 
+## API callers: tool execution contract
+
+Model-attached tools execute server-side only on the **UI/chat** path. The
+bare OpenAI-compatible endpoint (`/api/chat/completions`) follows the OpenAI
+contract instead: pass `"tool_ids": ["agent_dispatch"]` in the request and
+handle the returned `tool_calls` yourself (execute, append a `tool` message,
+re-call). Without `tool_ids`, the model gets no tool specs at all — a small
+local model will then *roleplay* tool results, convincingly and wrongly.
+
+## Verification (2026-08-08, hands-off run)
+
+- Roster question in the UI → real `list_agents` execution ("Explored
+  list_agents" block): gds-agent + tidy3d-agent LIVE/dispatchable; the
+  maintainer and peer-agent correctly shown as
+  not dispatchable. No hallucinated agents.
+- "Have the gds agent generate a 10 micron radius ring resonator GDS" →
+  dispatch → codex → gdsfactory → file on disk, path relayed verbatim:
+  `/Users/aadarwal/agents/gds/out/ring-resonator-r10um.gds` (12,224 bytes).
+- tidy3d offline-validation ask → `scripts/minimal_220nm_soi_waveguide.py`,
+  validation **Passed**, estimated grid 231,525 cells (~27.5 nm), nothing
+  submitted to the cloud. Flexcompute key validated at configure time.
+
 ## Sharing beyond this machine (not enabled)
 
 v1 binds everything to localhost. To reach the UI from another tailnet
