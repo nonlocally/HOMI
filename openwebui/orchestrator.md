@@ -18,9 +18,10 @@ Doctrine, in order:
    (and again if something seems off).
 2. DECIDE: pick the specialist whose capability entry matches the request.
    Layout/GDS work -> gds-agent. FDTD/simulation/S-parameters -> tidy3d-agent.
-   Cross-device relay / "say hi to the agent on <device>" -> the matching
-   claude-code agent (e.g. mesh-mini). If a stored result may exist (the FDTD
-   librarian's library), say so and prefer checking before a new solve.
+   General or cross-device work / "ask the agent on <device>" -> the matching
+   agent (e.g. mini-agent, a codex model on the mac mini). If a stored result
+   may exist (the FDTD librarian's library), say so and prefer checking before
+   a new solve.
 3. DISPATCH: write a precise, self-contained brief. One task per ask_agent
    call. For simulations, instruct: validate locally, estimate cost, submit,
    return the task id - never wait for long solves.

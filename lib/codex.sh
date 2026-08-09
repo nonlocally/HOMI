@@ -36,10 +36,21 @@ sys.stdout.write(tid + "\t" + text)
 '
 }
 
+# Codex installs commonly land in ~/.local/bin (a symlink to the standalone
+# release) which is NOT on the PATH of a non-interactive ssh shell — so a bare
+# `command -v codex` over ssh misses it. Prepend the well-known codex locations
+# to PATH for every remote codex invocation so dispatch works without touching
+# the remote's shell profile. Override with $COMM_CODEX_PATH if codex lives
+# elsewhere on a device.
+_codex_path_prefix() {
+  printf 'export PATH="%s:$PATH"; ' \
+    "${COMM_CODEX_PATH:-\$HOME/.local/bin:\$HOME/.codex/packages/standalone/current/bin}"
+}
+
 # Is codex installed on a device? Prints version or empty.
 codex_probe() {
   local dev="$1"
-  on_device "$dev" 'command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null || true'
+  on_device "$dev" "$(_codex_path_prefix)"'command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null || true'
 }
 
 # Ask a Codex agent a question and print its reply.
@@ -72,12 +83,13 @@ codex_ask() {
   local tid=""; [ "$fresh" -eq 0 ] && [ -f "$tf" ] && tid="$(cat "$tf")"
 
   local mopt=""; [ -n "$model" ] && mopt="-m $(comm_shq "$model")"
+  local pp; pp="$(_codex_path_prefix)"
   local remote_cmd
   if [ -n "$tid" ]; then
     # Resume: no -s/-C/--color on resume; use config override + remote cd.
-    remote_cmd="cd $(comm_remote_path "$dir") 2>/dev/null; codex exec resume $(comm_shq "$tid") --json --skip-git-repo-check -c sandbox_mode='\"$sandbox\"' $mopt -"
+    remote_cmd="${pp}cd $(comm_remote_path "$dir") 2>/dev/null; codex exec resume $(comm_shq "$tid") --json --skip-git-repo-check -c sandbox_mode='\"$sandbox\"' $mopt -"
   else
-    remote_cmd="codex exec -s $sandbox -C $(comm_remote_path "$dir") --json --color never --skip-git-repo-check $mopt -"
+    remote_cmd="${pp}codex exec -s $sandbox -C $(comm_remote_path "$dir") --json --color never --skip-git-repo-check $mopt -"
   fi
 
   local out rc parsed newtid reply

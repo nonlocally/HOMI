@@ -89,18 +89,30 @@ address, so a **Claude-kind** registry agent is now dispatchable too:
 A remote **interactive** Claude only answers when it takes a turn (or approves
 the held peer message), so replies are best-effort for human-driven sessions.
 
-**Demo agent.** `scripts/mesh-demo-agent.sh up [device] [name]` stands up a
-lightweight always-on echo agent (`mesh-mini`, registry entry included) on a
-remote device and wires the two-way tunnel, so the relay is demonstrable
-every time regardless of any human. Verified 2026-08-09: in the UI, "Say hi to
-the mesh-mini agent on the mac mini" → `list_agents` + `ask_agent` →
-`hi back from mesh-mini on aadarshs-mac-mini-2` captured in chat
-(screenshot: `~/.local/state/communicate/openwebui/mesh-demo.png`). Tear down
-with `scripts/mesh-demo-agent.sh down`.
+## Real cross-device codex agent (mini-agent)
 
-Note: only one reverse-forward can own `orchestrator.sock` on a given remote at
-a time — don't run the mesh-demo tunnel and an auto-bridge to the same device
-simultaneously.
+For genuine generative work on another device, run a **codex** agent there —
+same dispatch as the local specialists, just a remote `device`. `mini-agent`
+(registry entry + `agents/mini/AGENTS.md` charter) is a codex assistant on
+`aadarshs-mac-mini-2`: `ask_agent("mini-agent", ...)` runs
+`communicate codex ask aadarshs-mac-mini-2 --dir /Users/aadarwal/agents/mini`
+and returns real output in ~5s. Verified 2026-08-09: "ask the mini agent for a
+random sentence" → an actual sentence generated on the mini.
+
+Codex PATH note: a standalone codex install lands at `~/.local/bin/codex`,
+which is off the PATH of a non-interactive ssh shell — so `communicate link`
+used to report "codex: not installed" for such hosts. `lib/codex.sh` now
+prepends `$HOME/.local/bin` and the standalone release bin to the remote PATH
+for every codex invocation (override with `$COMM_CODEX_PATH`); no remote
+dotfile edits needed. Remote `--dir` must be an **absolute** path (a leading
+`~` is not expanded through the ssh command quoting).
+
+**Echo transport demo (optional).** `scripts/mesh-demo-agent.sh up [device]
+[name]` stands up a lightweight always-on echo responder (`mesh-mini`) plus the
+two-way tunnel — a pure transport demo of the Claude reply-capture path when no
+real agent is available. Tear down with `scripts/mesh-demo-agent.sh down`. Note:
+only one reverse-forward can own `orchestrator.sock` on a remote at a time —
+don't run this tunnel and an auto-bridge to the same device at once.
 
 ## Sharing beyond this machine (not enabled)
 
