@@ -282,6 +282,167 @@ def recv(opts):
             pass
 
 
+def mailbox(opts):
+    """Stand up a persistent peer identity (a listening socket + a maintained
+    sidecar) that does NOT back a codex agent — instead every inbound message is
+    appended to a JSONL mailbox file. This is the orchestrator's return address:
+    it sends peer messages with from=<this socket> and then tails the mailbox
+    for the reply. Sweep-proof exactly like serve() (own pid names the sidecar,
+    re-planted every 3s)."""
+    if os.path.exists(opts.socket):
+        os.unlink(opts.socket)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(opts.socket)
+    os.chmod(opts.socket, 0o600)
+    srv.listen(64)
+    pid = os.getpid()
+    sidecar = os.path.join(opts.sessions_dir, "%d.json" % pid) if opts.sessions_dir else None
+    stop = threading.Event()
+    lock = threading.Lock()
+
+    def plant():
+        if not sidecar:
+            return
+        try:
+            tmp = sidecar + ".tmp"
+            with open(tmp, "w") as f:
+                # Compact separators: claude.sh locates a sidecar by grepping for
+                # "messagingSocketPath":"<sock>" with no spaces, like Claude's own.
+                json.dump(_sidecar_obj(opts.socket, opts.name, pid), f,
+                          separators=(",", ":"))
+            os.replace(tmp, sidecar)
+        except Exception as e:  # pragma: no cover
+            sys.stderr.write("plant failed: %s\n" % e)
+
+    def cleanup(*_a):
+        stop.set()
+        for p in (sidecar, opts.socket):
+            try:
+                if p and os.path.exists(p):
+                    os.unlink(p)
+            except OSError:
+                pass
+        os._exit(0)
+
+    def append(obj):
+        line = json.dumps(obj) + "\n"
+        with lock:
+            with open(opts.mailbox, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+
+    def handle(conn):
+        raw = _read_line(conn)
+        try:
+            conn.close()
+        except OSError:
+            pass
+        line = raw.split(b"\n", 1)[0].strip()
+        if not line:
+            return
+        try:
+            msg = json.loads(line.decode("utf-8", "replace"))
+        except Exception:
+            return
+        if msg.get("type") != "user":
+            return
+        text = _extract_text((msg.get("message") or {}).get("content"))
+        if not text:
+            return
+        append({"ts": time.time(), "from": _addr_from(msg.get("from")) or "",
+                "text": text})
+
+    def replanter():
+        while not stop.wait(3):
+            plant()
+
+    open(opts.mailbox, "a").close()  # ensure the file exists
+    plant()
+    threading.Thread(target=replanter, daemon=True).start()
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+    sys.stderr.write("cc_peer mailbox %s (pid %d); sidecar=%s mailbox=%s\n"
+                     % (opts.name, pid, sidecar, opts.mailbox))
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except KeyboardInterrupt:
+            cleanup()
+        except OSError:
+            continue
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+
+def respond(opts):
+    """Listen on a socket; on the first real inbound message, reply to its
+    `from` address with a fixed text, then exit. A cooperating-peer stand-in:
+    it lets a cross-device reply round-trip be tested deterministically without
+    a human-driven Claude session on the far end. Returns 0 on reply sent."""
+    if os.path.exists(opts.socket):
+        os.unlink(opts.socket)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(opts.socket)
+    os.chmod(opts.socket, 0o600)
+    srv.listen(8)
+    if not opts.loop:
+        srv.settimeout(opts.timeout)
+    try:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                sys.stderr.write("respond: timed out\n")
+                return 2
+            raw = _read_line(conn, timeout=1.0)
+            try:
+                conn.close()
+            except OSError:
+                pass
+            line = raw.split(b"\n", 1)[0].strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if msg.get("type") != "user":
+                continue
+            sender = _addr_from(msg.get("from"))
+            if not sender:
+                continue
+            # Echo the request body back with the fixed reply, so a caller can
+            # see its message made the full round trip.
+            asked = _extract_text((msg.get("message") or {}).get("content"))
+            asked = _WRAP_INNER(asked)
+            body = opts.reply
+            if asked:
+                body = "%s (you said: %s)" % (opts.reply, asked[:200])
+            try:
+                deliver(sender, body, opts.socket, from_name=opts.name)
+                sys.stderr.write("respond: replied to %s\n" % sender)
+                if not opts.loop:
+                    return 0
+            except Exception as e:
+                sys.stderr.write("respond: reply failed: %s\n" % e)
+                if not opts.loop:
+                    return 1
+    finally:
+        try:
+            os.unlink(opts.socket)
+        except OSError:
+            pass
+
+
+import re as _re
+_WRAP_RE = _re.compile(r"<cross-session-message[^>]*>\s*(.*?)\s*</cross-session-message>",
+                       _re.DOTALL)
+
+
+def _WRAP_INNER(text):
+    m = _WRAP_RE.search(text or "")
+    return m.group(1).strip() if m else (text or "").strip()
+
+
 def main():
     ap = argparse.ArgumentParser(prog="cc_peer")
     sub = ap.add_subparsers(dest="role", required=True)
@@ -307,11 +468,28 @@ def main():
     r.add_argument("--socket", required=True)
     r.add_argument("--timeout", type=float, default=60)
 
+    mb = sub.add_parser("mailbox")
+    mb.add_argument("--socket", required=True)
+    mb.add_argument("--name", default="orchestrator")
+    mb.add_argument("--sessions-dir", dest="sessions_dir", required=True)
+    mb.add_argument("--mailbox", required=True, help="JSONL file inbound messages are appended to")
+
+    rp = sub.add_parser("respond")
+    rp.add_argument("--socket", required=True)
+    rp.add_argument("--reply", required=True, help="text to reply to the sender with")
+    rp.add_argument("--name", default="responder", help="from-name attribution on the reply")
+    rp.add_argument("--timeout", type=float, default=60)
+    rp.add_argument("--loop", action="store_true", help="keep answering instead of exiting after one reply")
+
     a = ap.parse_args()
     if a.role == "serve":
         serve(a)
     elif a.role == "recv":
         sys.exit(recv(a))
+    elif a.role == "mailbox":
+        mailbox(a)
+    elif a.role == "respond":
+        sys.exit(respond(a))
     else:
         deliver(a.to, a.text, a.from_sock, from_name=a.name)
 

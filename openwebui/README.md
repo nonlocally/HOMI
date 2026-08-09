@@ -71,6 +71,37 @@ local model will then *roleplay* tool results, convincingly and wrongly.
   validation **Passed**, estimated grid 231,525 cells (~27.5 nm), nothing
   submitted to the cloud. Flexcompute key validated at configure time.
 
+## Cross-device relay (v0.2 — remote Claude agents)
+
+The orchestrator has its own peer identity: a persistent mailbox daemon
+(`cc_peer.py mailbox`) listening on `/tmp/cc-socks/orchestrator.sock` with a
+maintained sidecar named `orchestrator`. `ask_agent` uses it as a return
+address, so a **Claude-kind** registry agent is now dispatchable too:
+
+1. resolve the agent via `communicate whereis`; if it isn't reachable locally,
+   auto-bridge it (`communicate claude bridge <device> <session>`) using the
+   orchestrator socket as `$CLAUDE_CODE_MESSAGING_SOCKET`;
+2. `communicate send <socket> --as orchestrator` (from = the orchestrator
+   socket, reverse-forwarded to the remote so replies route home);
+3. poll `mailbox.jsonl` for the reply, unwrap the cross-session envelope,
+   return it.
+
+A remote **interactive** Claude only answers when it takes a turn (or approves
+the held peer message), so replies are best-effort for human-driven sessions.
+
+**Demo agent.** `scripts/mesh-demo-agent.sh up [device] [name]` stands up a
+lightweight always-on echo agent (`mesh-mini`, registry entry included) on a
+remote device and wires the two-way tunnel, so the relay is demonstrable
+every time regardless of any human. Verified 2026-08-09: in the UI, "Say hi to
+the mesh-mini agent on the mac mini" → `list_agents` + `ask_agent` →
+`hi back from mesh-mini on aadarshs-mac-mini-2` captured in chat
+(screenshot: `~/.local/state/communicate/openwebui/mesh-demo.png`). Tear down
+with `scripts/mesh-demo-agent.sh down`.
+
+Note: only one reverse-forward can own `orchestrator.sock` on a given remote at
+a time — don't run the mesh-demo tunnel and an auto-bridge to the same device
+simultaneously.
+
 ## Sharing beyond this machine (not enabled)
 
 v1 binds everything to localhost. To reach the UI from another tailnet
