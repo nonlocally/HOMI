@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# communicate — bridge Claude Code and Codex agents across devices over
+# Tailscale + SSH. Transport is strictly ssh; agents are strictly Claude Code
+# and Codex. Nothing else by design.
+#
+#   communicate link    <device>                 verify the ssh/Tailscale substrate
+#   communicate ls      [device]                 list agents on a device
+#   communicate status                           show active bridges / codex peers
+#   communicate down                             tear everything down
+#
+#   communicate claude bridge   <device> [name|pid|newest]
+#   communicate claude unbridge <device|all>
+#
+#   communicate codex  ask   <device> [--dir D] [--thread N] [--new] [--auto] <message>
+#   communicate codex  peer  <device> [name]     present a remote Codex as a native Claude peer
+#   communicate codex  unpeer <device|all>
+#   communicate codex  forget <device|all>
+#
+#   communicate send <peer-name|socket-path> <message>    raw inject into a peer socket
+#
+set -o pipefail
+COMM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export COMM_HOME
+# shellcheck source=lib/common.sh
+source "$COMM_HOME/lib/common.sh"
+# shellcheck source=lib/claude.sh
+source "$COMM_HOME/lib/claude.sh"
+# shellcheck source=lib/codex.sh
+source "$COMM_HOME/lib/codex.sh"
+# shellcheck source=lib/peer.sh
+source "$COMM_HOME/lib/peer.sh"
+
+usage() { sed -n '2,25p' "$COMM_HOME/bin/communicate" | sed 's/^# \{0,1\}//'; }
+
+cmd_link() {
+  local dev="${1:-}"; [ -n "$dev" ] || die "usage: communicate link <device>"
+  log "checking substrate for '$dev' ..."
+  local ts; ts="$(tailscale_bin)"
+  if [ -n "$ts" ] && ! comm_is_local "$dev"; then
+    local line; line="$("$ts" status 2>/dev/null | awk -v d="$dev" '$2==d || $1==d {print; found=1} END{}')"
+    [ -n "$line" ] && ok "tailscale: $line" || warn "tailscale: '$dev' not seen in tailnet (may still resolve via ssh config)"
+  fi
+  if device_reachable "$dev"; then
+    ok "ssh: reachable"
+    local rc; rc="$(codex_probe "$dev")"
+    [ -n "$rc" ] && ok "codex: $rc" || warn "codex: not installed on $dev"
+    local cs; cs="$(on_device "$dev" 'ls "$HOME"/.claude/sessions/*.json 2>/dev/null | wc -l | tr -d " "')"
+    ok "claude: ${cs:-0} session sidecar(s) present"
+  else
+    die "ssh: NOT reachable — check Tailscale is up and ssh works: ssh $dev true"
+  fi
+}
+
+cmd_ls() {
+  local dev="${1:-}"
+  if [ -z "$dev" ]; then
+    log "local Claude sessions:"; claude_list local
+    log "active bridges:"; cmd_status quiet
+    return 0
+  fi
+  log "Claude sessions on $dev:"; claude_list "$dev"
+  local rc; rc="$(codex_probe "$dev")"
+  [ -n "$rc" ] && log "codex on $dev: $rc" || log "codex on $dev: (not installed)"
+}
+
+cmd_status() {
+  local quiet="${1:-}"
+  local any=0 sd
+  for sd in "$COMM_STATE"/bridges/*/; do
+    [ -f "$sd/meta" ] || continue; any=1
+    local device remote_name; device=""; remote_name=""
+    while IFS='=' read -r k v; do case "$k" in device) device="$v";; remote_name) remote_name="$v";; esac; done < "$sd/meta"
+    local up="down"; [ -f "$sd/supervisor.pid" ] && kill -0 "$(cat "$sd/supervisor.pid")" 2>/dev/null && up="up"
+    printf '  claude-bridge  %-24s peer=%-20s [%s]\n' "$device" "${remote_name:-?}" "$up" >&2
+  done
+  for sd in "$COMM_STATE"/peers/*/; do
+    [ -f "$sd/meta" ] || continue; any=1
+    local device name; device=""; name=""
+    while IFS='=' read -r k v; do case "$k" in device) device="$v";; name) name="$v";; esac; done < "$sd/meta"
+    local up="down"; [ -f "$sd/daemon.pid" ] && kill -0 "$(cat "$sd/daemon.pid")" 2>/dev/null && up="up"
+    printf '  codex-peer     %-24s name=%-20s [%s]\n' "$device" "${name:-?}" "$up" >&2
+  done
+  [ "$any" -eq 0 ] && [ "$quiet" != quiet ] && warn "nothing active"
+  return 0
+}
+
+cmd_down() {
+  claude_unbridge all 2>/dev/null || true
+  codex_unpeer all 2>/dev/null || true
+  ok "all bridges and peers torn down"
+}
+
+cmd_claude() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    bridge)   claude_bridge "$@";;
+    unbridge) claude_unbridge "$@";;
+    list|ls)  claude_list "$@";;
+    *) die "usage: communicate claude {bridge|unbridge|list} ...";;
+  esac
+}
+
+cmd_codex() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    ask)    codex_ask "$@";;
+    peer)   codex_peer "$@";;
+    unpeer) codex_unpeer "$@";;
+    forget) codex_forget "$@";;
+    probe)  codex_probe "$@";;
+    *) die "usage: communicate codex {ask|peer|unpeer|forget|probe} ...";;
+  esac
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    link)    cmd_link "$@";;
+    ls|list) cmd_ls "$@";;
+    status)  cmd_status;;
+    down)    cmd_down;;
+    claude)  cmd_claude "$@";;
+    codex)   cmd_codex "$@";;
+    send)    peer_send "$@";;
+    # internal entrypoints (not for humans)
+    __supervise-claude) _claude_supervise "$@";;
+    __codex-peer-serve) _codex_peer_serve "$@";;
+    ''|-h|--help|help) usage;;
+    *) err "unknown command: $cmd"; usage; exit 1;;
+  esac
+}
+main "$@"

@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+*.pyc
+__pycache__/
+# runtime state lives in $XDG_STATE_HOME/communicate, never in the repo — but
+# guard against accidental local copies:
+/state/
+/.state/
