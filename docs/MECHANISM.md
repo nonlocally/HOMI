@@ -126,3 +126,16 @@ Everything is the same primitives Claude already trusts: sidecar files, unix
 sockets, newline-JSON. The only new ingredient is an SSH tunnel that makes a
 remote socket look local, and a small adapter that lets a non-Claude agent speak
 the protocol.
+
+## 8. Addendum (2026-08-15): discovery lists only pid-shaped sidecar filenames
+
+A planted sidecar named `pm-foo.json` **survives** the sweep (live pid in the
+`pid` field, socket answers the probe) but **never appears in `ListAgents`**.
+The identical object written as `3999901.json` is listed immediately. So the
+filename is part of the contract: it must look like `<pid>.json` (numeric),
+while the sweep's is-the-pid-alive test reads the *field*. The two are not
+cross-checked — a numeric filename far above the real pid range with a live
+pid in the field is both listed and sweep-proof. `homi` therefore plants
+deterministic numeric filenames (`3000000 + crc32(name) % 900000`,
+linear-probed on collision; macOS `pid_max` is 99998). Verified live on
+Claude Code 2.1.x.

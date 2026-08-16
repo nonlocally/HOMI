@@ -26,6 +26,9 @@
 #   communicate wake    <name> --on-pr <owner/repo> [--every SEC] [--catchup]  new-PR trigger
 #   communicate wake    stop <name|all> | wake ls
 #
+#   communicate homi      {start|stop|status|claim|release|send|inbox|link|unlink}
+#                       the homi: durable identities, mailboxes, device links
+#
 set -o pipefail
 COMM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export COMM_HOME
@@ -43,8 +46,12 @@ source "$COMM_HOME/lib/router.sh"
 source "$COMM_HOME/lib/wake.sh"
 # shellcheck source=lib/directory.sh
 source "$COMM_HOME/lib/directory.sh"
+# shellcheck source=lib/homi.sh
+source "$COMM_HOME/lib/homi.sh"
 
-usage() { sed -n '2,30p' "$COMM_HOME/bin/communicate" | sed 's/^# \{0,1\}//'; }
+# Print the whole leading comment header (stops at the first non-comment line),
+# so the usage text can grow without a hardcoded line range going stale.
+usage() { awk 'NR < 2 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$COMM_HOME/bin/communicate"; }
 
 cmd_link() {
   local dev="${1:-}"; [ -n "$dev" ] || die "usage: communicate link <device>"
@@ -142,6 +149,7 @@ main() {
     whereis) router_whereis "$@" && echo;;
     route)   router_route "$@";;
     wake)    wake_cmd "$@";;
+    homi)    homi_cmd "$@";;
     # internal entrypoints (not for humans)
     __supervise-claude) _claude_supervise "$@";;
     __codex-peer-serve) _codex_peer_serve "$@";;
