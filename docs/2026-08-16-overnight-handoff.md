@@ -78,8 +78,12 @@ the far inbox; the transcript resumed-able by `claude --resume <sid>` there.
   `live [boxed-probed]`; mail both ways with correct attribution; spool
   cleared on ack; `ENETUNREACH` to 1.1.1.1 — **mail is the box's only
   egress**.
-- Both real daemons remain up and linked (mini-2 ↔ air-2, seats granted both
-  ways) — that state is the installed fabric, not test residue.
+- The mini-2 ↔ air-2 links (seats granted both ways) are installed fabric, not
+  test residue. air-2 is a laptop and sleeps; when it went offline overnight
+  the mini-2 daemon stayed up untouched (decoupled failure domains, exactly as
+  designed) — air-2's launchd daemon resumes on wake and the links reconnect,
+  draining any queued mail. If `homi status` on air-2 is unreachable in the
+  morning, wake the laptop; nothing needs restarting.
 
 ## Frictions dogfood found (all fixed + committed)
 
