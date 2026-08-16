@@ -36,7 +36,7 @@ function dataDir(): string {
 function stabilizeVendor(): string {
   const dst = path.join(dataDir(), "daemon", VERSION);
   fs.mkdirSync(dst, { recursive: true });
-  for (const f of ["homi.py", "cc_peer.py", "homi_seat.py", "VERSION"]) {
+  for (const f of ["homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py", "VERSION"]) {
     const src = path.join(pkgRoot, "vendor", f);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dst, f));
   }

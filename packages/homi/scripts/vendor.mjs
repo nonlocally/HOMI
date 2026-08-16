@@ -12,7 +12,8 @@ const lib = join(repo, "lib");
 const vendor = join(pkg, "vendor");
 mkdirSync(vendor, { recursive: true });
 
-for (const f of ["homi.py", "cc_peer.py", "homi_seat.py"]) {
+const files = ["homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py"];
+for (const f of files) {
   const src = join(lib, f);
   if (!existsSync(src)) throw new Error("missing kernel file: " + src);
   copyFileSync(src, join(vendor, f));
@@ -21,4 +22,4 @@ for (const f of ["homi.py", "cc_peer.py", "homi_seat.py"]) {
 let sha = "unknown";
 try { sha = execSync("git rev-parse --short HEAD", { cwd: repo }).toString().trim(); } catch {}
 writeFileSync(join(vendor, "VERSION"), `communicate@${sha}\n`);
-console.log(`vendored homi.py, cc_peer.py, homi_seat.py (communicate@${sha})`);
+console.log(`vendored ${files.join(", ")} (communicate@${sha})`);
