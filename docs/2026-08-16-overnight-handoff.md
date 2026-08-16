@@ -1,8 +1,9 @@
 # Overnight handoff — the homi fabric, v2 complete
 
 *2026-08-16, overnight session. Everything below is committed on `fabric-v2`
-(pushed), tested (161/161 across 10 suites), and live-proven on real hardware
-where noted. Nothing in `~/HOMI` was touched or deleted.*
+(pushed), tested (**171/171 across 11 suites**), live-proven on real hardware
+where noted, and hardened against an adversarial code review. Nothing in
+`~/HOMI` was touched or deleted.*
 
 ## What exists now, in one paragraph
 
@@ -114,6 +115,35 @@ the far inbox; the transcript resumed-able by `claude --resume <sid>` there.
   TCC-fragile — measured); `--network none` default posture; per-agent
   socket pair = attribution by construction.
 - Seats: opt-in per link, revocable; respond fails closed.
+
+## Security review (ran it on my own work, fixed everything)
+
+I dispatched an adversarial reviewer over the whole ~4,800-line diff. Findings
+clustered at the new trust boundaries (the core message plane came back clean —
+lock ordering sound, no deadlocks). Two were genuinely critical; all are now
+fixed with regression tests that fail if the guard regresses:
+
+- **Fixed — fleet status oracle** (critical): a fleet peer could call `status`
+  unauthenticated and get your whole roster, defeating the name-masking. Now
+  every control op needs the token once a fleet link exists.
+- **Fixed — authorized_keys injection** (critical): a crafted card could smuggle
+  a newline and write a second, unrestricted key. Card fields are now
+  strict-validated; malformed cards are refused.
+- **Fixed** — boxed re-offer dedup (double-delivery after a lost ack), boxed
+  drain thread leak on release, arrive/deliver cursor race, `respond --deny`
+  auto-approving on a highlighted Yes, `move --as` rsync injection, and a
+  concurrent-autostart split-brain. See the fix commit for the 1:1 list.
+
+Two MINOR items I judged as follow-ups rather than fix-tonight (both low-risk,
+noted here so they're not lost):
+
+- **M-3** — a granted fleet peer varying its `from` name mints a new proxy
+  (socket + sidecar + thread) each time; a semi-trusted peer could exhaust
+  resources. Wants a per-fleet proxy cap — a small policy decision I'd rather
+  you weigh in on.
+- **M-5** — `depart` has a sub-millisecond window (under `claim_mu`) where a
+  send between release and proxy-rebind sees "unknown identity". Tiny; the
+  clean fix is to build the proxy entry and swap atomically.
 
 ## Deferred to you (deliberately)
 

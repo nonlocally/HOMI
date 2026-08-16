@@ -247,7 +247,7 @@ communicate homi move worker mini-1                         # relocate the agent
 communicate homi status --json        # routes, measured liveness, queues
 ```
 
-Tests (161 checks, all green): `test-homi-core.sh` 46 · `test-homi-ask.sh` 10 ·
+Tests (171 checks, all green): `test-homi-core.sh` 46 · `test-homi-ask.sh` 10 ·
 `test-homi-link.sh` 23 · `test-homi-seat.sh` 10 · `test-homi-seat-link.sh` 9 ·
 `test-homi-spawn.sh` 10 · `test-homi-mcp.sh` 5 · `test-homi-fleet.sh` 17 ·
 `test-homi-move.sh` 17 · `test-homi-boxed.sh` 14 (+ `test-homi-persist.sh` 6,
