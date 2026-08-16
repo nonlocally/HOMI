@@ -29,6 +29,12 @@ if (JSON.stringify(l1.tools.map(t=>t.name)) === JSON.stringify(l2.tools.map(t=>t
   ok("tools/list order is stable across calls");
 else bad("tools/list order drifted");
 
+// 1b. the server must TEACH on connect: instructions reach the client.
+const instr = client.getInstructions ? client.getInstructions() : null;
+if (instr && /DURABLE IDENTITY/.test(instr) && /ESCAPE HATCH/.test(instr))
+  ok("server sends orientation instructions on connect");
+else bad("no/short instructions: " + String(instr).slice(0, 80));
+
 // 2. claim + send via MCP tools -> mail lands in the daemon's store.
 await client.callTool({ name: "claim", arguments: { name: "mcpdemo" } });
 const sent = await client.callTool({

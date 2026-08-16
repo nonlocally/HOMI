@@ -251,6 +251,24 @@ const TOOLS: Tool[] = [
            { timeoutMs: 180_000 }),
   },
   {
+    name: "reply",
+    description:
+      "Answer a question you received via ask. The message you got carries a return token — pass it here with your answer, and the asker's blocked call resolves. This is how a worker records a CONFIRMED result.",
+    schema: {
+      token: z.string().describe("the return token from the incoming message"),
+      text: z.string(),
+      from: z.string().optional(),
+    },
+    run: (a) => call({ op: "reply", token: a.token, text: a.text, from: a.from || "" }),
+  },
+  {
+    name: "seat_stop",
+    description:
+      "Interrupt whatever a seat is running (sends Escape). Use when a seat is stuck or working on the wrong thing; it does not kill the seat.",
+    schema: { seat: z.string() },
+    run: (a) => call({ op: "seat", sub: "interrupt", seat: a.seat }, { timeoutMs: 20_000 }),
+  },
+  {
     name: "link_status",
     description: "Device links: endpoint, kind (device/fleet), seat grant, queue depth, dead-letters, last error.",
     schema: {},
@@ -261,8 +279,39 @@ const TOOLS: Tool[] = [
   },
 ];
 
+// Shown to the model the moment an MCP client connects. Without it an agent
+// gets 24 tool names and no theory of the fabric — written from observed
+// confusion, not aspiration.
+const INSTRUCTIONS = `homi gives you a DURABLE IDENTITY and a MAILBOX that outlive your process.
+
+Start with whoami (who am I here?) and agents_list (who else exists, with MEASURED
+liveness). If you have held mail, inbox_read shows it.
+
+TWO PLANES — pick the right one:
+• MESSAGES are the default for agent-to-agent. send/ask reach an agent BY NAME even
+  if it is not running: mail is stored durably and delivered as a turn when it wakes.
+  Never poll for an agent to come up — just send. Use ask when you need the answer
+  (it blocks for a correlated reply); use send to fire and forget; group_send for many.
+  Address another device as name@device.
+• SEATS are the ESCAPE HATCH for surfaces you CANNOT mailbox — a cluster login shell,
+  a REPL, a TUI. seat_state is the non-blocking done-check (one word); never scrape
+  seat_read to find out whether something finished. seat_wait blocks until idle.
+  seat_respond is fail-closed: it refuses rather than guess at an approval prompt.
+  Do NOT drive another agent through a seat — that is what send/ask are for.
+
+CREATING AGENTS: spawn claims an identity, launches the CLI in a seat, binds them, and
+adopts the name — the result is reachable by mail AND watchable. fan spawns a team,
+consult asks another model one question. move relocates an agent (transcript + mailbox
++ identity) to another device with its address alive the whole way.
+
+WHEN YOU ARE BLOCKED on a decision only the human can make, call notify with a real
+reason — do not stall silently.
+
+Not exposed here on purpose: federation, grants, and linking are human trust decisions
+made on the CLI, never by an agent.`;
+
 export function buildServer(): McpServer {
-  const server = new McpServer({ name: "homi", version: "0.1.0" });
+  const server = new McpServer({ name: "homi", version: "0.1.0" }, { instructions: INSTRUCTIONS });
   for (const t of TOOLS) {
     server.registerTool(
       t.name,
