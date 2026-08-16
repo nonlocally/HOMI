@@ -185,6 +185,13 @@ if [ -f "$PMS/routes.json" ] && python3 -c "import json;json.load(open('$PMS/rou
 else bad "routes.json materialized"; fi
 "$COMM" pm stop >/dev/null 2>&1
 
+echo "== section 7: retitle (dormant rename-sync)"
+FT="$T/fake-transcript.jsonl"
+echo '{"type":"user","message":{"role":"user","content":"hi"}}' > "$FT"
+if "$COMM" pm retitle "$FT" my-new-name >/dev/null 2>&1; then ok "retitle runs"; else bad "retitle runs"; fi
+if tail -1 "$FT" | grep -q '"customTitle": "my-new-name"'; then ok "custom-title appended"; else bad "custom-title appended"; fi
+if tail -1 "$FT" | grep -q '"sessionId": "fake-transcript"'; then ok "sessionId from filename"; else bad "sessionId from filename"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

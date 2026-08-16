@@ -1321,15 +1321,42 @@ def cli_call(argv):
     return 1
 
 
+def cli_retitle(argv):
+    """Dormant rename-sync (beam's method): append a custom-title record to a
+    transcript so the session carries the fabric name when next resumed."""
+    if len(argv) != 2:
+        sys.stderr.write("usage: postmaster.py retitle <transcript.jsonl|session-uuid> <name>\n")
+        return 1
+    target, name = argv
+    path = target
+    if not os.path.exists(path):
+        import glob
+        base = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR")
+                            or os.path.expanduser("~/.claude"), "projects")
+        hits = glob.glob(os.path.join(base, "*", target + ".jsonl"))
+        if not hits:
+            sys.stderr.write("no transcript found for %s\n" % target)
+            return 1
+        path = hits[0]
+    sid = os.path.basename(path)[:-len(".jsonl")]
+    rec = {"type": "custom-title", "customTitle": name, "sessionId": sid}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+    print("retitled %s -> %s" % (sid, name))
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
-        sys.stderr.write("usage: postmaster.py {daemon|call ...}\n")
+        sys.stderr.write("usage: postmaster.py {daemon|call|retitle|selfname} ...\n")
         sys.exit(1)
     mode = sys.argv[1]
     if mode == "daemon":
         PM().run()
     elif mode == "selfname":
         print(self_device())
+    elif mode == "retitle":
+        sys.exit(cli_retitle(sys.argv[2:]))
     elif mode == "call":
         sys.exit(cli_call(sys.argv[2:]))
     else:

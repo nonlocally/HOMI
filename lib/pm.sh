@@ -31,8 +31,39 @@ pm_cmd() {
     inbox)     pm_inbox "$@";;
     install)   pm_install "$@";;
     uninstall) pm_uninstall "$@";;
-    *) die "usage: communicate pm {start|stop|status [--json]|claim|release|send|inbox|link|unlink|install|uninstall} ...";;
+    adopt)     pm_adopt "$@";;
+    retitle)   python3 "$PM_PY" retitle "$@";;
+    *) die "usage: communicate pm {start|stop|status [--json]|claim|release|send|inbox|link|unlink|install|uninstall|adopt|retitle} ...";;
   esac
+}
+
+# Rename-sync, write side. A LIVE session's name can only change through its
+# composer (/rename is a local command, not message content — a socket-
+# delivered "/rename" is just text to the model), so live adoption rides
+# anu's `pane send`. Dormant transcripts take the appended custom-title
+# record (`pm retitle`, beam's proven method).
+pm_adopt() {
+  local name="" pane=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pane) pane="${2:-}"; shift 2 || break;;
+      *) [ -z "$name" ] && name="$1"; shift;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: communicate pm adopt <name> --pane <paneid>"
+  [ -n "$pane" ] || die "adopt needs --pane <paneid> (live rename rides pane send); for a dormant session use: communicate pm retitle <uuid> $name"
+  command -v pane >/dev/null 2>&1 || die "the 'pane' bin is not on PATH (anu is required for live adopt)"
+  pane send "$pane" "/rename $name" || die "pane send failed"
+  local i sess; sess="$(comm_sessions_dir)"
+  for i in $(seq 1 12); do
+    if grep -l "\"name\":\"$name\"" "$sess"/*.json >/dev/null 2>&1; then
+      ok "session in $pane adopted the name '$name' (sidecar confirms)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  warn "sent /rename but no sidecar shows '$name' yet — check the pane"
+  return 1
 }
 
 # ---- persistence: launchd (macOS) / systemd --user (linux) -------------------
