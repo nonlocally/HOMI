@@ -1328,6 +1328,8 @@ def main():
     mode = sys.argv[1]
     if mode == "daemon":
         PM().run()
+    elif mode == "selfname":
+        print(self_device())
     elif mode == "call":
         sys.exit(cli_call(sys.argv[2:]))
     else:
