@@ -2707,28 +2707,28 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
     client as `caller`, the daemon passes its own op dispatch. One
     implementation, so `homi move` and the MCP `move` tool can never drift.
     Returns {ok, err?, lines[], ...}."""
-    out = []
+    report = []
     # Names/devices flow into ssh + rsync REMOTE paths (passed through the remote
     # login shell). Validate strictly so a crafted name can't inject a command.
     NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
     DEV_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     if not NAME_RE.match(name):
-        return {"ok": False, "err": "invalid agent name\n", "lines": out}
+        return {"ok": False, "err": "invalid agent name\n", "lines": report}
     if not DEV_RE.match(dev):
-        return {"ok": False, "err": "invalid device name\n", "lines": out}
+        return {"ok": False, "err": "invalid device name\n", "lines": report}
     if as_name is not None and not NAME_RE.match(as_name):
-        return {"ok": False, "err": "invalid --as name (want [a-z0-9][a-z0-9._-])\n", "lines": out}
+        return {"ok": False, "err": "invalid --as name (want [a-z0-9][a-z0-9._-])\n", "lines": report}
     if addr is not None and (addr.startswith("-") or "\n" in addr
                              or not re.match(r"^[A-Za-z0-9._@-]+$", addr)):
-        return {"ok": False, "err": "invalid --addr\n", "lines": out}
+        return {"ok": False, "err": "invalid --addr\n", "lines": report}
     if fork and not as_name:
-        return {"ok": False, "err": ("--fork needs --as <new-name>: two live claimants of one " "name on two devices would diverge silently\n"), "lines": out}
+        return {"ok": False, "err": ("--fork needs --as <new-name>: two live claimants of one " "name on two devices would diverge silently\n"), "lines": report}
 
     pre = caller({"op": "premove", "name": name})
     if not pre.get("ok"):
-        return {"ok": False, "err": ((pre.get("err") or "premove failed")), "lines": out}
+        return {"ok": False, "err": ((pre.get("err") or "premove failed")), "lines": report}
     if pre.get("live") and not fork:
-        return {"ok": False, "err": ("%s has a LIVE session here — stop it first, or --fork " "--as <new-name> to copy a snapshot\n" % name), "lines": out}
+        return {"ok": False, "err": ("%s has a LIVE session here — stop it first, or --fork " "--as <new-name> to copy a snapshot\n" % name), "lines": report}
     transcript = _find_transcript(name)
     sid = os.path.basename(transcript)[:-6] if transcript else None
     lproj = _last_cwd(transcript) if transcript else None
@@ -2738,15 +2738,15 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         st = caller({"op": "status"})
         addr = ((st.get("links") or {}).get(dev) or {}).get("addr")
     if not addr:
-        return {"ok": False, "err": ("no ssh address for %s (link it with --addr, or pass --addr here)" % dev), "lines": out}
+        return {"ok": False, "err": ("no ssh address for %s (link it with --addr, or pass --addr here)" % dev), "lines": report}
 
     if dry:
-        out.append("agent     : %s%s" % (name, " (LIVE - fork)" if pre.get("live") else ""))
-        out.append("transcript: %s" % (transcript or "(none - mailbox-only identity)"))
-        out.append("mailbox   : %s lines, cursor %s" % (pre.get("lines"), pre.get("cursor")))
-        out.append("target    : %s via %s" % (dev, addr))
-        out.append("mode      : %s" % ("fork -> %s" % as_name if fork else "move (depart+arrive)"))
-        return {"ok": True, "lines": out, "dry": True}
+        report.append("agent     : %s%s" % (name, " (LIVE - fork)" if pre.get("live") else ""))
+        report.append("transcript: %s" % (transcript or "(none - mailbox-only identity)"))
+        report.append("mailbox   : %s lines, cursor %s" % (pre.get("lines"), pre.get("cursor")))
+        report.append("target    : %s via %s" % (dev, addr))
+        report.append("mode      : %s" % ("fork -> %s" % as_name if fork else "move (depart+arrive)"))
+        return {"ok": True, "lines": report, "dry": True}
 
     # 1. probe the target: remote home + communicate + its homi state root.
     rc, out, err = _ssh_run(addr, "printf 'H:%s\\n' \"$HOME\"; "
@@ -2754,7 +2754,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
                                   "ls \"$HOME/.local/bin/communicate\" 2>/dev/null | head -1)\"; "
                                   "printf 'S:%s\\n' \"$(communicate homi statepath 2>/dev/null)\"")
     if rc != 0:
-        return {"ok": False, "err": ("cannot reach %s (%s): %s" % (dev, addr, err)), "lines": out}
+        return {"ok": False, "err": ("cannot reach %s (%s): %s" % (dev, addr, err)), "lines": report}
     rhome = rcomm = rstate = ""
     for ln in out.splitlines():
         if ln.startswith("H:"):
@@ -2764,7 +2764,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         elif ln.startswith("S:"):
             rstate = ln[2:]
     if not rhome or not rcomm:
-        return {"ok": False, "err": ("target %s lacks communicate on PATH — install it there first" % dev), "lines": out}
+        return {"ok": False, "err": ("target %s lacks communicate on PATH — install it there first" % dev), "lines": report}
     if not rstate:
         rstate = rhome + "/.local/state/communicate/homi"
 
@@ -2780,7 +2780,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         rdir = "%s/.claude/projects/%s" % (rhome, _slug(rproj))
         rc, _, err = _ssh_run(addr, "mkdir -p %s %s" % (_shq(rdir), _shq(rproj)))
         if rc != 0:
-            return {"ok": False, "err": ("target prep failed: %s" % err), "lines": out}
+            return {"ok": False, "err": ("target prep failed: %s" % err), "lines": report}
         srcs = [transcript]
         side = os.path.join(os.path.dirname(transcript), sid)
         if os.path.isdir(side):
@@ -2788,7 +2788,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         rc = subprocess.run(["rsync", "-az", "-s", "-e", ssh_e] + srcs
                             + ["%s:%s/" % (addr, rdir)]).returncode
         if rc != 0:
-            return {"ok": False, "err": ("transcript rsync failed\n"), "lines": out}
+            return {"ok": False, "err": ("transcript rsync failed\n"), "lines": report}
         if as_name:
             rec = json.dumps({"type": "custom-title", "customTitle": as_name,
                               "sessionId": sid})
@@ -2800,7 +2800,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         #    routes over the link (the target auto-claims on first delivery).
         dep = caller({"op": "depart", "name": name, "device": dev})
         if not dep.get("ok"):
-            return {"ok": False, "err": ((dep.get("err") or "depart failed")), "lines": out}
+            return {"ok": False, "err": ((dep.get("err") or "depart failed")), "lines": report}
 
     # 4. mailbox (now frozen at the origin): stage + merge on the target.
     merged = {"merged_delivered": 0, "merged_undelivered": 0}
@@ -2810,7 +2810,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         rc = subprocess.run(["rsync", "-az", "-s", "-e", ssh_e, pre["mailbox"],
                              "%s:%s" % (addr, staged)]).returncode
         if rc != 0:
-            return {"ok": False, "err": ("mailbox rsync failed (mail stays at origin; " "identity already departed)\n"), "lines": out}
+            return {"ok": False, "err": ("mailbox rsync failed (mail stays at origin; " "identity already departed)\n"), "lines": report}
         rc, out, err = _ssh_run(addr, "%s homi arrive %s --staged %s --cursor %s"
                                 % (_shq(rcomm), _shq(target_name), _shq(staged),
                                    int(pre.get("cursor") or 0)), timeout=60)
@@ -2820,20 +2820,20 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
             pass
         _ssh_run(addr, "rm -f %s" % _shq(staged))
         if rc != 0:
-            return {"ok": False, "err": ("arrive on %s failed: %s %s" % (dev, out, err)), "lines": out}
+            return {"ok": False, "err": ("arrive on %s failed: %s %s" % (dev, out, err)), "lines": report}
     else:
         # No mailbox file — still claim the name on the target.
         _ssh_run(addr, "%s homi arrive %s --staged /dev/null --cursor 0"
                  % (_shq(rcomm), _shq(target_name)))
 
-    out.append("moved %s -> %s%s" % (name, dev,
+    report.append("moved %s -> %s%s" % (name, dev,
           (" as %s" % as_name) if as_name else ""))
     if transcript:
-        out.append("  transcript: %s:%s/" % (dev, rdir))
-    out.append("  mailbox   : +%s delivered, +%s undelivered (deduped)"
+        report.append("  transcript: %s:%s/" % (dev, rdir))
+    report.append("  mailbox   : +%s delivered, +%s undelivered (deduped)"
           % (merged.get("merged_delivered"), merged.get("merged_undelivered")))
     if not fork:
-        out.append("  address   : %s now proxies here -> %s (mail keeps flowing)" % (name, dev))
+        report.append("  address   : %s now proxies here -> %s (mail keeps flowing)" % (name, dev))
 
     # 5. optionally resume it in a seat over the cross-device seat plane.
     if spawn and sid:
@@ -2842,14 +2842,14 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
                    "cwd": rproj if transcript else None,
                    "device": dev, "name": target_name})
         if r.get("ok"):
-            out.append("  seat      : resumed in %s" % r.get("seat"))
+            report.append("  seat      : resumed in %s" % r.get("seat"))
         else:
-            out.append("  seat      : not spawned (%s) — resume there: claude --resume %s"
+            report.append("  seat      : not spawned (%s) — resume there: claude --resume %s"
                   % (r.get("err"), sid))
     elif sid:
-        out.append("  resume    : (on %s) cd %s && claude --resume %s"
+        report.append("  resume    : (on %s) cd %s && claude --resume %s"
               % (dev, rproj if transcript else "~", sid))
-    return {"ok": True, "lines": out, "name": name, "device": dev,
+    return {"ok": True, "lines": report, "name": name, "device": dev,
             "as": as_name, "merged": merged}
 
 

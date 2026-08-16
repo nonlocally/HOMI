@@ -96,6 +96,28 @@ P2="$(acomm homi premove traveler 2>/dev/null)"
 bcomm homi send traveler "welcome home" --from boss >/dev/null 2>&1
 bcomm homi inbox traveler 2>/dev/null | grep -q 'welcome home' && ok "target-local mail lands" || bad "target-local mail"
 
+echo "== _move_run orchestration itself (the CLI+MCP shared path)"
+# Regression: the suite used to test only the daemon ops, so a crash inside the
+# shared orchestration (a shadowed accumulator) shipped green. Drive _move_run
+# directly with ssh/rsync stubbed — no network, no writes.
+if python3 - <<'PYEOF' 2>/dev/null
+import sys; sys.path.insert(0, "lib")
+import homi
+homi._ssh_run = lambda *a, **k: (0, "H:/home/u\nC:/usr/bin/communicate\nS:/home/u/.st", "")
+homi._find_transcript = lambda name: None
+def caller(req):
+    op = req.get("op")
+    if op == "premove": return {"ok": True, "live": False, "mailbox": "/nonexistent", "lines": 0, "cursor": 0}
+    if op == "status":  return {"ok": True, "links": {"dev": {"addr": "u@dev"}}}
+    return {"ok": True}
+r = homi._move_run(caller, "agent1", "dev", addr="u@dev")
+assert r.get("ok"), r
+assert any("moved agent1" in l for l in r.get("lines") or []), r
+d = homi._move_run(caller, "agent1", "dev", addr="u@dev", dry=True)
+assert d.get("ok") and d.get("dry"), d
+PYEOF
+then ok "_move_run completes (real + dry) without crashing"; else bad "_move_run orchestration"; fi
+
 echo "== depart requires the link; unknown device refused"
 acomm homi claim stayer >/dev/null 2>&1
 D2="$(acomm homi depart stayer nowhere 2>/dev/null)"
