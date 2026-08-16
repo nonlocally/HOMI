@@ -174,6 +174,14 @@ td code{white-space:normal}
     <a href="#boxed">Boxed agents</a>
     <a href="#fleets">Fleets</a>
     <a href="#mcp">Two faces, one kernel</a>
+    <div class="grp">Using it</div>
+    <a href="#using">How you use it</a>
+    <a href="#agent-view">What agents are told</a>
+    <a href="#tools">All 26 tools</a>
+    <a href="#wire">How mail travels</a>
+    <a href="#state">State on disk</a>
+    <a href="#plugin">The plugin story</a>
+    <a href="#operate">Operating it</a>
     <div class="grp">Trust &amp; proof</div>
     <a href="#security">Security model</a>
     <a href="#review">The self-review</a>
@@ -579,6 +587,300 @@ td code{white-space:normal}
       putting a real CLI in the image means per-agent credentials — a credential decision I
       didn't make on your behalf.</li>
   </ol>
+</section>
+
+<hr class="rule">
+
+<section id="using">
+  <h2>How you actually use it</h2>
+  <p class="lead">There are two ways in, and they drive the <em>same</em> daemon: you, on the
+  command line — and your agents, through tools.</p>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node"><span class="t">you</span><span class="s">a terminal</span></div>
+      <div class="arrow"><span class="lab">CLI</span><span class="a">↘</span></div>
+      <div class="node gold"><span class="t">homi daemon</span><span class="s">one per device</span></div>
+      <div class="arrow"><span class="lab">MCP</span><span class="a">↙</span></div>
+      <div class="node teal"><span class="t">your agents</span><span class="s">claude · codex</span></div>
+    </div>
+    <div class="cap">the CLI is the complete definition · the MCP server is a projection of it · neither can drift from the other</div>
+  </div>
+
+  <h3>Install it on a machine</h3>
+  <p>Two supported paths. From this repo (what your machines run today):</p>
+  <pre><code><span class="c-cm"># from the repo</span>
+<span class="c-cmd">communicate homi</span> start          <span class="c-cm"># run it now</span>
+<span class="c-cmd">communicate homi</span> install        <span class="c-cm"># or: launchd/systemd, survives reboot</span></code></pre>
+  <p>Or as a package on any machine (this is the "someone downloads it" path):</p>
+  <pre><code><span class="c-cmd">npx</span> @aadarwal/homi setup <span class="c-flag">--claim</span> <span class="c-sub">my-name</span>
+<span class="c-cm"># installs a stable copy of the daemon, sets up launchd/systemd, claims you a</span>
+<span class="c-cm"># name, and prints the two lines below</span>
+
+<span class="c-cmd">claude</span> mcp add homi -- npx -y @aadarwal/homi serve
+<span class="c-cmd">codex</span>  mcp add homi -- npx -y @aadarwal/homi serve</code></pre>
+  <div class="callout"><b>One daemon, never two.</b> The repo CLI and the npm package resolve the
+  same state root, the same socket, and the same launchd label. Installing the package on a
+  machine that already runs the repo version <em>adopts</em> the running daemon instead of
+  fighting it.</div>
+
+  <h3>The five things you'll actually do</h3>
+  <pre><code><span class="c-cm">## 1. see who exists — measured, not guessed</span>
+<span class="c-cmd">communicate homi</span> agents
+<span class="c-cm">#  scout      local  live     seat:%1     ← probed, right now</span>
+<span class="c-cm">#  nomad      proxy  -                    ← lives on another device</span>
+
+<span class="c-cm">## 2. give yourself (or anything) a durable name</span>
+<span class="c-cmd">communicate homi</span> claim <span class="c-sub">orchestrator</span>
+
+<span class="c-cm">## 3. talk to an agent — even one that isn't running</span>
+<span class="c-cmd">communicate homi</span> send <span class="c-sub">scout</span> <span class="c-str">"look at the failing test in ./api"</span> <span class="c-flag">--from</span> orchestrator
+<span class="c-cmd">communicate homi</span> ask  <span class="c-sub">scout</span> <span class="c-str">"is it green now?"</span> <span class="c-flag">--from</span> orchestrator <span class="c-flag">--timeout</span> 300
+<span class="c-cm">#  ask BLOCKS and returns the answer — the agent replies with its own command</span>
+
+<span class="c-cm">## 4. create an agent that is mailable AND watchable</span>
+<span class="c-cmd">communicate homi</span> spawn <span class="c-sub">worker</span> <span class="c-flag">--cli</span> claude <span class="c-flag">--cwd</span> ~/src/myproject
+
+<span class="c-cm">## 5. reach another machine (once linked)</span>
+<span class="c-cmd">communicate homi</span> link <span class="c-sub">air-2</span> <span class="c-flag">--addr</span> aadarwal@aadarshs-mac-air-2 <span class="c-flag">--allow-seats</span>
+<span class="c-cmd">communicate homi</span> send <span class="c-sub">worker@air-2</span> <span class="c-str">"status?"</span> <span class="c-flag">--from</span> orchestrator</code></pre>
+
+  <h3>Reading the roster honestly</h3>
+  <p>Every route carries its <em>provenance</em> — how the fabric knows what it's telling you.
+  This is invariant #2 made visible:</p>
+  <table>
+    <tr><th>What you see</th><th>What it means</th></tr>
+    <tr><td><code>live [probed]</code></td><td>a socket was just connected to and it held the line. Strongest claim.</td></tr>
+    <tr><td><code>live [reported]</code></td><td>a sidecar says a session exists and its pid is alive, but no probe was run this tick.</td></tr>
+    <tr><td><code>stored [probed]</code></td><td>we tried; nothing answered. Mail is being held durably.</td></tr>
+    <tr><td><code>live [boxed-probed]</code></td><td>a sandboxed VM's published socket answered — the container is up.</td></tr>
+    <tr><td><code>proxy</code></td><td>the name lives on another device; mail routes over the link.</td></tr>
+  </table>
+</section>
+
+<section id="agent-view">
+  <h2>What your agent is told</h2>
+  <p class="lead">This is the part that decides whether any of it gets used well. An agent
+  doesn't read this site — it reads three things.</p>
+
+  <h3>1 · The orientation it receives on connect</h3>
+  <p>The moment an MCP client connects, the homi server hands the model an
+  <strong>instructions</strong> string. Without it, an agent sees 26 tool names and no theory
+  of the system. This is the exact text, verbatim:</p>
+  <pre><code>homi gives you a DURABLE IDENTITY and a MAILBOX that outlive your process.
+
+Start with whoami (who am I here?) and agents_list (who else exists, with MEASURED
+liveness). If you have held mail, inbox_read shows it.
+
+TWO PLANES — pick the right one:
+• MESSAGES are the default for agent-to-agent. send/ask reach an agent BY NAME even
+  if it is not running: mail is stored durably and delivered as a turn when it wakes.
+  Never poll for an agent to come up — just send. Use ask when you need the answer
+  (it blocks for a correlated reply); use send to fire and forget; group_send for many.
+  Address another device as name@device.
+• SEATS are the ESCAPE HATCH for surfaces you CANNOT mailbox — a cluster login shell,
+  a REPL, a TUI. seat_state is the non-blocking done-check (one word); never scrape
+  seat_read to find out whether something finished. seat_wait blocks until idle.
+  seat_respond is fail-closed: it refuses rather than guess at an approval prompt.
+  Do NOT drive another agent through a seat — that is what send/ask are for.
+
+CREATING AGENTS: spawn claims an identity, launches the CLI in a seat, binds them, and
+adopts the name — the result is reachable by mail AND watchable. fan spawns a team,
+consult asks another model one question. move relocates an agent (transcript + mailbox
++ identity) to another device with its address alive the whole way.
+
+WHEN YOU ARE BLOCKED on a decision only the human can make, call notify with a real
+reason — do not stall silently.
+
+Not exposed here on purpose: federation, grants, and linking are human trust decisions
+made on the CLI, never by an agent.</code></pre>
+  <div class="callout key"><b>Why it's written like that.</b> Every line answers a mistake
+  agents actually make: polling for a peer to come up (instead of just sending), scraping a
+  screen to find out if something finished (instead of asking for the state), driving another
+  agent by typing at it (instead of messaging it), and stalling silently when blocked. The
+  register matters more than the prose — it teaches <em>when</em>, not just <em>what</em>.</div>
+
+  <h3>2 · The tool descriptions — steering, not documentation</h3>
+  <p>Each tool's description is written to push toward the right plane. Note how many of them
+  say what <em>not</em> to do:</p>
+  <table>
+    <tr><th>Tool</th><th>What the agent is told</th></tr>
+    <tr><td><code>agents_list</code></td><td>"Start here. <b>Prefer send/ask</b> — they work even when the target is not running."</td></tr>
+    <tr><td><code>send</code></td><td>"Durable store-and-forward: the target need not be alive. <b>The DEFAULT way</b> to talk to any agent."</td></tr>
+    <tr><td><code>seat_ls</code></td><td>"Seats drive surfaces you cannot mailbox — <b>NOT agent↔agent talk</b>; use send/ask for that."</td></tr>
+    <tr><td><code>seat_state</code></td><td>"The non-blocking done-check — <b>never poll seat_read</b> for this."</td></tr>
+    <tr><td><code>seat_respond</code></td><td>"<b>Fail-closed:</b> refuses unless a real menu with a clearly-matching option is on screen."</td></tr>
+    <tr><td><code>notify</code></td><td>"<b>Only</b> when you are blocked on a decision only they can make."</td></tr>
+    <tr><td><code>wait_for_message</code></td><td>"Your inbound wake when your runtime has no socket push — loop on this."</td></tr>
+  </table>
+
+  <h3>3 · What an inbound message looks like to the agent</h3>
+  <p>Mail doesn't arrive as an API response — it arrives as a <strong>conversation turn</strong>,
+  wrapped so the model can see who it's from and can't be spoofed by the body text:</p>
+  <pre><code>&lt;cross-session-message from="uds:/tmp/cc-socks/homi-orchestrator.sock"
+                       from-name="orchestrator"&gt;
+look at the failing test in ./api
+
+[reply with: communicate homi reply orchestrator@mini-2~a3f9…c1 "&lt;answer&gt;" --from scout]
+&lt;/cross-session-message&gt;</code></pre>
+  <p>If the message came from an <code>ask</code>, it carries a <strong>return token</strong>.
+  The agent answers by running that command (or calling the <code>reply</code> tool) — and the
+  asker's blocked call, possibly on another machine, resolves with the answer. That round trip
+  is what was proven live at 10.09 seconds.</p>
+</section>
+
+<section id="tools">
+  <h2>The full tool surface — 26 tools</h2>
+  <p>Everything an agent can reach. The ordering is fixed and append-only, so the list is
+  byte-stable across restarts (a caching rule in the MCP spec).</p>
+  <table>
+    <tr><th>Tool</th><th>Does</th></tr>
+    <tr><td colspan="2" style="color:var(--gold);font-weight:600;padding-top:14px">Knowing who's there</td></tr>
+    <tr><td><code>whoami</code></td><td>this device + the identities claimed on it</td></tr>
+    <tr><td><code>agents_list</code></td><td>the roster with measured liveness — the first call to make</td></tr>
+    <tr><td><code>status</code></td><td>full fabric state: sockets, identities, links, queues</td></tr>
+    <tr><td><code>link_status</code></td><td>device links: kind, seat grant, queue depth, dead-letters, last error</td></tr>
+    <tr><td colspan="2" style="color:var(--gold);font-weight:600;padding-top:14px">Talking (the default plane)</td></tr>
+    <tr><td><code>send</code></td><td>durable message to a name, or <code>name@device</code></td></tr>
+    <tr><td><code>ask</code></td><td>send + block for the correlated reply</td></tr>
+    <tr><td><code>reply</code></td><td>answer an <code>ask</code> using its return token</td></tr>
+    <tr><td><code>group_send</code></td><td>one message to many names</td></tr>
+    <tr><td><code>inbox_read</code></td><td>read a mailbox (non-destructive)</td></tr>
+    <tr><td><code>wait_for_message</code></td><td>block until new mail lands</td></tr>
+    <tr><td><code>notify</code></td><td>summon the human, with a durable reason</td></tr>
+    <tr><td colspan="2" style="color:var(--gold);font-weight:600;padding-top:14px">Being someone</td></tr>
+    <tr><td><code>claim</code> / <code>release</code></td><td>take or give up a durable identity</td></tr>
+    <tr><td colspan="2" style="color:var(--teal);font-weight:600;padding-top:14px">Seats (the escape hatch)</td></tr>
+    <tr><td><code>seat_ls</code></td><td>list interactive surfaces</td></tr>
+    <tr><td><code>seat_spawn</code></td><td>create one (optionally on another device)</td></tr>
+    <tr><td><code>seat_send</code></td><td>type into it — sanitized, with a verified submit</td></tr>
+    <tr><td><code>seat_read</code></td><td>read the screen (secrets redacted unless <code>raw</code>)</td></tr>
+    <tr><td><code>seat_state</code></td><td>one word: working / idle / booting / approval / dead</td></tr>
+    <tr><td><code>seat_wait</code></td><td>block until it settles</td></tr>
+    <tr><td><code>seat_respond</code></td><td>answer an approval prompt — fail-closed</td></tr>
+    <tr><td><code>seat_stop</code></td><td>interrupt what it's running</td></tr>
+    <tr><td><code>seat_bind</code></td><td>attach a seat to an identity</td></tr>
+    <tr><td colspan="2" style="color:var(--gold);font-weight:600;padding-top:14px">Making and moving agents</td></tr>
+    <tr><td><code>spawn</code></td><td>claim + launch + bind + adopt, in one call</td></tr>
+    <tr><td><code>fan</code></td><td>spawn N and get an addressable group</td></tr>
+    <tr><td><code>consult</code></td><td>ask another model one question via a private peer</td></tr>
+    <tr><td><code>move</code></td><td>relocate an agent-being to another device</td></tr>
+  </table>
+  <div class="callout warn"><b>Deliberately NOT tools.</b> <code>federate</code>,
+  <code>grant</code>, <code>ungrant</code>, <code>link</code>, <code>install</code> — these are
+  <em>human trust decisions</em>. An agent must not be able to grant another person's fleet
+  access to itself, or link your machine to a stranger's. They live on the CLI only. That's the
+  same agent-facing / system-facing line drawn deliberately, not an oversight.</div>
+</section>
+
+<section id="wire">
+  <h2>How a message physically travels</h2>
+  <p>No cloud, no broker, no polling loop. Here is the actual path, on your own hardware.</p>
+
+  <h3>Same machine</h3>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node"><span class="t">sender</span><span class="s">CLI or tool</span></div>
+      <div class="arrow"><span class="lab">unix socket</span><span class="a">→</span></div>
+      <div class="node gold"><span class="t">daemon</span><span class="s">fsync to inbox.jsonl</span></div>
+      <div class="arrow"><span class="lab">probe</span><span class="a">→</span></div>
+      <div class="node teal"><span class="t">session socket</span><span class="s">delivered as a turn</span></div>
+    </div>
+  </div>
+  <p>Claude Code already discovers sibling sessions by reading small <em>sidecar</em> files that
+  map a name to a socket path — a routing table that already exists on your machine:</p>
+  <pre><code><span class="c-cm">~/.claude/sessions/11690.json</span>
+{ <span class="c-sub">"name"</span>: <span class="c-str">"qpg-mit-5c"</span>,
+  <span class="c-sub">"pid"</span>: 11690,
+  <span class="c-sub">"messagingSocketPath"</span>: <span class="c-str">"/tmp/cc-socks/11690.sock"</span>,
+  <span class="c-sub">"version"</span>: <span class="c-str">"2.1.229"</span> }</code></pre>
+  <p>homi plants its own sweep-proof sidecar for every claimed name, so the name stays listed
+  even when nothing is running behind it — then <em>steps aside</em> when a real session adopts
+  that name. That handoff, in both directions, is why an address never disappears.</p>
+
+  <h3>Across your devices</h3>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node gold"><span class="t">device A</span><span class="s">out/&lt;dev&gt;/ queue</span></div>
+      <div class="arrow"><span class="lab">ssh -N -L</span><span class="a">→</span></div>
+      <div class="node teal"><span class="t">device B</span><span class="s">in/&lt;A&gt;.sock</span></div>
+      <div class="arrow"><span class="lab">ack</span><span class="a">←</span></div>
+      <div class="node"><span class="t">store → wake</span><span class="s">then deliver</span></div>
+    </div>
+    <div class="cap">each device dials OUTBOUND only · the ack comes after durable storage, never before</div>
+  </div>
+  <p>Each side opens its own outbound SSH tunnel to the other's per-peer inbound socket. That's
+  invariant #4: your inbound and outbound fail independently, so one machine sleeping can never
+  wedge the other. Messages queue under <code>out/&lt;device&gt;/</code>, retry with exponential
+  backoff, dedupe by <code>msg_id</code>, and dead-letter if the far side gives a deterministic
+  refusal. <strong>Attribution comes from the arrival line</strong> — whatever lands on
+  <code>in/air-2.sock</code> <em>is</em> from air-2, regardless of what the message claims about
+  itself.</p>
+</section>
+
+<section id="state">
+  <h2>The state on your disk</h2>
+  <p>Everything is plain files you can read, diff, back up, and delete. There is no database.</p>
+  <pre><code><span class="c-cmd">~/.local/state/communicate/homi/</span>
+├── <span class="c-sub">homi.sock</span>            <span class="c-cm">the control socket (the daemon's front door)</span>
+├── <span class="c-sub">control.token</span>        <span class="c-cm">0600 — required for control ops once a fleet link exists</span>
+├── <span class="c-sub">identities.json</span>      <span class="c-cm">what this device has claimed</span>
+├── <span class="c-sub">links.json</span>           <span class="c-cm">device + fleet links, incl. the seat grant</span>
+├── <span class="c-sub">routes.json</span>          <span class="c-cm">last measured roster snapshot</span>
+├── <span class="c-sub">mail/&lt;name&gt;/</span>
+│   ├── <span class="c-sub">inbox.jsonl</span>       <span class="c-cm">every message, fsync'd, append-only</span>
+│   └── <span class="c-sub">.cursor</span>           <span class="c-cm">how far delivery has got (forward-only)</span>
+├── <span class="c-sub">in/&lt;device&gt;.sock</span>     <span class="c-cm">per-peer inbound = arrival-line attribution</span>
+├── <span class="c-sub">out/&lt;device&gt;/</span>        <span class="c-cm">outbound queue (+ dead/ for refusals)</span>
+├── <span class="c-sub">seen/&lt;device&gt;</span>        <span class="c-cm">msg_id ring for dedup</span>
+├── <span class="c-sub">grants/&lt;fleet&gt;.json</span>  <span class="c-cm">which of your names a given fleet may address</span>
+└── <span class="c-sub">boxes/&lt;name&gt;/</span>        <span class="c-cm">a sandboxed agent's outbox socket + dead-letters</span></code></pre>
+  <p>A mailbox line is just JSON — this is a real one:</p>
+  <pre><code>{"ts": 1786843507.74, "msg_id": "0636a674…6959", "from": "",
+ "from_name": "postmaster", "text": "store→wake proof: this line was sent…"}</code></pre>
+  <div class="callout"><b>The mailbox is the log.</b> There's no separate audit system because
+  there doesn't need to be one: history is the inbox, and <code>via</code> records which link a
+  message arrived on.</div>
+</section>
+
+<section id="plugin">
+  <h2>The plugin story — where this stands</h2>
+  <p>Being usable by an agent has three layers. homi has the first, and the third is the honest
+  gap:</p>
+  <div class="stack">
+    <div class="layer"><div class="lv">✓</div><div class="body"><b>MCP server</b> — 26 tools + the orientation instructions, registered in Claude Code <em>and</em> Codex. This works today.</div><div class="rev">shipped</div></div>
+    <div class="layer"><div class="lv">✓</div><div class="body"><b>The CLI</b> — the complete definition of the fabric, including the human-only trust verbs</div><div class="rev">shipped</div></div>
+    <div class="layer"><div class="lv">—</div><div class="body"><b>A packaged plugin</b> — hooks (orientation injected at <em>session start</em>, before an agent calls anything) and skills (routed by task, teaching workflows rather than verbs)</div><div class="rev"><span>not yet</span></div></div>
+  </div>
+  <p>The distinction matters and is easy to miss: <code>claude mcp add</code> can deliver
+  <em>tools</em>, and it can deliver the instructions string — but it can <strong>never</strong>
+  deliver a hook or a skill. Those are plugin artifacts. Until homi ships as a plugin, an agent
+  only learns it has a mailbox when it happens to call a tool; with a SessionStart hook, it
+  knows before its first move — and Codex gets the same text through the same contract.</p>
+  <div class="callout key"><b>Why it isn't built yet.</b> Deliberate sequencing. A plugin is the
+  packaging of a settled thing; the fabric is settled now, so this is the natural next build —
+  not something to have rushed alongside it.</div>
+</section>
+
+<section id="operate">
+  <h2>Operating it</h2>
+  <h3>Everyday</h3>
+  <pre><code><span class="c-cmd">communicate homi</span> status              <span class="c-cm"># sockets, identities, links, queues</span>
+<span class="c-cmd">communicate homi</span> agents              <span class="c-cm"># just the roster</span>
+<span class="c-cmd">communicate homi</span> inbox &lt;name&gt;        <span class="c-cm"># read any mailbox</span>
+<span class="c-cmd">communicate homi</span> install / uninstall <span class="c-cm"># launchd / systemd persistence</span></code></pre>
+  <h3>When something looks wrong</h3>
+  <table>
+    <tr><th>Symptom</th><th>What it means / what to do</th></tr>
+    <tr><td>An agent reads <code>stored</code>, not <code>live</code></td><td>Nothing is running behind that name. This is <em>fine</em> — mail is being held. It'll drain when the agent comes up.</td></tr>
+    <tr><td>A far device is unreachable</td><td>Probably asleep. Its queue keeps filling and drains on wake; nothing needs restarting. Check <code>link_status</code> for depth and last error.</td></tr>
+    <tr><td>Messages land in <code>out/&lt;dev&gt;/dead/</code></td><td>The far side gave a <em>deterministic</em> refusal (bad name, ungranted). Retrying wouldn't help — that's why it's dead-lettered rather than looping.</td></tr>
+    <tr><td>A seat won't take input</td><td><code>seat_state</code> first. If <code>approval</code>, something is waiting on a prompt; <code>seat_read</code> to see it.</td></tr>
+    <tr><td>Control ops refused</td><td>You have a fleet link, so the control socket needs the token — the CLI attaches it automatically, so this means you're reaching it from somewhere unusual.</td></tr>
+  </table>
+  <h3>Turning it off</h3>
+  <p><code>communicate down</code> deliberately does <em>not</em> stop homi — the fabric is
+  infrastructure, not a session. Use <code>homi stop</code> for now, or
+  <code>homi uninstall</code> to remove persistence. Neither touches a single mailbox.</p>
 </section>
 
 <section id="map">
