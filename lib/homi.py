@@ -183,6 +183,10 @@ class Homi:
         self.link_state = {}   # device -> {"backoff_s","backoff_until","last_ok","last_err"}
         self.ssh_procs = {}    # device -> Popen of the ssh -N -L child
         self.out_ev = threading.Event()
+        # Pending reply-correlated asks. corr -> {"ev","reply","from","asker","target"}.
+        self.pending = {}
+        self.pending_by_asker = {}   # asker -> [corr, ...] FIFO for natural-reply fallback
+        self.pending_mu = threading.Lock()
         self.routes = {}       # latest materialized snapshot (dict)
         self.log_f = None
 
@@ -396,6 +400,8 @@ class Homi:
             return
         if self._store(name, entry):
             self.log("stored for", name, "msg_id", entry["msg_id"])
+            # A plain inbound to an asking identity may be a natural reply.
+            self._resolve_ask_natural(name, entry["text"], entry.get("from_name"))
             try:
                 self._deliver_pending(name)
             except Exception as e:
@@ -565,6 +571,142 @@ class Homi:
         finally:
             lk.release()
 
+    # -- ask / reply (reply-correlated request-response) -------------------------
+    #
+    # ask blocks until a correlated reply arrives or a timeout elapses. The
+    # message carries a return token `<asker>@<device>~<corr>`; the recipient
+    # replies with `communicate homi reply <token> "<answer>"`, which routes the
+    # reply home (local resolve, or a kind-"r" envelope over a link) and unblocks
+    # the caller. Without a token, a plain message back to the asker resolves the
+    # oldest pending ask for that asker (best-effort natural fallback).
+
+    def _ask_token(self, asker, corr):
+        return "%s@%s~%s" % (asker, self.device, corr)
+
+    def _register_ask(self, corr, asker, target):
+        slot = {"ev": threading.Event(), "reply": None, "from": None,
+                "asker": asker, "target": target}
+        with self.pending_mu:
+            self.pending[corr] = slot
+            self.pending_by_asker.setdefault(asker, []).append(corr)
+        return slot
+
+    def _drop_ask(self, corr):
+        with self.pending_mu:
+            slot = self.pending.pop(corr, None)
+            if slot:
+                lst = self.pending_by_asker.get(slot["asker"])
+                if lst and corr in lst:
+                    lst.remove(corr)
+        return slot
+
+    def _fill_ask(self, corr, text, frm):
+        with self.pending_mu:
+            slot = self.pending.get(corr)
+        if not slot or slot["ev"].is_set():
+            return False
+        slot["reply"], slot["from"] = text, frm
+        slot["ev"].set()
+        return True
+
+    def _resolve_ask_natural(self, asker, text, frm):
+        """A plain message arrived at `asker`; if an ask is pending for it,
+        treat this as the reply (oldest first)."""
+        with self.pending_mu:
+            lst = self.pending_by_asker.get(asker) or []
+            corr = lst[0] if lst else None
+            slot = self.pending.get(corr) if corr else None
+        if slot and not slot["ev"].is_set():
+            slot["reply"], slot["from"] = text, frm
+            slot["ev"].set()
+            return True
+        return False
+
+    def _do_ask(self, to, text, from_name, timeout):
+        if not text:
+            return {"ok": False, "err": "empty message"}
+        asker = from_name or "asker"
+        if not self._NAME_RE.match(asker) or asker in self._RESERVED:
+            return {"ok": False, "err": "invalid --from identity %r" % asker}
+        # The asker must be a real local identity so replies have a home.
+        with self.mu:
+            have = (asker in self.identities
+                    and self.identities[asker].get("kind") == "local")
+        if not have:
+            r = self._do_claim(asker)
+            if not r.get("ok"):
+                return {"ok": False, "err": "cannot claim asker %s: %s"
+                        % (asker, r.get("err"))}
+        corr = uuid.uuid4().hex
+        token = self._ask_token(asker, corr)
+        wrapped = ("%s\n\n[reply with: communicate homi reply %s \"<answer>\"]"
+                   % (text, token))
+        slot = self._register_ask(corr, asker, to.split("@", 1)[0])
+        r = self._do_send(to, wrapped, asker)
+        if not r.get("ok"):
+            self._drop_ask(corr)
+            return {"ok": False, "err": "send failed: %s" % r.get("err"), "corr": corr}
+        t0 = time.time()
+        got = slot["ev"].wait(timeout)
+        self._drop_ask(corr)
+        if not got:
+            return {"ok": False, "err": "timeout", "corr": corr,
+                    "waited": round(time.time() - t0, 2)}
+        return {"ok": True, "reply": slot["reply"], "from": slot["from"],
+                "corr": corr, "latency": round(time.time() - t0, 2)}
+
+    def _do_reply(self, token, text, from_name):
+        # token: <asker>@<device>~<corr> (full) or a bare <corr> for a local ask.
+        asker = dev = corr = None
+        if "~" in token:
+            left, corr = token.rsplit("~", 1)
+            asker, dev = left.split("@", 1) if "@" in left else (left, None)
+        else:
+            corr = token
+        if dev and dev != self.device:
+            with self.mu:
+                have_link = dev in self.links
+            if not have_link:
+                return {"ok": False, "err": "reply device not linked: %s" % dev}
+            self._queue_out(dev, {"v": 1, "kind": "r", "to": asker, "corr": corr,
+                                  "from": from_name or "unknown", "text": text,
+                                  "msg_id": uuid.uuid4().hex, "ts": time.time()})
+            return {"ok": True, "routed": "link:%s" % dev}
+        filled = self._fill_ask(corr, text, from_name or "unknown")
+        if asker:
+            self._store(asker, {"ts": time.time(), "msg_id": uuid.uuid4().hex,
+                                "from": "", "from_name": from_name, "text": text,
+                                "corr": corr})
+        return {"ok": True, "resolved": filled}
+
+    def _do_group(self, names, text, from_name):
+        results = {}
+        for n in [x for x in names if x]:
+            results[n] = self._do_send(n, text, from_name)
+        ok = all(r.get("ok") for r in results.values()) if results else False
+        return {"ok": ok,
+                "results": {n: (r.get("routed") or r.get("err"))
+                            for n, r in results.items()}}
+
+    def _do_notify(self, reason, from_name):
+        if not reason:
+            return {"ok": False, "err": "empty reason"}
+        rec = {"ts": time.time(), "from": from_name or "", "reason": reason,
+               "device": self.device}
+        d = self.path("notify")
+        os.makedirs(d, exist_ok=True)
+        fn = "%016d-%s.json" % (int(rec["ts"] * 1000), uuid.uuid4().hex[:6])
+        _atomic_write(os.path.join(d, fn), json.dumps(rec))
+        cmd = os.environ.get("HOMI_NOTIFY_CMD")
+        if cmd:
+            try:
+                subprocess.run(cmd, shell=True, input=(reason + "\n").encode(),
+                               timeout=10)
+            except Exception as e:
+                self.log("notify hook failed:", e)
+        self.log("notify:", reason)
+        return {"ok": True}
+
     def _do_send(self, to, text, from_name):
         if not text:
             return {"ok": False, "err": "empty message"}
@@ -597,6 +739,7 @@ class Homi:
             entry = {"ts": time.time(), "msg_id": uuid.uuid4().hex, "from": "",
                      "from_name": from_name, "text": text}
             self._store(name, entry)
+            self._resolve_ask_natural(name, text, from_name)
             try:
                 self._deliver_pending(name)
             except Exception as e:
@@ -962,16 +1105,34 @@ class Homi:
             pass
 
     def _recv_envelope(self, device, env):
-        if env.get("v") != 1 or env.get("kind") != "m":
+        kind = env.get("kind")
+        if env.get("v") != 1 or kind not in ("m", "r", "seat"):
             return {"ok": False, "err": "bad envelope"}
         to = env.get("to") or ""
         frm = env.get("from") or "unknown"
         mid = env.get("msg_id") or ""
         text = env.get("text") or ""
-        if not to or not mid or not text:
+        if not to or not mid:
+            return {"ok": False, "err": "bad envelope"}
+        if kind != "r" and not text:
             return {"ok": False, "err": "bad envelope"}
         if mid in self.seen_dev.setdefault(device, set()):
             return {"ok": True, "ack": mid, "dup": True}
+        if kind == "r":
+            # A reply routed home from a remote target: resolve the pending ask
+            # (by corr) and store durably in the asker's inbox.
+            corr = env.get("corr") or ""
+            self._fill_ask(corr, text, frm)
+            with self.mu:
+                have = (to in self.identities
+                        and self.identities[to].get("kind") == "local")
+            if not have:
+                self._do_claim(to)
+            self._store(to, {"ts": time.time(), "msg_id": mid, "from": "",
+                             "from_name": frm, "text": text, "corr": corr})
+            self._remember_dev_msg(device, mid)
+            threading.Thread(target=self._safe_deliver, args=(to,), daemon=True).start()
+            return {"ok": True, "ack": mid}
         self._ensure_proxy(frm, device)
         with self.mu:
             ent = self.identities.get(to)
@@ -987,6 +1148,7 @@ class Homi:
         entry = {"ts": time.time(), "msg_id": mid, "from": "",
                  "from_name": frm, "via": device, "text": text}
         self._store(to, entry)
+        self._resolve_ask_natural(to, text, frm)
         self._remember_dev_msg(device, mid)
         # Ack now (the message is durable); wake asynchronously — a slow local
         # session must not push the sender into ack-timeout retry churn.
@@ -1207,6 +1369,18 @@ class Homi:
         if op == "send":
             return self._do_send(req.get("to", ""), req.get("text", ""),
                                  req.get("from") or "cli")
+        if op == "ask":
+            return self._do_ask(req.get("to", ""), req.get("text", ""),
+                                req.get("from") or "asker",
+                                float(req.get("timeout") or 240))
+        if op == "reply":
+            return self._do_reply(req.get("token", ""), req.get("text", ""),
+                                  req.get("from") or "")
+        if op == "group":
+            return self._do_group(req.get("names") or [], req.get("text", ""),
+                                  req.get("from") or "cli")
+        if op == "notify":
+            return self._do_notify(req.get("reason", ""), req.get("from") or "")
         if op == "link":
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
                                  sock=req.get("sock"),
@@ -1465,6 +1639,84 @@ def cli_call(argv):
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
+    if op == "ask":
+        frm, timeout, want_json = "asker", 240.0, False
+        rest = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--from" and i + 1 < len(args):
+                frm = args[i + 1]; i += 2; continue
+            if a == "--timeout" and i + 1 < len(args):
+                timeout = float(args[i + 1]); i += 2; continue
+            if a == "--json":
+                want_json = True; i += 1; continue
+            rest.append(a); i += 1
+        if len(rest) < 2:
+            sys.stderr.write("usage: communicate homi ask <name> <question...> "
+                             "[--from NAME] [--timeout SEC] [--json]\n")
+            return 1
+        # The blocking ask holds the control connection; give the socket slack.
+        r = _call({"op": "ask", "to": rest[0], "text": " ".join(rest[1:]),
+                   "from": frm, "timeout": timeout}, timeout=timeout + 15)
+        if want_json:
+            print(json.dumps(r))
+        elif r.get("ok"):
+            print(r.get("reply", ""))
+        else:
+            sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 0 if r.get("ok") else 1
+    if op == "reply":
+        frm = ""
+        if "--from" in args:
+            i = args.index("--from")
+            try:
+                frm = args[i + 1]
+            except IndexError:
+                sys.stderr.write("--from needs a value\n"); return 1
+            args = args[:i] + args[i + 2:]
+        if len(args) < 2:
+            sys.stderr.write("usage: communicate homi reply <token> <answer...> [--from NAME]\n")
+            return 1
+        r = _call({"op": "reply", "token": args[0], "text": " ".join(args[1:]),
+                   "from": frm})
+        if r.get("ok"):
+            print("replied" + (" (resolved)" if r.get("resolved") else ""))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "group":
+        frm = "cli"
+        if "--from" in args:
+            i = args.index("--from")
+            try:
+                frm = args[i + 1]
+            except IndexError:
+                sys.stderr.write("--from needs a value\n"); return 1
+            args = args[:i] + args[i + 2:]
+        if len(args) < 2:
+            sys.stderr.write("usage: communicate homi group <n1,n2,...> <message...> [--from NAME]\n")
+            return 1
+        names = [x for x in args[0].split(",") if x]
+        r = _call({"op": "group", "names": names, "text": " ".join(args[1:]),
+                   "from": frm})
+        print(json.dumps(r.get("results", {})))
+        return 0 if r.get("ok") else 1
+    if op == "notify":
+        frm = ""
+        if "--from" in args:
+            i = args.index("--from")
+            try:
+                frm = args[i + 1]
+            except IndexError:
+                sys.stderr.write("--from needs a value\n"); return 1
+            args = args[:i] + args[i + 2:]
+        if not args:
+            sys.stderr.write("usage: communicate homi notify <reason...> [--from NAME]\n")
+            return 1
+        r = _call({"op": "notify", "reason": " ".join(args), "from": frm})
+        print("notified" if r.get("ok") else (r.get("err") or "failed"))
+        return 0 if r.get("ok") else 1
     if op in ("link", "unlink"):
         if not args:
             sys.stderr.write("usage: communicate homi %s <device> [--addr user@host] [--sock path]\n" % op)
