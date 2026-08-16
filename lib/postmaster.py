@@ -170,6 +170,7 @@ class PM:
         self.link_in = {}      # device -> inbound server socket (arrival line)
         self.seen_dev = {}     # device -> set of received envelope msg_ids
         self.link_state = {}   # device -> {"backoff_s","backoff_until","last_ok","last_err"}
+        self.ssh_procs = {}    # device -> Popen of the ssh -N -L child
         self.out_ev = threading.Event()
         self.routes = {}       # latest materialized snapshot (dict)
         self.log_f = None
@@ -624,6 +625,7 @@ class PM:
     def _persist_links(self):
         with self.mu:
             data = {d: {"addr": e.get("addr"), "sock": e.get("sock"),
+                        "remote_home": e.get("remote_home"),
                         "created_at": e.get("created_at")}
                     for d, e in self.links.items()}
         _atomic_write(self.path("links.json"), json.dumps(data, indent=1))
@@ -648,11 +650,85 @@ class PM:
         except OSError:
             pass
 
-    def _do_link(self, device, addr=None, sock=None):
+    def _ssh_cmd(self, device, addr, remote_home):
+        """The exact outbound dial: BatchMode (auth failures fail cleanly,
+        never prompt), forward-only -L toward the peer's inbound socket FOR
+        THIS device, StreamLocalBindUnlink so a dead tunnel's socket litter
+        never blocks the redial."""
+        rin = "%s/.local/state/communicate/pm/in/%s.sock" % (
+            remote_home or "<REMOTE_HOME>", self.device)
+        lsock = self.path("links", device + ".sock")
+        return ["ssh", "-N",
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                "-o", "ExitOnForwardFailure=yes",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+                "-o", "StreamLocalBindMask=0177",
+                "-o", "StreamLocalBindUnlink=yes",
+                "-L", "%s:%s" % (lsock, rin), addr]
+
+    def _remote_home(self, addr):
+        try:
+            out = subprocess.run(["ssh", "-o", "BatchMode=yes",
+                                  "-o", "ConnectTimeout=8", addr, "echo $HOME"],
+                                 capture_output=True, text=True, timeout=15)
+            home = (out.stdout or "").strip().splitlines()
+            return home[-1] if home and out.returncode == 0 else None
+        except Exception:
+            return None
+
+    def _ensure_ssh(self, device):
+        """Keep one ssh -N -L child alive per addr-linked device; returns the
+        local end of the forward. Raises OSError when the dial fails (the
+        outbound loop turns that into per-device backoff)."""
+        with self.mu:
+            ent = dict(self.links.get(device) or {})
+        addr = ent.get("addr")
+        if not addr:
+            return None
+        lsock = self.path("links", device + ".sock")
+        proc = self.ssh_procs.get(device)
+        if proc is not None and proc.poll() is None and os.path.exists(lsock):
+            return lsock
+        if proc is not None and proc.poll() is not None:
+            self.ssh_procs.pop(device, None)
+        rhome = ent.get("remote_home")
+        if not rhome:
+            rhome = self._remote_home(addr)
+            if not rhome:
+                raise OSError("cannot resolve remote $HOME on %s" % addr)
+            with self.mu:
+                if device in self.links:
+                    self.links[device]["remote_home"] = rhome
+            self._persist_links()
+        try:
+            os.unlink(lsock)
+        except OSError:
+            pass
+        cmd = self._ssh_cmd(device, addr, rhome)
+        self.log("link", device, "dialing:", " ".join(cmd))
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        self.ssh_procs[device] = proc
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if os.path.exists(lsock):
+                return lsock
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        raise OSError("ssh link to %s did not come up" % device)
+
+    def _do_link(self, device, addr=None, sock=None, print_cmd=False):
         if not self._DEV_RE.match(device or ""):
             return {"ok": False, "err": "invalid device name"}
         if device == self.device:
             return {"ok": False, "err": "refusing to link to self"}
+        if print_cmd:
+            with self.mu:
+                stored = dict(self.links.get(device) or {})
+            return {"ok": True,
+                    "cmd": self._ssh_cmd(device, addr or stored.get("addr") or "<ADDR>",
+                                         stored.get("remote_home"))}
         if device not in self.link_in:
             srv = self.bind_unix(self.link_in_sock(device))
             self.link_in[device] = srv
@@ -661,7 +737,9 @@ class PM:
         self._seed_seen_dev(device)
         os.makedirs(self.path("out", device), exist_ok=True)
         with self.mu:
+            prev = self.links.get(device) or {}
             self.links[device] = {"addr": addr, "sock": sock,
+                                  "remote_home": prev.get("remote_home"),
                                   "created_at": time.time()}
         self._persist_links()
         self.out_ev.set()
@@ -671,6 +749,16 @@ class PM:
     def _do_unlink(self, device):
         with self.mu:
             ent = self.links.pop(device, None)
+        proc = self.ssh_procs.pop(device, None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        try:
+            os.unlink(self.path("links", device + ".sock"))
+        except OSError:
+            pass
         srv = self.link_in.pop(device, None)
         if srv:
             try:
@@ -774,7 +862,7 @@ class PM:
             ent = self.links.get(device) or {}
         if ent.get("sock"):
             return ent["sock"]
-        return None  # the ssh transport fills this in
+        return self._ensure_ssh(device)
 
     def _send_envelope(self, endpoint, env):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -817,7 +905,16 @@ class PM:
                     continue
                 if not files:
                     continue
-                endpoint = self._link_endpoint(dev)
+                try:
+                    endpoint = self._link_endpoint(dev)
+                except (OSError, ValueError) as e:
+                    st["backoff_s"] = (1 if not st.get("backoff_s")
+                                       else min(st["backoff_s"] * 2, 30))
+                    st["backoff_until"] = time.time() + st["backoff_s"]
+                    st["last_err"] = str(e)
+                    self.log("link", dev, "dial failed (backoff %ss):"
+                             % st["backoff_s"], e)
+                    continue
                 if not endpoint:
                     st["last_err"] = "no transport"
                     continue
@@ -941,7 +1038,8 @@ class PM:
                                  req.get("from") or "cli")
         if op == "link":
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
-                                 sock=req.get("sock"))
+                                 sock=req.get("sock"),
+                                 print_cmd=bool(req.get("print_cmd")))
         if op == "unlink":
             return self._do_unlink(req.get("device", ""))
         if op == "stop":
@@ -1058,6 +1156,13 @@ class PM:
             except OSError:
                 pass
             paths.append(self.link_in_sock(d))
+        for d, proc in list(self.ssh_procs.items()):
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            paths.append(self.path("links", d + ".sock"))
         for n in names:
             self._unplant(n)
         for p in paths:
@@ -1201,7 +1306,12 @@ def cli_call(argv):
             except IndexError:
                 sys.stderr.write("--addr needs a value\n")
                 return 1
+        if "--print-cmd" in args:
+            req["print_cmd"] = True
         r = _call(req)
+        if r.get("ok") and r.get("cmd"):
+            print(" ".join(r["cmd"]))
+            return 0
         if r.get("ok"):
             print("%sed %s" % (op, args[0]))
             return 0

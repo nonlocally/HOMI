@@ -90,6 +90,25 @@ PY
 sleep 0.5
 if [ "$(grep -c 'dup envelope' "$BX")" = "1" ]; then ok "envelope dedup"; else bad "envelope dedup"; fi
 
+echo "== ssh transport dial (golden command + graceful failure)"
+cmd="$(acomm pm link gamma --addr fake@nowhere.invalid --print-cmd 2>/dev/null)"
+case "$cmd" in
+  "ssh -N -o BatchMode=yes -o ConnectTimeout=8 -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes -L $A_STATE/pm/links/gamma.sock:<REMOTE_HOME>/.local/state/communicate/pm/in/alpha.sock fake@nowhere.invalid")
+    ok "golden ssh dial command";;
+  *) bad "golden ssh dial command (got: $cmd)";;
+esac
+acomm pm link gamma --addr fake@nowhere.invalid >/dev/null 2>&1 || bad "link gamma (addr)"
+acomm pm send remote-y@gamma "never arrives" --from tester >/dev/null 2>&1
+sleep 3
+qn="$(ls "$A_STATE/pm/out/gamma" 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$qn" = "1" ]; then ok "queued for unreachable addr link"; else bad "queued for unreachable addr link (got $qn)"; fi
+st="$(acomm pm status --json 2>/dev/null)"
+if [ -n "$st" ]; then ok "daemon healthy despite dead link"; else bad "daemon healthy despite dead link"; fi
+if printf '%s' "$st" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["links"]["gamma"]["last_err"] else 1)' 2>/dev/null; then
+  ok "link gamma reports last_err"
+else bad "link gamma reports last_err"; fi
+acomm pm unlink gamma >/dev/null 2>&1 && ok "unlink gamma" || bad "unlink gamma"
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
