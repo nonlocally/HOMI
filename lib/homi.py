@@ -1206,8 +1206,24 @@ class Homi:
         # inbound mail (:1929) and _do_ask (:701). Best-effort in the fullest
         # sense: ANY failure here (bad path, permission error, malformed cwd)
         # must never fail the claim itself, only leave the axis unset.
+        #
+        # A cheap pre-check skips that work entirely when `name` is already a
+        # LOCAL identity: without it, an ordinary client retry of a claim (or
+        # any repeat --worktree claim against a different --cwd) would run
+        # `git worktree add` before ever reaching the no-op below, littering
+        # the target repo with an orphaned branch + checkout nothing
+        # references. A PROXY does not count as "already claimed" here —
+        # _do_claim releases and re-claims it below, a genuine new local
+        # claim that must still get its workspace recorded. This check is
+        # intentionally racy (outside claim_mu): a benign concurrent double
+        # claim can still do the work twice, which is acceptable; the
+        # authoritative decision stays the check inside claim_mu below,
+        # unchanged.
+        with self.mu:
+            already = (name in self.identities
+                       and self.identities[name].get("kind") == "local")
         ws = None
-        if cwd:
+        if cwd and not already:
             try:
                 ws = (homi_workspace.make_worktree(cwd, name) if worktree
                       else homi_workspace.describe(cwd))

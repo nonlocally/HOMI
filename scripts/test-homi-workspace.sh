@@ -96,6 +96,27 @@ PY
 ( cd "$REPO" && git branch --list ws6 | grep -q . ) && bad "stray branch 'ws6' was created" || ok "no stray branch named ws6"
 ( cd "$REPO" && git worktree list | grep -q 'homi/ws6' ) && ok "git agrees homi/ws6 worktree exists again" || bad "worktree not recreated"
 
+echo "== re-claiming an already-claimed name must not litter a second repo"
+REPO2="$T/repo2"; mkdir -p "$REPO2"
+( cd "$REPO2" && git init -q . && git config user.email t@t && git config user.name t \
+  && echo hi > f.txt && git add f.txt && git -c commit.gpgsign=false commit -qm "first" ) >/dev/null 2>&1
+"$COMM" homi claim ws7 --cwd "$REPO" --worktree >/dev/null 2>&1
+WS7_BEFORE="$(python3 -c "import json;print(json.load(open('$ID'))['ws7']['workspace']['path'])")"
+# ws7 is already claimed; a repeat --worktree claim against a DIFFERENT repo
+# must be a true no-op -- no branch, no worktree directory, no change to the
+# already-recorded workspace (before the fix this ran `git worktree add`
+# against REPO2 and then discarded the result on the "already claimed" path).
+"$COMM" homi claim ws7 --cwd "$REPO2" --worktree >/dev/null 2>&1
+python3 - "$ID" "$WS7_BEFORE" <<'PY' && ok "re-claim against a second repo left the recorded workspace untouched" || bad "re-claim overwrote workspace"
+import json,sys
+d=json.load(open(sys.argv[1]))["ws7"]["workspace"]
+assert d["path"]==sys.argv[2], d
+assert d["worktree"] is True, d
+assert d["branch"]=="homi/ws7", d
+PY
+( cd "$REPO2" && git branch --list 'homi/ws7' | grep -q . ) && bad "re-claim created a stray homi/ws7 branch in the SECOND repo" || ok "no stray branch in the second repo"
+[ -d "$T/repo2-worktrees/ws7" ] && bad "re-claim created a stray worktree dir in the SECOND repo" || ok "no stray worktree directory in the second repo"
+
 "$COMM" homi stop >/dev/null 2>&1
 echo; echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
