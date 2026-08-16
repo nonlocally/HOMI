@@ -27,13 +27,13 @@ homi_cmd() {
   case "$sub" in
     start)     homi_start "$@";;
     __daemon)  exec python3 "$HOMI_PY" daemon;;
-    stop|status|claim|release|send|link|unlink) python3 "$HOMI_PY" call "$sub" "$@";;
+    stop|status|agents|wait|claim|release|send|ask|reply|group|notify|seat|spawn|fan|consult|link|unlink|grant|ungrant|grants|card|federate|statepath|premove|depart|arrive|move) python3 "$HOMI_PY" call "$sub" "$@";;
     inbox)     homi_inbox "$@";;
     install)   homi_install "$@";;
     uninstall) homi_uninstall "$@";;
     adopt)     homi_adopt "$@";;
     retitle)   python3 "$HOMI_PY" retitle "$@";;
-    *) die "usage: communicate homi {start|stop|status [--json]|claim|release|send|inbox|link|unlink|install|uninstall|adopt|retitle} ...";;
+    *) die "usage: communicate homi {start|stop|status|agents|claim [--boxed]|release|send|ask|reply|wait|group|notify|inbox|seat|spawn|fan|consult|move|link|unlink|grant|ungrant|grants|card|federate|install|uninstall|adopt|retitle} ...";;
   esac
 }
 

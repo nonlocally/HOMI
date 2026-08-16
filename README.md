@@ -178,21 +178,80 @@ daemon that fixes both:
   `RunAtLoad`; systemd --user on linux). `communicate down` deliberately does
   **not** stop homi — it is infrastructure; `homi uninstall` removes it.
 - **Rename-sync.** The identity name *is* the session's `/rename` name.
-  `homi adopt <name> --pane <id>` drives a live rename (via anu's `pane`);
-  `homi retitle <transcript|uuid> <name>` retitles a dormant transcript.
+  `homi adopt <name> --pane <id>` drives a live rename; `homi retitle
+  <transcript|uuid> <name>` retitles a dormant transcript; `homi spawn` adopts
+  automatically through its own seat.
+
+### v2 — two planes, and the fabric creates/moves/contains agents
+
+**Messages** (durable, acked, identity-addressed — the default) and **seats**
+(interactive terminal surfaces — the explicit escape hatch for what you cannot
+mailbox: cluster shells, REPLs, TUIs).
+
+- **ask / reply / group / notify.** `homi ask <name> "q"` blocks for the
+  correlated reply (return token `asker@device~corr`; explicit `homi reply
+  <token> "a"`, or a plain message back resolves it best-effort). `group`
+  fans one message; `notify` is the durable human-summon lane
+  (`HOMI_NOTIFY_CMD` hook). `homi wait <name>` long-polls for new mail.
+- **Seats.** `homi seat spawn|send|read|state|wait|respond|bind|kill` — a
+  clean-room tmux driver: classifier (dead>approval>busy>booting>idle, spinner
+  animation + jittered sampling), deliver-and-verify send (literal stage,
+  separate retried Enter, composer-clear check, exit-2 unconfirmed), secret
+  redaction on read, fail-closed respond (parses only the real menu block;
+  never guesses). Seats live on a dedicated tmux server (`tmux -L homi`).
+- **Cross-device seats.** Seat ops ride links as synchronous envelopes whose
+  ack carries the result. Opt-in per link: `homi link <dev> --allow-seats`
+  (upgrade in place; `--revoke-seats`). `seat spawn --device <dev>` returns
+  `<dev>:%N`; every seat verb accepts that form.
+- **spawn / fan / consult.** `homi spawn <name> --cli claude` = claim + seat +
+  bind + adopt in one verb (workers launch with `crossSessionInbound: accept`
+  scoped to their own process — mailbox-driven by construction). `fan` makes N
+  + a group; `consult` spawns-or-reuses a private peer and asks it.
+- **move.** `homi move <name> <device>` relocates the agent-being — transcript
+  (rsync, `$HOME`-translated), mailbox (recomposing merge that never re-delivers
+  acted-on mail and never loses an undelivered line), and the claim — with the
+  **address alive throughout**: depart atomically flips claim→proxy so mid-move
+  mail follows over the link. `--fork --as <new>` copies instead; `--spawn`
+  resumes it in a seat on arrival.
+- **Boxed agents.** `homi claim <name> --boxed` adopts a sandboxed VM
+  (apple/container) as a peer: the container publishes its socket pair into
+  homi's paths (`--publish-socket`), homi probes it for measured liveness,
+  delivers mail through it, and drains the box's outbox with the boxed
+  identity as attribution. `bin/homi-boxed-init` is the in-box shim. Verified
+  live under `--network none`: **the box's only egress is homi mail.**
+- **Fleets (cross-operator).** `homi federate invite/accept` exchanges
+  base64 cards (fleet, addr, ed25519 fleet-key fingerprint, inbound socket
+  path) and installs the forward-only key line
+  (`restrict,port-forwarding,command="/usr/bin/false"` + marker). Fleet links
+  are deny-by-default: `homi grant <fleet> <name>` exposes one identity;
+  ungranted/unclaimed → one ambiguous error (no enumeration, no auto-claim);
+  foreign senders proxy fleet-qualified (`orchestrator@alice`); sending to a
+  fleet auto-grants your return path; ask tokens rewrite at the boundary; the
+  control socket demands `control.token` once a fleet link exists (a
+  forward-only peer can dial sockets but can never read files).
+- **MCP faces.** `packages/homi` (`@aadarwal/homi`): an npx-installable MCP
+  server projecting ~18 tools, each one JSON line to the daemon — zero fabric
+  logic in Node ("two faces, one kernel"). `npx homi setup` installs the
+  vendored stdlib daemon + launchd and prints `claude mcp add` / `codex mcp
+  add` lines.
 
 ```sh
 communicate homi start                # or: homi install  (survives reboots)
 communicate homi claim gds-agent      # durable address; appears in ListAgents
 communicate homi send gds-agent "…"   # stored durably, delivered as a turn when live
-communicate homi inbox gds-agent      # the mailbox is a plain JSONL file
-communicate homi link mini-1 --addr aadarshs-mac-mini-1   # then: send <name>@mini-1
+communicate homi ask helper "2+2?" --from me --timeout 60   # blocking correlated ask
+communicate homi spawn worker --cli claude --cwd ~/proj     # claim+seat+bind+adopt
+communicate homi link mini-1 --addr aadarshs-mac-mini-1 --allow-seats
+communicate homi seat spawn 'bash' --device mini-1          # a seat on another device
+communicate homi move worker mini-1                         # relocate the agent-being
 communicate homi status --json        # routes, measured liveness, queues
 ```
 
-Tests: `scripts/test-homi-core.sh` (lifecycle → identities → store→wake →
-probes), `scripts/test-homi-link.sh` (two homis: envelopes/acks/retry/dedup/
-proxy/reply), `scripts/test-homi-persist.sh` (launchd KeepAlive; manual).
+Tests (171 checks, all green): `test-homi-core.sh` 46 · `test-homi-ask.sh` 10 ·
+`test-homi-link.sh` 23 · `test-homi-seat.sh` 10 · `test-homi-seat-link.sh` 9 ·
+`test-homi-spawn.sh` 10 · `test-homi-mcp.sh` 5 · `test-homi-fleet.sh` 17 ·
+`test-homi-move.sh` 17 · `test-homi-boxed.sh` 14 (+ `test-homi-persist.sh` 6,
+manual/launchd).
 
 ## Safety model
 
@@ -241,3 +300,21 @@ in the far durable inbox with arrival-line attribution (`via`), the reply
 addressed `communicate@aadarshs-mac-mini-2` came back over the far side's own
 outbound link, and store→wake delivered it into the live originating session
 as a turn; both outbound queues drained to zero (acked).
+
+homi v2 is verified — 161/161 across 10 suites, plus live proofs
+(2026-08-16, real hardware):
+
+- **Live agent loop** (mini-2): `homi spawn scout --cli claude` came up
+  claim+seat+bind+**adopted**; `homi ask scout …` delivered as a turn; the
+  agent autonomously ran the reply command; the blocking ask resolved with
+  `reply "FABRIC-ALIVE"`, latency 10.09s.
+- **Live cross-device seats** (mini-2 → air-2 over the real link): `seat
+  spawn --device` returned `aadarshs-mac-air-2:%1`; send+read round-tripped
+  (`LIVE_SEAT_E2E_42` + the far hostname), gated by `--allow-seats`.
+- **Live agent move** (mini-2 → air-2): transcript rsync'd + named on
+  arrival, mailbox merged in order (2 history + 1 straggler), origin flipped
+  to proxy — a bare-name send at the origin landed in the far inbox.
+- **Live boxed agent** (apple/container, `--network none`): the VM published
+  its socket pair; the roster read it `live [boxed-probed]`; mail in (wrapper
+  intact) and out (attributed to the boxed identity, spool acked clear); the
+  air gap held (`ENETUNREACH`) — the box's only egress was homi mail.
