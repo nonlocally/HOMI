@@ -164,8 +164,13 @@ class PM:
         self.mu = threading.Lock()
         self.mail_mu = threading.Lock()
         self.stop_ev = threading.Event()
-        self.identities = {}   # name -> {"sock": path, "claimed_at": ts}
+        self.identities = {}   # name -> {"sock", "claimed_at", "kind", ["home"]}
         self.seen = {}         # name -> set of received msg_ids (dedup)
+        self.links = {}        # device -> {"addr", "sock", "created_at"}
+        self.link_in = {}      # device -> inbound server socket (arrival line)
+        self.seen_dev = {}     # device -> set of received envelope msg_ids
+        self.link_state = {}   # device -> {"backoff_s","backoff_until","last_ok","last_err"}
+        self.out_ev = threading.Event()
         self.routes = {}       # latest materialized snapshot (dict)
         self.log_f = None
 
@@ -251,7 +256,9 @@ class PM:
 
     def _persist_identities(self):
         with self.mu:
-            data = {n: {"claimed_at": e["claimed_at"]}
+            data = {n: {"claimed_at": e["claimed_at"],
+                        "kind": e.get("kind", "local"),
+                        "home": e.get("home")}
                     for n, e in self.identities.items()}
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
@@ -307,6 +314,20 @@ class PM:
                  "from": cc_peer._addr_from(msg.get("from")) or "",
                  "from_name": m.group(1) if m else None,
                  "text": cc_peer._WRAP_INNER(content)}
+        with self.mu:
+            ent = self.identities.get(name) or {}
+            kind, home = ent.get("kind", "local"), ent.get("home")
+        if kind == "proxy":
+            # A frame to a remote peer: attribute the sender (session name by
+            # reverse socket lookup, else the wrapper's from-name) and queue
+            # the envelope toward the identity's home device.
+            frm_id = (self._name_for_socket(entry["from"])
+                      or entry["from_name"] or "unknown")
+            self._queue_out(home, {"v": 1, "kind": "m", "to": name,
+                                   "from": frm_id, "msg_id": entry["msg_id"],
+                                   "text": entry["text"], "ts": entry["ts"]})
+            self.log("queued for", "%s@%s" % (name, home), "from", frm_id)
+            return
         if self._store(name, entry):
             self.log("stored for", name, "msg_id", entry["msg_id"])
             try:
@@ -438,22 +459,38 @@ class PM:
     def _do_send(self, to, text, from_name):
         if not text:
             return {"ok": False, "err": "empty message"}
+        name, dev = (to.split("@", 1) if "@" in to else (to, None))
+        if dev == self.device:
+            dev = None
         with self.mu:
-            local = to in self.identities
-        if local:
+            ent = self.identities.get(name)
+            kind = ent.get("kind") if ent else None
+            home = ent.get("home") if ent else None
+        if dev is None and kind == "proxy":
+            dev = home  # a known remote peer is addressable by bare name
+        if dev:
+            with self.mu:
+                have_link = dev in self.links
+            if not have_link:
+                return {"ok": False, "err": "device not linked: %s" % dev}
+            env = {"v": 1, "kind": "m", "to": name, "from": from_name,
+                   "msg_id": uuid.uuid4().hex, "text": text, "ts": time.time()}
+            self._queue_out(dev, env)
+            return {"ok": True, "routed": "link:%s" % dev}
+        if kind == "local":
             entry = {"ts": time.time(), "msg_id": uuid.uuid4().hex, "from": "",
                      "from_name": from_name, "text": text}
-            self._store(to, entry)
+            self._store(name, entry)
             try:
-                self._deliver_pending(to)
+                self._deliver_pending(name)
             except Exception as e:
-                self.log("wake failed:", to, e)
+                self.log("wake failed:", name, e)
             with self.mail_mu:
-                routed = ("live" if self._read_cursor(to) >= len(self._inbox_lines(to))
+                routed = ("live" if self._read_cursor(name) >= len(self._inbox_lines(name))
                           else "inbox")
             return {"ok": True, "routed": routed}
         return {"ok": False,
-                "err": "unknown identity: %s (not claimed here; device links land later)" % to}
+                "err": "unknown identity: %s (claim it here, or address <name>@<device>)" % name}
 
     def _do_claim(self, name):
         if not self._NAME_RE.match(name or ""):
@@ -461,11 +498,15 @@ class PM:
         if name in self._RESERVED:
             return {"ok": False, "err": "'%s' is reserved" % name}
         with self.mu:
-            if name in self.identities:
-                return {"ok": True, "already": True}
+            ent = self.identities.get(name)
+        if ent is not None and ent.get("kind") == "proxy":
+            # A local claim outranks a remote proxy for the same name.
+            self._do_release(name)
+        elif ent is not None:
+            return {"ok": True, "already": True}
         sock = self.identity_sock(name)
         srv = self.bind_unix(sock)
-        ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv}
+        ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv, "kind": "local"}
         with self.mu:
             self.identities[name] = ent
         os.makedirs(self.path("mail", name), exist_ok=True)
@@ -512,9 +553,305 @@ class PM:
     def _load_identities(self):
         data = _read_json(self.path("identities.json"), {})
         for name in sorted(data):
+            e = data.get(name) or {}
+            if e.get("kind") == "proxy" and e.get("home"):
+                if not self._ensure_proxy(name, e["home"]):
+                    self.log("re-proxy failed:", name)
+                continue
             r = self._do_claim(name)
             if not r.get("ok"):
                 self.log("re-claim failed:", name, r.get("err"))
+
+    def _name_for_socket(self, sock_path):
+        """Reverse-resolve a sender socket to a session name (for envelope
+        attribution when a local session messages a proxy identity)."""
+        if not sock_path:
+            return None
+        try:
+            files = os.listdir(self.sessdir)
+        except OSError:
+            return None
+        for fn in files:
+            if not fn.endswith(".json"):
+                continue
+            d = _read_json(os.path.join(self.sessdir, fn), None)
+            if isinstance(d, dict) and d.get("messagingSocketPath") == sock_path:
+                return d.get("name")
+        return None
+
+    def _ensure_proxy(self, name, device):
+        """A remote sender becomes a local proxy peer: a stable socket + a
+        planted sidecar, so local sessions list it and reply to it by name.
+        Frames arriving on a proxy socket are queued out to its home device.
+        Never shadows a locally-claimed identity."""
+        if not self._NAME_RE.match(name or "") or name in self._RESERVED:
+            return None
+        with self.mu:
+            ent = self.identities.get(name)
+            if ent is not None:
+                return ent if ent.get("kind") == "proxy" else None
+        sock = self.identity_sock(name)
+        try:
+            srv = self.bind_unix(sock)
+        except OSError as e:
+            self.log("proxy bind failed:", name, e)
+            return None
+        ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
+               "kind": "proxy", "home": device}
+        with self.mu:
+            self.identities[name] = ent
+        self._plant(name)
+        threading.Thread(target=self._identity_server, args=(name, srv),
+                         daemon=True).start()
+        self._persist_identities()
+        self.log("proxy identity:", name, "home", device)
+        return ent
+
+    # -- links (postmaster ↔ postmaster) ------------------------------------------
+    #
+    # One link per device pair; each side manages only its OUTBOUND half, so
+    # inbound and outbound fail independently. Envelopes arrive on a
+    # per-device inbound socket (in/<device>.sock) — attribution derives from
+    # the ARRIVAL LINE, not a sender-claimed string. Delivery is
+    # at-least-once: files queue under out/<device>/ until the far postmaster
+    # acks the msg_id; receivers dedup on a per-device ring.
+
+    _DEV_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+
+    def link_in_sock(self, device):
+        return self.path("in", device + ".sock")
+
+    def _persist_links(self):
+        with self.mu:
+            data = {d: {"addr": e.get("addr"), "sock": e.get("sock"),
+                        "created_at": e.get("created_at")}
+                    for d, e in self.links.items()}
+        _atomic_write(self.path("links.json"), json.dumps(data, indent=1))
+
+    def _seed_seen_dev(self, device):
+        ids = set()
+        try:
+            with open(self.path("seen", device), encoding="utf-8") as f:
+                for line in f.readlines()[-500:]:
+                    line = line.strip()
+                    if line:
+                        ids.add(line)
+        except OSError:
+            pass
+        self.seen_dev[device] = ids
+
+    def _remember_dev_msg(self, device, msg_id):
+        self.seen_dev.setdefault(device, set()).add(msg_id)
+        try:
+            with open(self.path("seen", device), "a", encoding="utf-8") as f:
+                f.write(msg_id + "\n")
+        except OSError:
+            pass
+
+    def _do_link(self, device, addr=None, sock=None):
+        if not self._DEV_RE.match(device or ""):
+            return {"ok": False, "err": "invalid device name"}
+        if device == self.device:
+            return {"ok": False, "err": "refusing to link to self"}
+        if device not in self.link_in:
+            srv = self.bind_unix(self.link_in_sock(device))
+            self.link_in[device] = srv
+            threading.Thread(target=self._link_server, args=(device, srv),
+                             daemon=True).start()
+        self._seed_seen_dev(device)
+        os.makedirs(self.path("out", device), exist_ok=True)
+        with self.mu:
+            self.links[device] = {"addr": addr, "sock": sock,
+                                  "created_at": time.time()}
+        self._persist_links()
+        self.out_ev.set()
+        self.log("linked device:", device, "->", sock or addr or "?")
+        return {"ok": True}
+
+    def _do_unlink(self, device):
+        with self.mu:
+            ent = self.links.pop(device, None)
+        srv = self.link_in.pop(device, None)
+        if srv:
+            try:
+                srv.close()
+            except OSError:
+                pass
+            try:
+                os.unlink(self.link_in_sock(device))
+            except OSError:
+                pass
+        if not ent:
+            return {"ok": False, "err": "not linked: %s" % device}
+        self._persist_links()
+        self.log("unlinked device:", device)
+        return {"ok": True}
+
+    def _load_links(self):
+        data = _read_json(self.path("links.json"), {})
+        for device, e in sorted(data.items()):
+            r = self._do_link(device, addr=(e or {}).get("addr"),
+                              sock=(e or {}).get("sock"))
+            if not r.get("ok"):
+                self.log("re-link failed:", device, r.get("err"))
+
+    def _link_server(self, device, srv):
+        while not self.stop_ev.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._link_conn, args=(device, conn),
+                             daemon=True).start()
+
+    def _link_conn(self, device, conn):
+        raw = cc_peer._read_line(conn, timeout=2.0)
+        line = raw.split(b"\n", 1)[0].strip()
+        resp = None
+        if line:
+            try:
+                env = json.loads(line.decode("utf-8", "replace"))
+            except Exception:
+                env = None
+            if isinstance(env, dict):
+                try:
+                    resp = self._recv_envelope(device, env)
+                except Exception as e:
+                    self.log("recv envelope failed:", device, e)
+                    resp = {"ok": False, "err": str(e)}
+        if resp is not None:
+            try:
+                conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+            except OSError:
+                pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    def _recv_envelope(self, device, env):
+        if env.get("v") != 1 or env.get("kind") != "m":
+            return {"ok": False, "err": "bad envelope"}
+        to = env.get("to") or ""
+        frm = env.get("from") or "unknown"
+        mid = env.get("msg_id") or ""
+        text = env.get("text") or ""
+        if not to or not mid or not text:
+            return {"ok": False, "err": "bad envelope"}
+        if mid in self.seen_dev.setdefault(device, set()):
+            return {"ok": True, "ack": mid, "dup": True}
+        self._ensure_proxy(frm, device)
+        with self.mu:
+            ent = self.identities.get(to)
+            kind = ent.get("kind") if ent else None
+        if kind == "proxy":
+            return {"ok": False,
+                    "err": "%s is not local here (multi-hop not supported)" % to}
+        if ent is None:
+            r = self._do_claim(to)  # auto-claim: local mail never bounces
+            if not r.get("ok"):
+                return {"ok": False, "err": "cannot claim %s: %s" % (to, r.get("err"))}
+            self.log("auto-claimed", to, "for inbound mail via", device)
+        entry = {"ts": time.time(), "msg_id": mid, "from": "",
+                 "from_name": frm, "via": device, "text": text}
+        self._store(to, entry)
+        self._remember_dev_msg(device, mid)
+        try:
+            self._deliver_pending(to)
+        except Exception as e:
+            self.log("wake failed:", to, e)
+        return {"ok": True, "ack": mid}
+
+    def _queue_out(self, device, env):
+        d = self.path("out", device)
+        os.makedirs(d, exist_ok=True)
+        fn = "%016d-%s.json" % (int(env.get("ts", time.time()) * 1000), env["msg_id"])
+        _atomic_write(os.path.join(d, fn), json.dumps(env))
+        self.out_ev.set()
+
+    def _link_endpoint(self, device):
+        with self.mu:
+            ent = self.links.get(device) or {}
+        if ent.get("sock"):
+            return ent["sock"]
+        return None  # the ssh transport fills this in
+
+    def _send_envelope(self, endpoint, env):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        try:
+            s.connect(endpoint)
+            s.sendall((json.dumps(env) + "\n").encode("utf-8"))
+            raw = cc_peer._read_line(s, timeout=5.0)
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+        line = raw.split(b"\n", 1)[0].strip()
+        if not line:
+            raise OSError("no ack")
+        resp = json.loads(line.decode("utf-8", "replace"))
+        if not (resp.get("ok") and resp.get("ack") == env["msg_id"]):
+            raise OSError("bad ack: %r" % (resp,))
+
+    def outbound_loop(self):
+        """Drain out/<device>/ queues in order; ack-then-delete; exponential
+        backoff per device on failure. Independent of everything inbound."""
+        while not self.stop_ev.is_set():
+            self.out_ev.wait(1.0)
+            self.out_ev.clear()
+            if self.stop_ev.is_set():
+                return
+            with self.mu:
+                devices = list(self.links)
+            now = time.time()
+            for dev in devices:
+                st = self.link_state.setdefault(dev, {})
+                if now < st.get("backoff_until", 0):
+                    continue
+                qdir = self.path("out", dev)
+                try:
+                    files = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))
+                except OSError:
+                    continue
+                if not files:
+                    continue
+                endpoint = self._link_endpoint(dev)
+                if not endpoint:
+                    st["last_err"] = "no transport"
+                    continue
+                sent = 0
+                for fn in files:
+                    fp = os.path.join(qdir, fn)
+                    env = _read_json(fp, None)
+                    if not isinstance(env, dict) or not env.get("msg_id"):
+                        try:
+                            os.unlink(fp)
+                        except OSError:
+                            pass
+                        continue
+                    try:
+                        self._send_envelope(endpoint, env)
+                    except (OSError, ValueError) as e:
+                        st["backoff_s"] = (1 if not st.get("backoff_s")
+                                           else min(st["backoff_s"] * 2, 30))
+                        st["backoff_until"] = time.time() + st["backoff_s"]
+                        st["last_err"] = str(e)
+                        self.log("link", dev, "send failed (backoff %ss):"
+                                 % st["backoff_s"], e)
+                        break
+                    try:
+                        os.unlink(fp)
+                    except OSError:
+                        pass
+                    sent += 1
+                if sent:
+                    st["backoff_s"] = 0
+                    st["backoff_until"] = 0
+                    st["last_ok"] = time.time()
+                    st["last_err"] = None
+                    self.log("link", dev, "delivered", sent, "envelope(s)")
 
     # -- status --
     def build_status(self, fresh_probe=True):
@@ -529,9 +866,14 @@ class PM:
                             "ts": time.time()}
         smap = self._scan_sidecars()
         with self.mu:
-            items = [(n, e["sock"], e["claimed_at"]) for n, e in self.identities.items()]
+            items = [(n, e["sock"], e["claimed_at"], e.get("kind", "local"),
+                      e.get("home")) for n, e in self.identities.items()]
         idents = {}
-        for n, sockp, claimed in items:
+        for n, sockp, claimed, kind, home in items:
+            if kind == "proxy":
+                idents[n] = {"kind": "proxy", "home": home, "sock": sockp,
+                             "claimed_at": claimed}
+                continue
             cands = smap.get(n) or []
             sess = self._choose_session(cands)
             if sess and fresh_probe:
@@ -556,12 +898,26 @@ class PM:
                                       if sess else None)},
                 "inbox": {"count": count, "undelivered": max(0, count - cur)},
             }
+        with self.mu:
+            linkents = {d: dict(e) for d, e in self.links.items()}
+        links = {}
+        for d, e in linkents.items():
+            lst = self.link_state.get(d, {})
+            try:
+                q = len([f for f in os.listdir(self.path("out", d))
+                         if f.endswith(".json")])
+            except OSError:
+                q = 0
+            links[d] = {"endpoint": e.get("sock") or e.get("addr"),
+                        "queue": q, "last_ok": lst.get("last_ok"),
+                        "last_err": lst.get("last_err"),
+                        "in_sock": self.link_in_sock(d)}
         return {"ok": True,
                 "self": {"device": self.device, "pid": self.pid,
                          "state_root": self.root, "sock_dir": self.sockdir,
                          "socks": socks},
                 "identities": idents,
-                "links": {},
+                "links": links,
                 "ts": time.time()}
 
     def write_routes(self):
@@ -583,6 +939,11 @@ class PM:
         if op == "send":
             return self._do_send(req.get("to", ""), req.get("text", ""),
                                  req.get("from") or "cli")
+        if op == "link":
+            return self._do_link(req.get("device", ""), addr=req.get("addr"),
+                                 sock=req.get("sock"))
+        if op == "unlink":
+            return self._do_unlink(req.get("device", ""))
         if op == "stop":
             threading.Thread(target=self._delayed_shutdown, daemon=True).start()
             return {"ok": True, "stopping": True}
@@ -652,6 +1013,7 @@ class PM:
         with self.mu:
             names = list(self.identities)
             socks = {n: self.identities[n]["sock"] for n in names}
+            kinds = {n: self.identities[n].get("kind", "local") for n in names}
         for name in names:
             # Self-heal: a lost socket file means our published address is a
             # lie; re-bind before anything else (self-probe discipline).
@@ -661,6 +1023,14 @@ class PM:
                     self._rebind(name)
                 except Exception as e:
                     self.log("rebind failed:", name, e)
+            if kinds[name] == "proxy":
+                # Proxies have no local mailbox to drain and no session to
+                # defer to — they just stay listed and route outward.
+                try:
+                    self._plant(name)
+                except Exception as e:
+                    self.log("plant failed:", name, e)
+                continue
             sess = self._choose_session(smap.get(name) or [])
             if sess:
                 self._unplant(name)
@@ -682,6 +1052,12 @@ class PM:
             names = list(self.identities)
             for ent in self.identities.values():
                 paths.append(ent["sock"])
+        for d, srv in list(self.link_in.items()):
+            try:
+                srv.close()
+            except OSError:
+                pass
+            paths.append(self.link_in_sock(d))
         for n in names:
             self._unplant(n)
         for p in paths:
@@ -710,6 +1086,8 @@ class PM:
                  % (self.device, self.pid, self.root, self.sockdir))
         threading.Thread(target=self.control_server, daemon=True).start()
         self._load_identities()
+        self._load_links()
+        threading.Thread(target=self.outbound_loop, daemon=True).start()
         self.write_routes()
         self.tick_loop()
         self.shutdown()
@@ -803,6 +1181,29 @@ def cli_call(argv):
                    "from": frm})
         if r.get("ok"):
             print("routed: %s" % r.get("routed"))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op in ("link", "unlink"):
+        if not args:
+            sys.stderr.write("usage: communicate pm %s <device> [--addr user@host] [--sock path]\n" % op)
+            return 1
+        req = {"op": op, "device": args[0]}
+        if "--sock" in args:
+            try:
+                req["sock"] = args[args.index("--sock") + 1]
+            except IndexError:
+                sys.stderr.write("--sock needs a value\n")
+                return 1
+        if "--addr" in args:
+            try:
+                req["addr"] = args[args.index("--addr") + 1]
+            except IndexError:
+                sys.stderr.write("--addr needs a value\n")
+                return 1
+        r = _call(req)
+        if r.get("ok"):
+            print("%sed %s" % (op, args[0]))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
