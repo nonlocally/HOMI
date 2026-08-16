@@ -50,6 +50,7 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cc_peer  # deliver, _sidecar_obj, _read_line, _extract_text, _addr_from
+import homi_seat  # the seat plane (tmux driver); imported lazily-usable, no tmux at import
 
 
 # ---- paths / env -------------------------------------------------------------
@@ -187,6 +188,7 @@ class Homi:
         self.pending = {}
         self.pending_by_asker = {}   # asker -> [corr, ...] FIFO for natural-reply fallback
         self.pending_mu = threading.Lock()
+        self._seat = None            # lazily-built SeatDriver (needs tmux at runtime)
         self.routes = {}       # latest materialized snapshot (dict)
         self.log_f = None
 
@@ -320,7 +322,8 @@ class Homi:
         with self.mu:
             data = {n: {"claimed_at": e["claimed_at"],
                         "kind": e.get("kind", "local"),
-                        "home": e.get("home")}
+                        "home": e.get("home"),
+                        "seat": e.get("seat")}
                     for n, e in self.identities.items()}
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
@@ -687,6 +690,61 @@ class Homi:
         return {"ok": ok,
                 "results": {n: (r.get("routed") or r.get("err"))
                             for n, r in results.items()}}
+
+    # -- seat plane (interactive surfaces) --------------------------------------
+
+    def _seat_drv(self):
+        if self._seat is None:
+            self._seat = homi_seat.SeatDriver(log=self.log)
+        return self._seat
+
+    def _do_seat(self, sub, req):
+        drv = self._seat_drv()
+        try:
+            if sub == "ls":
+                return drv.ls()
+            if sub == "spawn":
+                cmd = req.get("cmd")
+                if not cmd:
+                    return {"ok": False, "err": "seat spawn needs a command"}
+                return drv.spawn(cmd, cwd=req.get("cwd"),
+                                 window_name=req.get("name"))
+            if sub == "send":
+                return drv.send(req.get("seat", ""), req.get("text", ""))
+            if sub == "read":
+                return drv.read(req.get("seat", ""),
+                                lines=int(req.get("lines") or 40),
+                                raw=bool(req.get("raw")))
+            if sub == "state":
+                return {"ok": True, "seat": req.get("seat"),
+                        "state": drv.state(req.get("seat", ""))}
+            if sub == "wait":
+                return drv.wait(req.get("seat", ""),
+                                timeout=float(req.get("timeout") or 120))
+            if sub == "respond":
+                return drv.respond(req.get("seat", ""),
+                                   decision=req.get("decision") or "allow")
+            if sub == "interrupt":
+                return drv.interrupt(req.get("seat", ""))
+            if sub == "kill":
+                return drv.kill(req.get("seat", ""))
+            if sub == "bind":
+                return self._do_seat_bind(req.get("seat", ""), req.get("name", ""))
+            return {"ok": False, "err": "unknown seat op: %s" % sub}
+        except homi_seat.SeatError as e:
+            return {"ok": False, "err": str(e)}
+
+    def _do_seat_bind(self, seat, name):
+        if not seat or not name:
+            return {"ok": False, "err": "seat bind needs <seat> <name>"}
+        with self.mu:
+            ent = self.identities.get(name)
+            if not ent or ent.get("kind") != "local":
+                return {"ok": False, "err": "claim %s first (local identity)" % name}
+            ent["seat"] = seat
+        self._persist_identities()
+        self.log("bound seat", seat, "->", name)
+        return {"ok": True, "seat": seat, "name": name}
 
     def _do_notify(self, reason, from_name):
         if not reason:
@@ -1381,6 +1439,8 @@ class Homi:
                                   req.get("from") or "cli")
         if op == "notify":
             return self._do_notify(req.get("reason", ""), req.get("from") or "")
+        if op == "seat":
+            return self._do_seat(req.get("sub", ""), req)
         if op == "link":
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
                                  sock=req.get("sock"),
@@ -1717,6 +1777,95 @@ def cli_call(argv):
         r = _call({"op": "notify", "reason": " ".join(args), "from": frm})
         print("notified" if r.get("ok") else (r.get("err") or "failed"))
         return 0 if r.get("ok") else 1
+    if op == "seat":
+        if not args:
+            sys.stderr.write("usage: communicate homi seat "
+                             "{ls|spawn|send|read|state|wait|respond|bind|kill} ...\n")
+            return 1
+        sub, sargs = args[0], args[1:]
+        req = {"op": "seat", "sub": sub}
+        sock_to = 12.0
+        if sub == "ls":
+            r = _call(req)
+            for s in (r.get("seats") or []):
+                print("%-7s %-12s %s" % (s["seat"], s["cmd"], s["title"]))
+            return 0 if r.get("ok") else 1
+        if sub == "spawn":
+            cwd = winname = None
+            rest = []
+            i = 0
+            while i < len(sargs):
+                if sargs[i] == "--cwd" and i + 1 < len(sargs):
+                    cwd = sargs[i + 1]; i += 2; continue
+                if sargs[i] == "--name" and i + 1 < len(sargs):
+                    winname = sargs[i + 1]; i += 2; continue
+                rest.append(sargs[i]); i += 1
+            if not rest:
+                sys.stderr.write("usage: communicate homi seat spawn <command...> [--cwd DIR] [--name WIN]\n")
+                return 1
+            req.update({"cmd": " ".join(rest), "cwd": cwd, "name": winname})
+            r = _call(req)
+            print(r.get("seat") if r.get("ok") else (r.get("err") or "failed"))
+            return 0 if r.get("ok") else 1
+        if sub in ("send",):
+            if len(sargs) < 2:
+                sys.stderr.write("usage: communicate homi seat send <seat> <text...>\n")
+                return 1
+            req.update({"seat": sargs[0], "text": " ".join(sargs[1:])})
+            r = _call(req)
+            if r.get("ok"):
+                print("sent")
+                return 0
+            sys.stderr.write((r.get("err") or "failed") + "\n")
+            return 2 if r.get("sent") else 1
+        if sub == "read":
+            raw = "--raw" in sargs
+            lines = 40
+            if "--lines" in sargs:
+                lines = int(sargs[sargs.index("--lines") + 1])
+            seatid = [a for a in sargs if not a.startswith("--")
+                      and a != str(lines)][0] if sargs else ""
+            req.update({"seat": seatid, "lines": lines, "raw": raw})
+            r = _call(req)
+            if r.get("ok"):
+                print(r.get("screen", ""))
+                return 0
+            sys.stderr.write((r.get("err") or "failed") + "\n")
+            return 1
+        if sub == "state":
+            req["seat"] = sargs[0] if sargs else ""
+            r = _call(req)
+            print(r.get("state") if r.get("ok") else (r.get("err") or "failed"))
+            return 0 if r.get("ok") else 1
+        if sub == "wait":
+            to = 120.0
+            if "--timeout" in sargs:
+                to = float(sargs[sargs.index("--timeout") + 1])
+            req.update({"seat": sargs[0] if sargs else "", "timeout": to})
+            r = _call(req, timeout=to + 15)
+            print(json.dumps({k: r.get(k) for k in ("ok", "state", "sawbusy")}))
+            return 0 if r.get("ok") else 1
+        if sub == "respond":
+            req.update({"seat": sargs[0] if sargs else "",
+                        "decision": "deny" if "--deny" in sargs else "allow"})
+            r = _call(req)
+            print(r.get("responded") if r.get("ok") else (r.get("err") or "failed"))
+            return 0 if r.get("ok") else 1
+        if sub == "bind":
+            if len(sargs) < 2:
+                sys.stderr.write("usage: communicate homi seat bind <seat> <name>\n")
+                return 1
+            req.update({"seat": sargs[0], "name": sargs[1]})
+            r = _call(req)
+            print("bound" if r.get("ok") else (r.get("err") or "failed"))
+            return 0 if r.get("ok") else 1
+        if sub in ("kill", "interrupt"):
+            req["seat"] = sargs[0] if sargs else ""
+            r = _call(req)
+            print("ok" if r.get("ok") else (r.get("err") or "failed"))
+            return 0 if r.get("ok") else 1
+        sys.stderr.write("unknown seat op: %s\n" % sub)
+        return 1
     if op in ("link", "unlink"):
         if not args:
             sys.stderr.write("usage: communicate homi %s <device> [--addr user@host] [--sock path]\n" % op)
