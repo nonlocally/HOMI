@@ -28,6 +28,17 @@ for k in sys.argv[1:]:
     d=d[k]
 print(d)' "$@" 2>/dev/null; }
 
+# Locate the postmaster's planted sidecar for a name (filenames are numeric).
+pm_sidecar() {
+  local f
+  for f in "$PM_SESSIONS_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    grep -q "\"name\":\"$1\"" "$f" 2>/dev/null || continue
+    grep -q '\"version\":\"communicate-pm\"' "$f" 2>/dev/null && { printf '%s' "$f"; return 0; }
+  done
+  return 1
+}
+
 echo "== section 1: lifecycle"
 if "$COMM" pm start >/dev/null 2>&1; then ok "pm start"; else bad "pm start"; fi
 if [ -f "$PMS/daemon.pid" ] && kill -0 "$(cat "$PMS/daemon.pid")" 2>/dev/null; then
@@ -53,13 +64,17 @@ echo "== section 3: identities (claim/release)"
 "$COMM" pm start >/dev/null 2>&1
 if "$COMM" pm claim alice >/dev/null 2>&1; then ok "claim alice"; else bad "claim alice"; fi
 ASOCK="$PM_SOCK_DIR/pm-alice.sock"
-ASIDE="$PM_SESSIONS_DIR/pm-alice.json"
 if [ -S "$ASOCK" ]; then ok "identity socket bound"; else bad "identity socket bound"; fi
 amode="$(stat -f '%Lp' "$ASOCK" 2>/dev/null || stat -c '%a' "$ASOCK" 2>/dev/null)"
 if [ "$amode" = "600" ]; then ok "identity socket 0600"; else bad "identity socket 0600 (got $amode)"; fi
-if [ -f "$ASIDE" ] && grep -q '"name":"alice"' "$ASIDE" && grep -q '"version":"communicate-pm"' "$ASIDE"; then
-  ok "sweep-proof sidecar planted (compact)"
+ASIDE="$(pm_sidecar alice)"
+if [ -n "$ASIDE" ] && grep -q '"version":"communicate-pm"' "$ASIDE"; then
+  ok "sweep-proof sidecar planted (compact, numeric filename)"
 else bad "sweep-proof sidecar planted"; fi
+case "$(basename "${ASIDE:-x}")" in
+  [0-9]*.json) ok "sidecar filename is pid-shaped";;
+  *) bad "sidecar filename is pid-shaped (got $(basename "${ASIDE:-none}"))";;
+esac
 dpid="$(cat "$PMS/daemon.pid")"
 if grep -q "\"pid\":$dpid" "$ASIDE"; then ok "sidecar pid is daemon's (live)"; else bad "sidecar pid is daemon's"; fi
 st="$("$COMM" pm status --json 2>/dev/null)"
@@ -68,11 +83,11 @@ if [ "$(printf '%s' "$st" | jget self socks pm-alice.sock state)" = "live" ]; th
 if [ -d "$PMS/mail/alice" ]; then ok "mailbox dir created"; else bad "mailbox dir created"; fi
 if "$COMM" pm release alice >/dev/null 2>&1; then ok "release alice"; else bad "release alice"; fi
 sleep 0.3
-if [ ! -S "$ASOCK" ] && [ ! -f "$ASIDE" ]; then ok "release unbinds + unplants"; else bad "release unbinds + unplants"; fi
+if [ ! -S "$ASOCK" ] && [ -z "$(pm_sidecar alice)" ]; then ok "release unbinds + unplants"; else bad "release unbinds + unplants"; fi
 "$COMM" pm claim alice >/dev/null 2>&1
 "$COMM" pm stop >/dev/null 2>&1; sleep 0.5
 "$COMM" pm start >/dev/null 2>&1; sleep 1.5
-if [ -S "$ASOCK" ] && [ -f "$ASIDE" ]; then ok "claim survives restart"; else bad "claim survives restart"; fi
+if [ -S "$ASOCK" ] && [ -n "$(pm_sidecar alice)" ]; then ok "claim survives restart"; else bad "claim survives restart"; fi
 "$COMM" pm stop >/dev/null 2>&1
 
 echo "== section 4: inbox store + dedup"
@@ -123,7 +138,7 @@ done
 if [ "$woke" = "1" ]; then ok "store→wake drained M1 into live session"; else bad "store→wake drained M1"; fi
 if [ "$(cat "$BCUR" 2>/dev/null || echo 0)" = "1" ]; then ok "cursor advanced"; else bad "cursor advanced"; fi
 sleep 1.5
-if [ ! -f "$PM_SESSIONS_DIR/pm-bob.json" ]; then ok "pm sidecar unplanted while live"; else bad "pm sidecar unplanted while live"; fi
+if [ -z "$(pm_sidecar bob)" ]; then ok "pm sidecar unplanted while live"; else bad "pm sidecar unplanted while live"; fi
 "$COMM" pm send bob "M2 while live" --from opsender >/dev/null 2>&1
 deadline=$((SECONDS + 6)); m2=0
 while [ $SECONDS -lt $deadline ]; do
@@ -132,7 +147,7 @@ while [ $SECONDS -lt $deadline ]; do
 done
 if [ "$m2" = "1" ]; then ok "live delivery M2"; else bad "live delivery M2"; fi
 kill "$STANDIN_PID" 2>/dev/null; sleep 2.5
-if [ -f "$PM_SESSIONS_DIR/pm-bob.json" ]; then ok "sidecar replanted after death"; else bad "sidecar replanted after death"; fi
+if [ -n "$(pm_sidecar bob)" ]; then ok "sidecar replanted after death"; else bad "sidecar replanted after death"; fi
 "$COMM" pm send bob "M3 after death" --from opsender >/dev/null 2>&1
 sleep 0.5
 if [ "$(cat "$BCUR" 2>/dev/null)" = "2" ] && grep -q "M3 after death" "$BINBOX"; then

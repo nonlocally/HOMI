@@ -46,6 +46,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cc_peer  # deliver, _sidecar_obj, _read_line, _extract_text, _addr_from
@@ -253,7 +254,18 @@ class PM:
         return os.path.join(self.sockdir, "pm-%s.sock" % name)
 
     def sidecar_path(self, name):
-        return os.path.join(self.sessdir, "pm-%s.json" % name)
+        """Discovery only LISTS sidecars whose filename is pid-shaped (verified
+        live 2026-08-15: a pm-<name>.json plant survives the sweep but never
+        appears in ListAgents; the same object as 3999901.json is listed).
+        So: deterministic numeric filenames well above any real pid
+        (macOS pid_max is 99998), linear-probed on cross-name collision."""
+        n = 3000000 + (zlib.crc32(name.encode("utf-8")) % 900000)
+        while True:
+            p = os.path.join(self.sessdir, "%d.json" % n)
+            d = _read_json(p, None)
+            if d is None or d.get("name") == name:
+                return p
+            n += 1
 
     def _persist_identities(self):
         with self.mu:

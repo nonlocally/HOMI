@@ -54,7 +54,12 @@ if [ "$qn" = "0" ]; then ok "A outbound queue empty (acked)"; else bad "A outbou
 
 echo "== proxy identity for the remote sender"
 wait_for 6 "B grew proxy socket for tester" test -S "$B_SOCKS/pm-tester.sock"
-if grep -q '"name":"tester"' "$B_SESS/pm-tester.json" 2>/dev/null; then ok "B planted proxy sidecar"; else bad "B planted proxy sidecar"; fi
+tside=""
+for f in "$B_SESS"/*.json; do
+  [ -f "$f" ] || continue
+  grep -q '"name":"tester"' "$f" 2>/dev/null && grep -q '"version":"communicate-pm"' "$f" 2>/dev/null && { tside="$f"; break; }
+done
+if [ -n "$tside" ]; then ok "B planted proxy sidecar"; else bad "B planted proxy sidecar"; fi
 
 echo "== reply routing (proxy -> link -> auto-claimed mailbox)"
 python3 "$HERE/lib/cc_peer.py" send --to "$B_SOCKS/pm-tester.sock" --text "reply back" \
