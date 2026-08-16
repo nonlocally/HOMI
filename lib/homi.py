@@ -353,7 +353,8 @@ class Homi:
             data = {n: {"claimed_at": e["claimed_at"],
                         "kind": e.get("kind", "local"),
                         "home": e.get("home"),
-                        "seat": e.get("seat")}
+                        "seat": e.get("seat"),
+                        "boxed": e.get("boxed", False)}
                     for n, e in self.identities.items()}
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
@@ -582,6 +583,14 @@ class Homi:
                 cur = self._read_cursor(name)
             if cur >= len(lines):
                 return
+            with self.mu:
+                ent = self.identities.get(name) or {}
+            if ent.get("boxed"):
+                # A boxed agent's published socket IS its session socket.
+                if probe(ent["sock"]) == "live":
+                    sess = {"messagingSocketPath": ent["sock"]}
+                else:
+                    return  # container down: hold mail durably
             if sess is None:
                 sess = self._choose_session(self._scan_sidecars().get(name) or [])
             if not sess:
@@ -1136,7 +1145,7 @@ class Homi:
         return {"ok": False,
                 "err": "unknown identity: %s (claim it here, or address <name>@<device>)" % name}
 
-    def _do_claim(self, name):
+    def _do_claim(self, name, boxed=False):
         if not self._NAME_RE.match(name or ""):
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
         if name in self._RESERVED:
@@ -1150,6 +1159,28 @@ class Homi:
             elif ent is not None:
                 return {"ok": True, "already": True}
             sock = self.identity_sock(name)
+            if boxed:
+                # A BOXED identity: the socket is published INTO the sockdir by
+                # the container (vsock forwarder, guest-listener/host-connector
+                # — the only direction that works; measured). Homi never binds
+                # it; it records the path as authoritative, probes it for
+                # liveness, and drains the box's outbox socket. To every local
+                # session the boxed agent looks like any other peer.
+                ent = {"sock": sock, "claimed_at": time.time(), "_srv": None,
+                       "kind": "local", "boxed": True}
+                with self.mu:
+                    self.identities[name] = ent
+                os.makedirs(self.path("mail", name), exist_ok=True)
+                os.makedirs(self.path("boxes", name), exist_ok=True)
+                self._seed_seen(name)
+                self._plant(name)
+                threading.Thread(target=self._box_drain_loop, args=(name,),
+                                 daemon=True).start()
+                self._persist_identities()
+                self.log("claimed BOXED identity:", name, "-> published", sock)
+                return {"ok": True, "boxed": True,
+                        "publish_in": sock,
+                        "publish_out": self.path("boxes", name, "outbox.sock")}
             srv = self.bind_unix(sock)
             ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
                    "kind": "local"}
@@ -1164,6 +1195,65 @@ class Homi:
         self.log("claimed identity:", name, "->", sock)
         return {"ok": True}
 
+    def _box_drain_loop(self, name):
+        """Hold a persistent connection to a boxed agent's OUTBOX socket (the
+        second published socket) and route every frame it emits. At-least-once:
+        each frame carries msg_id; we ack on the same connection after routing,
+        and the in-box shim clears its spool on ack. The from-rewrite happens
+        here — a guest path means nothing on the host; attribution is the boxed
+        identity itself."""
+        out_sock = self.path("boxes", name, "outbox.sock")
+        backoff = 1.0
+        while not self.stop_ev.is_set():
+            with self.mu:
+                ent = self.identities.get(name)
+            if not ent or not ent.get("boxed"):
+                return  # released or re-claimed unboxed: stop draining
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            try:
+                s.connect(out_sock)
+                backoff = 1.0
+                buf = b""
+                while not self.stop_ev.is_set():
+                    try:
+                        chunk = s.recv(65536)
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        break  # box side closed; reconnect
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        if not line.strip():
+                            continue
+                        try:
+                            fr = json.loads(line.decode("utf-8", "replace"))
+                        except Exception:
+                            continue
+                        to = fr.get("to") or ""
+                        text = fr.get("text") or ""
+                        mid = fr.get("msg_id") or ""
+                        if to and text:
+                            r = self._do_send(to, text, name)
+                            ok = bool(r.get("ok"))
+                        else:
+                            ok = False
+                        try:
+                            s.sendall((json.dumps(
+                                {"ack": mid, "ok": ok}) + "\n").encode())
+                        except OSError:
+                            break
+            except OSError:
+                pass
+            finally:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+            self.stop_ev.wait(backoff)
+            backoff = min(backoff * 2, 15.0)
+
     def _do_release(self, name):
         with self.claim_mu:
             with self.mu:
@@ -1171,11 +1261,15 @@ class Homi:
             if not ent:
                 return {"ok": False, "err": "not claimed: %s" % name}
             try:
-                ent["_srv"].close()
+                if ent.get("_srv") is not None:
+                    ent["_srv"].close()
             except OSError:
                 pass
             try:
-                os.unlink(ent["sock"])
+                # A boxed identity's socket belongs to the container's
+                # forwarder — never unlink it out from under a running box.
+                if not ent.get("boxed"):
+                    os.unlink(ent["sock"])
             except OSError:
                 pass
             self._unplant(name)
@@ -1206,7 +1300,7 @@ class Homi:
                 if not self._ensure_proxy(name, e["home"]):
                     self.log("re-proxy failed:", name)
                 continue
-            r = self._do_claim(name)
+            r = self._do_claim(name, boxed=bool(e.get("boxed")))
             if not r.get("ok"):
                 self.log("re-claim failed:", name, r.get("err"))
             elif e.get("seat"):
@@ -1900,12 +1994,28 @@ class Homi:
         smap = self._scan_sidecars()
         with self.mu:
             items = [(n, e["sock"], e["claimed_at"], e.get("kind", "local"),
-                      e.get("home"), e.get("seat")) for n, e in self.identities.items()]
+                      e.get("home"), e.get("seat"), e.get("boxed", False))
+                     for n, e in self.identities.items()]
         idents = {}
-        for n, sockp, claimed, kind, home, seat in items:
+        for n, sockp, claimed, kind, home, seat, boxed in items:
             if kind == "proxy":
                 idents[n] = {"kind": "proxy", "home": home, "sock": sockp,
                              "claimed_at": claimed}
+                continue
+            if boxed:
+                # A boxed agent's liveness is the published socket, measured.
+                alive = probe(sockp) == "live"
+                with self.mail_mu:
+                    count = len(self._inbox_lines(n))
+                    cur = self._read_cursor(n)
+                idents[n] = {
+                    "kind": "local", "sock": sockp, "claimed_at": claimed,
+                    "boxed": True,
+                    "route": {"state": "live" if alive else "stored",
+                              "provenance": "boxed-probed", "session": None},
+                    "inbox": {"count": count, "undelivered": max(0, count - cur)},
+                    "seat": seat,
+                }
                 continue
             cands = smap.get(n) or []
             sess = self._choose_session(cands)
@@ -1985,7 +2095,8 @@ class Homi:
                                  float(req.get("timeout") or 60),
                                  after_msg_id=req.get("after_msg_id"))
         if op == "claim":
-            return self._do_claim(req.get("name", ""))
+            return self._do_claim(req.get("name", ""),
+                                  boxed=bool(req.get("boxed")))
         if op == "release":
             return self._do_release(req.get("name", ""))
         if op == "send":
@@ -2127,7 +2238,19 @@ class Homi:
             names = list(self.identities)
             socks = {n: self.identities[n]["sock"] for n in names}
             kinds = {n: self.identities[n].get("kind", "local") for n in names}
+        with self.mu:
+            boxed = {n: self.identities[n].get("boxed", False) for n in names}
         for name in names:
+            if boxed.get(name):
+                # A boxed identity's socket belongs to the CONTAINER's vsock
+                # forwarder — never rebind it. Deliver held mail whenever the
+                # published socket answers (the box's store→wake).
+                with self.mail_mu:
+                    undeliv = len(self._inbox_lines(name)) > self._read_cursor(name)
+                if undeliv and probe(socks[name]) == "live":
+                    threading.Thread(target=self._safe_deliver, args=(name,),
+                                     daemon=True).start()
+                continue
             # Self-heal: a lost socket file means our published address is a
             # lie; re-bind before anything else (self-probe discipline).
             if not os.path.exists(socks[name]):
@@ -2705,12 +2828,22 @@ def cli_call(argv):
             sys.stderr.write("timeout\n")
         return 0 if r.get("ok") else 1
     if op in ("claim", "release"):
+        boxed = "--boxed" in args
+        args = [a for a in args if a != "--boxed"]
         if not args:
-            sys.stderr.write("usage: communicate homi %s <name>\n" % op)
+            sys.stderr.write("usage: communicate homi %s <name> [--boxed]\n" % op)
             return 1
-        r = _call({"op": op, "name": args[0]})
+        req = {"op": op, "name": args[0]}
+        if boxed and op == "claim":
+            req["boxed"] = True
+        r = _call(req)
         if r.get("ok"):
-            print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
+            if r.get("boxed"):
+                print("claimed %s (boxed). Publish these from the container:" % args[0])
+                print("  --publish-socket %s:/run/homi/agent.sock" % r.get("publish_in"))
+                print("  --publish-socket %s:/run/homi/outbox.sock" % r.get("publish_out"))
+            else:
+                print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
