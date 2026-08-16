@@ -30,7 +30,15 @@
 #                       the homi: durable identities, mailboxes, device links
 #
 set -o pipefail
-COMM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve symlinks so `ln -s .../bin/communicate ~/.local/bin/` works: lib/
+# lives beside the REAL script, not beside the symlink.
+_SELF="${BASH_SOURCE[0]}"
+while [ -L "$_SELF" ]; do
+  _DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+  _SELF="$(readlink "$_SELF")"
+  [[ "$_SELF" != /* ]] && _SELF="$_DIR/$_SELF"
+done
+COMM_HOME="$(cd "$(dirname "$_SELF")/.." && pwd)"
 export COMM_HOME
 # shellcheck source=lib/common.sh
 source "$COMM_HOME/lib/common.sh"
