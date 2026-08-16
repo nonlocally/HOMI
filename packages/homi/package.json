@@ -1,7 +1,7 @@
 {
   "name": "@aadarwal/homi",
   "version": "0.1.0",
-  "description": "homi — durable agent identity, mailboxes, and store-and-forward messaging for AI agents, as an MCP server. Two faces (CLI + MCP), one kernel.",
+  "description": "homi \u2014 durable agent identity, mailboxes, and store-and-forward messaging for AI agents, as an MCP server. Two faces (CLI + MCP), one kernel.",
   "type": "module",
   "mcpName": "io.github.aadarwal/homi",
   "bin": {
@@ -9,7 +9,8 @@
   },
   "files": [
     "dist",
-    "vendor",
+    "vendor/*.py",
+    "vendor/VERSION",
     "templates",
     "README.md"
   ],
@@ -32,6 +33,14 @@
   "publishConfig": {
     "access": "public"
   },
-  "keywords": ["mcp", "agents", "messaging", "mailbox", "identity", "claude", "codex"],
+  "keywords": [
+    "mcp",
+    "agents",
+    "messaging",
+    "mailbox",
+    "identity",
+    "claude",
+    "codex"
+  ],
   "license": "MIT"
 }

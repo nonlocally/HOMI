@@ -182,6 +182,83 @@ const TOOLS: Tool[] = [
     schema: {},
     run: () => call({ op: "status" }),
   },
+  // --- appended (never reorder: tools/list must stay byte-stable) ---
+  {
+    name: "seat_respond",
+    description:
+      "Answer a TUI approval prompt in a seat. Fail-closed: refuses unless a real menu with a clearly-matching option is on screen; never presses Enter on an unknown default.",
+    schema: { seat: z.string(), decision: z.enum(["allow", "deny"]).optional() },
+    run: (a) =>
+      call({ op: "seat", sub: "respond", seat: a.seat, decision: a.decision || "allow" }, { timeoutMs: 30_000 }),
+  },
+  {
+    name: "seat_bind",
+    description: "Bind a seat to a claimed identity, so the roster shows both its mailbox and its surface.",
+    schema: { seat: z.string(), name: z.string() },
+    run: (a) => call({ op: "seat", sub: "bind", seat: a.seat, name: a.name }),
+  },
+  {
+    name: "fan",
+    description:
+      "Spawn N agents at once and get an addressable group back (prefix-1..N). Brief them with group_send.",
+    schema: {
+      n: z.number().describe("how many, 1-32"),
+      prefix: z.string().describe("names become <prefix>-1 .. <prefix>-N"),
+      cli: z.enum(["claude", "codex"]).optional(),
+      cwd: z.string().optional(),
+    },
+    run: (a) => {
+      const cmd = a.cli === "codex" ? (process.env.HOMI_CODEX_CMD || "codex")
+                                    : (process.env.HOMI_CLAUDE_CMD || "claude");
+      const adopt = a.cli !== "codex";
+      return call({ op: "fan", n: a.n, prefix: a.prefix, cmd, cwd: a.cwd, adopt }, { timeoutMs: 120_000 });
+    },
+  },
+  {
+    name: "consult",
+    description:
+      "Ask ANOTHER model one question: spawn-or-reuse a private peer (e.g. codex) and return its answer. Use for a second opinion on a hard judgment call.",
+    schema: {
+      cli: z.enum(["claude", "codex"]),
+      text: z.string(),
+      timeout_s: z.number().optional().default(120),
+    },
+    run: (a) => {
+      const cmd = a.cli === "codex" ? (process.env.HOMI_CODEX_CMD || "codex")
+                                    : (process.env.HOMI_CLAUDE_CMD || "claude");
+      return call(
+        { op: "consult", name: "consult-" + a.cli, cmd, text: a.text,
+          timeout: a.timeout_s ?? 120, adopt: a.cli !== "codex" },
+        { timeoutMs: (a.timeout_s ?? 120) * 1000 + 30_000 },
+      );
+    },
+  },
+  {
+    name: "move",
+    description:
+      "Relocate an agent-being to another device: its transcript, its mailbox, and its identity claim — with the address alive throughout (mail sent mid-move follows it). Refuses a LIVE session unless fork+as is given.",
+    schema: {
+      name: z.string(),
+      device: z.string(),
+      as: z.string().optional().describe("rename on arrival (required with fork)"),
+      fork: z.boolean().optional().describe("copy instead of move (origin keeps its claim)"),
+      spawn: z.boolean().optional().describe("resume it in a seat on arrival"),
+      dry_run: z.boolean().optional(),
+    },
+    run: (a) =>
+      call({ op: "move", name: a.name, device: a.device, as: a.as,
+             fork: !!a.fork, spawn: !!a.spawn, dry_run: !!a.dry_run },
+           { timeoutMs: 180_000 }),
+  },
+  {
+    name: "link_status",
+    description: "Device links: endpoint, kind (device/fleet), seat grant, queue depth, dead-letters, last error.",
+    schema: {},
+    run: async () => {
+      const st = await call({ op: "status" });
+      return { device: st?.self?.device, links: st?.links || {} };
+    },
+  },
 ];
 
 export function buildServer(): McpServer {

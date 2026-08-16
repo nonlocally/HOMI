@@ -2198,6 +2198,14 @@ class Homi:
                                  remote_in=req.get("remote_in"),
                                  identity_file=req.get("identity_file"),
                                  key_fp=req.get("key_fp"))
+        if op == "move":
+            # The MCP face can't shell out, so the daemon runs the SAME shared
+            # orchestration, dispatching its own ops instead of socket calls.
+            return _move_run(self.op, req.get("name", ""), req.get("device", ""),
+                             addr=req.get("addr"), as_name=req.get("as"),
+                             spawn=bool(req.get("spawn")),
+                             fork=bool(req.get("fork")),
+                             dry=bool(req.get("dry_run")))
         if op == "premove":
             return self._do_premove(req.get("name", ""))
         if op == "depart":
@@ -2683,51 +2691,62 @@ def _cli_move(args):
         sys.stderr.write("usage: communicate homi move <name> <device> "
                          "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run]\n")
         return 1
+    r = _move_run(_call, name, dev, addr=addr, as_name=as_name,
+                  spawn=spawn, fork=fork, dry=dry)
+    for ln in r.get("lines") or []:
+        print(ln)
+    if not r.get("ok"):
+        sys.stderr.write((r.get("err") or "move failed") + "\n")
+        return 1
+    return 0
+
+
+def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
+              fork=False, dry=False):
+    """The move orchestration, shared by BOTH faces: the CLI passes the socket
+    client as `caller`, the daemon passes its own op dispatch. One
+    implementation, so `homi move` and the MCP `move` tool can never drift.
+    Returns {ok, err?, lines[], ...}."""
+    out = []
     # Names/devices flow into ssh + rsync REMOTE paths (passed through the remote
     # login shell). Validate strictly so a crafted name can't inject a command.
     NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
     DEV_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     if not NAME_RE.match(name):
-        sys.stderr.write("invalid agent name\n"); return 1
+        return {"ok": False, "err": "invalid agent name\n", "lines": out}
     if not DEV_RE.match(dev):
-        sys.stderr.write("invalid device name\n"); return 1
+        return {"ok": False, "err": "invalid device name\n", "lines": out}
     if as_name is not None and not NAME_RE.match(as_name):
-        sys.stderr.write("invalid --as name (want [a-z0-9][a-z0-9._-])\n"); return 1
+        return {"ok": False, "err": "invalid --as name (want [a-z0-9][a-z0-9._-])\n", "lines": out}
     if addr is not None and (addr.startswith("-") or "\n" in addr
                              or not re.match(r"^[A-Za-z0-9._@-]+$", addr)):
-        sys.stderr.write("invalid --addr\n"); return 1
+        return {"ok": False, "err": "invalid --addr\n", "lines": out}
     if fork and not as_name:
-        sys.stderr.write("--fork needs --as <new-name>: two live claimants of one "
-                         "name on two devices would diverge silently\n")
-        return 1
+        return {"ok": False, "err": ("--fork needs --as <new-name>: two live claimants of one " "name on two devices would diverge silently\n"), "lines": out}
 
-    pre = _call({"op": "premove", "name": name})
+    pre = caller({"op": "premove", "name": name})
     if not pre.get("ok"):
-        sys.stderr.write((pre.get("err") or "premove failed") + "\n")
-        return 1
+        return {"ok": False, "err": ((pre.get("err") or "premove failed")), "lines": out}
     if pre.get("live") and not fork:
-        sys.stderr.write("%s has a LIVE session here — stop it first, or --fork "
-                         "--as <new-name> to copy a snapshot\n" % name)
-        return 1
+        return {"ok": False, "err": ("%s has a LIVE session here — stop it first, or --fork " "--as <new-name> to copy a snapshot\n" % name), "lines": out}
     transcript = _find_transcript(name)
     sid = os.path.basename(transcript)[:-6] if transcript else None
     lproj = _last_cwd(transcript) if transcript else None
 
     # Resolve the ssh address: explicit --addr, or the link's stored addr.
     if not addr:
-        st = _call({"op": "status"})
+        st = caller({"op": "status"})
         addr = ((st.get("links") or {}).get(dev) or {}).get("addr")
     if not addr:
-        sys.stderr.write("no ssh address for %s (link it with --addr, or pass --addr here)\n" % dev)
-        return 1
+        return {"ok": False, "err": ("no ssh address for %s (link it with --addr, or pass --addr here)" % dev), "lines": out}
 
     if dry:
-        print("agent     : %s%s" % (name, " (LIVE - fork)" if pre.get("live") else ""))
-        print("transcript: %s" % (transcript or "(none - mailbox-only identity)"))
-        print("mailbox   : %s lines, cursor %s" % (pre.get("lines"), pre.get("cursor")))
-        print("target    : %s via %s" % (dev, addr))
-        print("mode      : %s" % ("fork -> %s" % as_name if fork else "move (depart+arrive)"))
-        return 0
+        out.append("agent     : %s%s" % (name, " (LIVE - fork)" if pre.get("live") else ""))
+        out.append("transcript: %s" % (transcript or "(none - mailbox-only identity)"))
+        out.append("mailbox   : %s lines, cursor %s" % (pre.get("lines"), pre.get("cursor")))
+        out.append("target    : %s via %s" % (dev, addr))
+        out.append("mode      : %s" % ("fork -> %s" % as_name if fork else "move (depart+arrive)"))
+        return {"ok": True, "lines": out, "dry": True}
 
     # 1. probe the target: remote home + communicate + its homi state root.
     rc, out, err = _ssh_run(addr, "printf 'H:%s\\n' \"$HOME\"; "
@@ -2735,8 +2754,7 @@ def _cli_move(args):
                                   "ls \"$HOME/.local/bin/communicate\" 2>/dev/null | head -1)\"; "
                                   "printf 'S:%s\\n' \"$(communicate homi statepath 2>/dev/null)\"")
     if rc != 0:
-        sys.stderr.write("cannot reach %s (%s): %s\n" % (dev, addr, err))
-        return 1
+        return {"ok": False, "err": ("cannot reach %s (%s): %s" % (dev, addr, err)), "lines": out}
     rhome = rcomm = rstate = ""
     for ln in out.splitlines():
         if ln.startswith("H:"):
@@ -2746,8 +2764,7 @@ def _cli_move(args):
         elif ln.startswith("S:"):
             rstate = ln[2:]
     if not rhome or not rcomm:
-        sys.stderr.write("target %s lacks communicate on PATH — install it there first\n" % dev)
-        return 1
+        return {"ok": False, "err": ("target %s lacks communicate on PATH — install it there first" % dev), "lines": out}
     if not rstate:
         rstate = rhome + "/.local/state/communicate/homi"
 
@@ -2763,8 +2780,7 @@ def _cli_move(args):
         rdir = "%s/.claude/projects/%s" % (rhome, _slug(rproj))
         rc, _, err = _ssh_run(addr, "mkdir -p %s %s" % (_shq(rdir), _shq(rproj)))
         if rc != 0:
-            sys.stderr.write("target prep failed: %s\n" % err)
-            return 1
+            return {"ok": False, "err": ("target prep failed: %s" % err), "lines": out}
         srcs = [transcript]
         side = os.path.join(os.path.dirname(transcript), sid)
         if os.path.isdir(side):
@@ -2772,8 +2788,7 @@ def _cli_move(args):
         rc = subprocess.run(["rsync", "-az", "-s", "-e", ssh_e] + srcs
                             + ["%s:%s/" % (addr, rdir)]).returncode
         if rc != 0:
-            sys.stderr.write("transcript rsync failed\n")
-            return 1
+            return {"ok": False, "err": ("transcript rsync failed\n"), "lines": out}
         if as_name:
             rec = json.dumps({"type": "custom-title", "customTitle": as_name,
                               "sessionId": sid})
@@ -2783,10 +2798,9 @@ def _cli_move(args):
     if not fork:
         # 3. depart: atomically release + proxy home=dev. From here, new mail
         #    routes over the link (the target auto-claims on first delivery).
-        dep = _call({"op": "depart", "name": name, "device": dev})
+        dep = caller({"op": "depart", "name": name, "device": dev})
         if not dep.get("ok"):
-            sys.stderr.write((dep.get("err") or "depart failed") + "\n")
-            return 1
+            return {"ok": False, "err": ((dep.get("err") or "depart failed")), "lines": out}
 
     # 4. mailbox (now frozen at the origin): stage + merge on the target.
     merged = {"merged_delivered": 0, "merged_undelivered": 0}
@@ -2796,9 +2810,7 @@ def _cli_move(args):
         rc = subprocess.run(["rsync", "-az", "-s", "-e", ssh_e, pre["mailbox"],
                              "%s:%s" % (addr, staged)]).returncode
         if rc != 0:
-            sys.stderr.write("mailbox rsync failed (mail stays at origin; "
-                             "identity already departed)\n")
-            return 1
+            return {"ok": False, "err": ("mailbox rsync failed (mail stays at origin; " "identity already departed)\n"), "lines": out}
         rc, out, err = _ssh_run(addr, "%s homi arrive %s --staged %s --cursor %s"
                                 % (_shq(rcomm), _shq(target_name), _shq(staged),
                                    int(pre.get("cursor") or 0)), timeout=60)
@@ -2808,37 +2820,37 @@ def _cli_move(args):
             pass
         _ssh_run(addr, "rm -f %s" % _shq(staged))
         if rc != 0:
-            sys.stderr.write("arrive on %s failed: %s %s\n" % (dev, out, err))
-            return 1
+            return {"ok": False, "err": ("arrive on %s failed: %s %s" % (dev, out, err)), "lines": out}
     else:
         # No mailbox file — still claim the name on the target.
         _ssh_run(addr, "%s homi arrive %s --staged /dev/null --cursor 0"
                  % (_shq(rcomm), _shq(target_name)))
 
-    print("moved %s -> %s%s" % (name, dev,
+    out.append("moved %s -> %s%s" % (name, dev,
           (" as %s" % as_name) if as_name else ""))
     if transcript:
-        print("  transcript: %s:%s/" % (dev, rdir))
-    print("  mailbox   : +%s delivered, +%s undelivered (deduped)"
+        out.append("  transcript: %s:%s/" % (dev, rdir))
+    out.append("  mailbox   : +%s delivered, +%s undelivered (deduped)"
           % (merged.get("merged_delivered"), merged.get("merged_undelivered")))
     if not fork:
-        print("  address   : %s now proxies here -> %s (mail keeps flowing)" % (name, dev))
+        out.append("  address   : %s now proxies here -> %s (mail keeps flowing)" % (name, dev))
 
     # 5. optionally resume it in a seat over the cross-device seat plane.
     if spawn and sid:
-        r = _call({"op": "seat", "sub": "spawn",
+        r = caller({"op": "seat", "sub": "spawn",
                    "cmd": "claude --resume %s" % sid,
                    "cwd": rproj if transcript else None,
-                   "device": dev, "name": target_name}, timeout=45)
+                   "device": dev, "name": target_name})
         if r.get("ok"):
-            print("  seat      : resumed in %s" % r.get("seat"))
+            out.append("  seat      : resumed in %s" % r.get("seat"))
         else:
-            print("  seat      : not spawned (%s) — resume there: claude --resume %s"
+            out.append("  seat      : not spawned (%s) — resume there: claude --resume %s"
                   % (r.get("err"), sid))
     elif sid:
-        print("  resume    : (on %s) cd %s && claude --resume %s"
+        out.append("  resume    : (on %s) cd %s && claude --resume %s"
               % (dev, rproj if transcript else "~", sid))
-    return 0
+    return {"ok": True, "lines": out, "name": name, "device": dev,
+            "as": as_name, "merged": merged}
 
 
 def _call(req, timeout=10.0):
