@@ -51,6 +51,7 @@ import zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cc_peer  # deliver, _sidecar_obj, _read_line, _extract_text, _addr_from
 import homi_seat  # the seat plane (tmux driver); imported lazily-usable, no tmux at import
+import homi_workspace  # the workspace axis (git interrogation, worktrees)
 
 
 # ---- paths / env -------------------------------------------------------------
@@ -1193,7 +1194,7 @@ class Homi:
             "aliases": [],                           # durable role names for this identity
         }
 
-    def _do_claim(self, name, boxed=False):
+    def _do_claim(self, name, boxed=False, cwd=None, worktree=False):
         if not self._NAME_RE.match(name or ""):
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
         if name in self._RESERVED:
@@ -1225,6 +1226,14 @@ class Homi:
                 self._plant(name)
                 threading.Thread(target=self._box_drain_loop, args=(name,),
                                  daemon=True).start()
+                if cwd:
+                    try:
+                        ws = (homi_workspace.make_worktree(cwd, name) if worktree
+                              else homi_workspace.describe(cwd))
+                        with self.mu:
+                            self.identities[name]["workspace"] = ws
+                    except homi_workspace.WorkspaceError as e:
+                        self.log("workspace not recorded for", name, ":", e)
                 self._persist_identities()
                 self.log("claimed BOXED identity:", name, "-> published", sock)
                 return {"ok": True, "boxed": True,
@@ -1241,6 +1250,14 @@ class Homi:
             self._plant(name)
             threading.Thread(target=self._identity_server, args=(name, srv),
                              daemon=True).start()
+            if cwd:
+                try:
+                    ws = (homi_workspace.make_worktree(cwd, name) if worktree
+                          else homi_workspace.describe(cwd))
+                    with self.mu:
+                        self.identities[name]["workspace"] = ws
+                except homi_workspace.WorkspaceError as e:
+                    self.log("workspace not recorded for", name, ":", e)
             self._persist_identities()
         self.log("claimed identity:", name, "->", sock)
         return {"ok": True}
@@ -2180,7 +2197,9 @@ class Homi:
                                  after_msg_id=req.get("after_msg_id"))
         if op == "claim":
             return self._do_claim(req.get("name", ""),
-                                  boxed=bool(req.get("boxed")))
+                                  boxed=bool(req.get("boxed")),
+                                  cwd=req.get("cwd"),
+                                  worktree=bool(req.get("worktree")))
         if op == "release":
             return self._do_release(req.get("name", ""))
         if op == "send":
@@ -2975,13 +2994,29 @@ def cli_call(argv):
         return 0 if r.get("ok") else 1
     if op in ("claim", "release"):
         boxed = "--boxed" in args
-        args = [a for a in args if a != "--boxed"]
+        worktree = "--worktree" in args
+        cwd = None
+        if "--cwd" in args:
+            i = args.index("--cwd")
+            try:
+                cwd = args[i + 1]
+            except IndexError:
+                sys.stderr.write("--cwd needs a path\n")
+                return 1
+            args = args[:i] + args[i + 2:]
+        args = [a for a in args if a not in ("--boxed", "--worktree")]
         if not args:
-            sys.stderr.write("usage: communicate homi %s <name> [--boxed]\n" % op)
+            sys.stderr.write("usage: communicate homi %s <name> "
+                             "[--cwd DIR] [--worktree] [--boxed]\n" % op)
             return 1
         req = {"op": op, "name": args[0]}
-        if boxed and op == "claim":
-            req["boxed"] = True
+        if op == "claim":
+            if boxed:
+                req["boxed"] = True
+            if cwd:
+                req["cwd"] = cwd
+            if worktree:
+                req["worktree"] = True
         r = _call(req)
         if r.get("ok"):
             if r.get("boxed"):
