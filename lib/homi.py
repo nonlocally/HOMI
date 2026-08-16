@@ -111,6 +111,30 @@ def self_device():
     return (platform.node().split(".")[0] or "localhost").lower()
 
 
+def getpass_user():
+    for k in ("HOMI_FLEET_USER", "USER", "LOGNAME"):
+        v = os.environ.get(k)
+        if v:
+            return v
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return "user"
+
+
+def _tailscale_ip():
+    try:
+        out = subprocess.run(["tailscale", "ip", "-4"],
+                             capture_output=True, text=True, timeout=5)
+        ip = (out.stdout or "").strip().split("\n")[0].strip()
+        if ip.startswith("100."):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
 def probe(path, timeout=0.35):
     """Measured liveness (never file-existence): connect then recv(1).
     A dead listener EOFs in milliseconds; a live one holds the line until we
@@ -174,6 +198,11 @@ class Homi:
         self.mu = threading.Lock()
         self.mail_mu = threading.Lock()
         self.mail_cv = threading.Condition()   # signals wait_for_message pollers
+        # Cross-fleet: per-fleet grant sets (which local names a foreign fleet
+        # may address) and a control-plane token (gates homi.sock once a fleet
+        # link exists). Both loaded/created in run().
+        self.grants = {}
+        self.control_token = ""
         self.claim_mu = threading.RLock()   # serializes claim/proxy/release/rebind
         self.deliver_mu = {}                # name -> Lock (one drain per name)
         self.stop_ev = threading.Event()
@@ -961,9 +990,17 @@ class Homi:
             dev = home  # a known remote peer is addressable by bare name
         if dev:
             with self.mu:
-                have_link = dev in self.links
-            if not have_link:
+                link_ent = self.links.get(dev)
+            if link_ent is None:
                 return {"ok": False, "err": "device not linked: %s" % dev}
+            if (link_ent.get("kind") == "fleet"
+                    and self._NAME_RE.match(from_name or "")
+                    and not self._is_granted(dev, from_name)):
+                # Sending to a fleet opens YOUR return path: grant the sender
+                # identity to THAT fleet only, so their reply can land. Mail has
+                # a return address; deny-by-default stays for everything else.
+                self._do_grant(dev, from_name)
+                self.log("auto-granted return path:", from_name, "to fleet", dev)
             env = {"v": 1, "kind": "m", "to": name, "from": from_name,
                    "msg_id": uuid.uuid4().hex, "text": text, "ts": time.time()}
             self._queue_out(dev, env)
@@ -1080,7 +1117,12 @@ class Homi:
         planted sidecar, so local sessions list it and reply to it by name.
         Frames arriving on a proxy socket are queued out to its home device.
         Never shadows a locally-claimed identity."""
-        if not self._NAME_RE.match(name or "") or name in self._RESERVED:
+        # A fleet-qualified proxy (sender@fleet) is legal — and self-routing:
+        # _do_send splits it back into (name, fleet-link). Bare names keep the
+        # strict local rule.
+        base, _, qual = (name or "").partition("@")
+        if (not self._NAME_RE.match(base) or name in self._RESERVED
+                or (qual and not self._DEV_RE.match(qual))):
             return None
         with self.claim_mu:  # atomic vs concurrent claims/proxies/releases
             with self.mu:
@@ -1130,9 +1172,128 @@ class Homi:
             data = {d: {"addr": e.get("addr"), "sock": e.get("sock"),
                         "remote_home": e.get("remote_home"),
                         "allow_seats": e.get("allow_seats", False),
+                        "kind": e.get("kind", "device"),
+                        "remote_in": e.get("remote_in"),
+                        "identity_file": e.get("identity_file"),
+                        "key_fp": e.get("key_fp"),
                         "created_at": e.get("created_at")}
                     for d, e in self.links.items()}
         _atomic_write(self.path("links.json"), json.dumps(data, indent=1))
+
+    # -- cross-fleet: control token, grants, cards --------------------------------
+
+    def _ensure_control_token(self):
+        p = self.path("control.token")
+        try:
+            with open(p, "r") as f:
+                tok = f.read().strip()
+            if tok:
+                return tok
+        except OSError:
+            pass
+        tok = os.urandom(24).hex()
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, tok.encode())
+        finally:
+            os.close(fd)
+        return tok
+
+    def _needs_token(self):
+        with self.mu:
+            return any(e.get("kind") == "fleet" for e in self.links.values())
+
+    def _load_grants(self):
+        gdir = self.path("grants")
+        try:
+            files = os.listdir(gdir)
+        except OSError:
+            return
+        for f in files:
+            if f.endswith(".json"):
+                fleet = f[:-5]
+                data = _read_json(os.path.join(gdir, f), {})
+                self.grants[fleet] = set(data.get("granted") or [])
+
+    def _persist_grant(self, fleet):
+        os.makedirs(self.path("grants"), exist_ok=True)
+        _atomic_write(self.path("grants", fleet + ".json"),
+                      json.dumps({"granted": sorted(self.grants.get(fleet, set()))},
+                                 indent=1))
+
+    def _do_grant(self, fleet, name):
+        if not self._DEV_RE.match(fleet or ""):
+            return {"ok": False, "err": "invalid fleet name"}
+        if name and not self._NAME_RE.match(name):
+            return {"ok": False, "err": "invalid identity name"}
+        self.grants.setdefault(fleet, set())
+        if name:
+            self.grants[fleet].add(name)
+        self._persist_grant(fleet)
+        return {"ok": True, "fleet": fleet, "granted": sorted(self.grants[fleet])}
+
+    def _do_revoke_grant(self, fleet, name):
+        self.grants.setdefault(fleet, set()).discard(name)
+        self._persist_grant(fleet)
+        return {"ok": True, "fleet": fleet, "granted": sorted(self.grants[fleet])}
+
+    def _is_granted(self, fleet, name):
+        return name in self.grants.get(fleet, set())
+
+    def _link_fleet(self, device):
+        """If the arrival link `device` is a fleet (cross-operator) link, return
+        its fleet petname (== the link name); else None. Attribution is by the
+        arrival line: whatever lands on in/<name>.sock IS that fleet."""
+        with self.mu:
+            ent = self.links.get(device) or {}
+        return device if ent.get("kind") == "fleet" else None
+
+    def _fleet_key(self):
+        """This device's fleet keypair — outbound dials only, generated once,
+        never leaves the machine. Returns (private_path, pubkey_line, fp)."""
+        priv = self.path("keys", "fleet_ed25519")
+        os.makedirs(self.path("keys"), exist_ok=True)
+        if not os.path.exists(priv):
+            subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q",
+                            "-f", priv, "-C", "homi/%s@%s" %
+                            (os.environ.get("HOMI_FLEET", getpass_user()), self.device)],
+                           check=True, capture_output=True)
+        pub = ""
+        try:
+            with open(priv + ".pub") as f:
+                pub = f.read().strip()
+        except OSError:
+            pass
+        fp = ""
+        try:
+            out = subprocess.run(["ssh-keygen", "-lf", priv + ".pub"],
+                                 capture_output=True, text=True, timeout=5)
+            fp = (out.stdout or "").split()[1] if out.returncode == 0 else ""
+        except Exception:
+            pass
+        return priv, pub, fp
+
+    def _do_card(self):
+        """This device's homi-card: what a peer needs to link back to us. The
+        inbound path is included because a forward-only key cannot probe $HOME."""
+        addr = "%s@%s" % (getpass_user(), self.device)
+        try:
+            _, pub, fp = self._fleet_key()
+        except Exception as e:
+            return {"ok": False, "err": "fleet key: %s" % e}
+        return {"ok": True, "card": {
+            "v": 1, "kind": "homi-card",
+            "fleet": os.environ.get("HOMI_FLEET", getpass_user()),
+            "device": self.device,
+            "addr": addr,
+            "tailscale_ip": _tailscale_ip(),
+            "pubkey": pub,
+            "fingerprint": fp,
+            "identity_file": self.path("keys", "fleet_ed25519"),
+            # A peer's mail to us arrives on in/<their-fleet>.sock; we tell them
+            # the directory so their invite carries the exact bind path.
+            "inbound_dir": self.path("in"),
+        }}
 
     def _seed_seen_dev(self, device):
         ids = set()
@@ -1163,17 +1324,28 @@ class Homi:
         """The exact outbound dial: BatchMode (auth failures fail cleanly,
         never prompt), forward-only -L toward the peer's inbound socket FOR
         THIS device, StreamLocalBindUnlink so a dead tunnel's socket litter
-        never blocks the redial."""
-        rin = "%s/.local/state/communicate/homi/in/%s.sock" % (
-            remote_home or "<REMOTE_HOME>", self.device)
+        never blocks the redial. A fleet link adds -i <fleet key> +
+        IdentitiesOnly (never the default agent keys) and takes the remote
+        inbound path VERBATIM from the invite card — a forward-only key cannot
+        run `echo $HOME`, so the path can never be composed."""
+        with self.mu:
+            ent = dict(self.links.get(device) or {})
+        rin = ent.get("remote_in")
+        if not rin:
+            rin = "%s/.local/state/communicate/homi/in/%s.sock" % (
+                remote_home or "<REMOTE_HOME>", self.device)
         lsock = self.path("links", device + ".sock")
-        return ["ssh", "-N",
-                "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                "-o", "ExitOnForwardFailure=yes",
-                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-                "-o", "StreamLocalBindMask=0177",
-                "-o", "StreamLocalBindUnlink=yes",
-                "-L", "%s:%s" % (lsock, rin), addr]
+        cmd = ["ssh", "-N",
+               "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+               "-o", "ExitOnForwardFailure=yes",
+               "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+               "-o", "StreamLocalBindMask=0177",
+               "-o", "StreamLocalBindUnlink=yes"]
+        idf = ent.get("identity_file")
+        if idf:
+            cmd += ["-i", idf, "-o", "IdentitiesOnly=yes"]
+        cmd += ["-L", "%s:%s" % (lsock, rin), addr]
+        return cmd
 
     def _remote_home(self, addr):
         try:
@@ -1201,7 +1373,10 @@ class Homi:
         if proc is not None and proc.poll() is not None:
             self.ssh_procs.pop(device, None)
         rhome = ent.get("remote_home")
-        if not rhome:
+        # A fleet link carries the remote inbound path in its invite card, so we
+        # never probe $HOME (the forward-only key forbids exec). Only device
+        # links (full trust, same operator) resolve the home.
+        if not rhome and not ent.get("remote_in"):
             rhome = self._remote_home(addr)
             if not rhome:
                 raise OSError("cannot resolve remote $HOME on %s" % addr)
@@ -1228,7 +1403,8 @@ class Homi:
         raise OSError("ssh link to %s did not come up" % device)
 
     def _do_link(self, device, addr=None, sock=None, print_cmd=False,
-                 allow_seats=None):
+                 allow_seats=None, fleet=False, remote_in=None,
+                 identity_file=None, key_fp=None):
         if not self._DEV_RE.match(device or ""):
             return {"ok": False, "err": "invalid device name"}
         if device == self.device:
@@ -1236,7 +1412,13 @@ class Homi:
         # Seat-control grant: opt-in per link, upgradable in place. None = keep
         # the current grant; True/False = set it. A link carries mail by default;
         # driving this device's seats from the far side requires an explicit grant.
-        prior_grant = (self.links.get(device) or {}).get("allow_seats", False)
+        prior = self.links.get(device) or {}
+        prior_grant = prior.get("allow_seats", False)
+        # Fleet (cross-operator) vs device (same-operator, full trust) link kind.
+        kind = "fleet" if (fleet or prior.get("kind") == "fleet") else prior.get("kind", "device")
+        remote_in = remote_in or prior.get("remote_in")
+        identity_file = identity_file or prior.get("identity_file")
+        key_fp = key_fp or prior.get("key_fp")
         if print_cmd:
             with self.mu:
                 stored = dict(self.links.get(device) or {})
@@ -1268,12 +1450,14 @@ class Homi:
                                   "remote_home": (prev.get("remote_home")
                                                   if prev.get("addr") == addr else None),
                                   "allow_seats": grant,
+                                  "kind": kind, "remote_in": remote_in,
+                                  "identity_file": identity_file, "key_fp": key_fp,
                                   "created_at": time.time()}
         self._persist_links()
         self.out_ev.set()
-        self.log("linked device:", device, "->", sock or addr or "?",
+        self.log("linked %s:" % kind, device, "->", sock or addr or "?",
                  "(seats %s)" % ("granted" if grant else "denied"))
-        return {"ok": True, "allow_seats": grant}
+        return {"ok": True, "allow_seats": grant, "kind": kind}
 
     def _do_unlink(self, device):
         with self.mu:
@@ -1307,9 +1491,13 @@ class Homi:
     def _load_links(self):
         data = _read_json(self.path("links.json"), {})
         for device, e in sorted(data.items()):
-            r = self._do_link(device, addr=(e or {}).get("addr"),
-                              sock=(e or {}).get("sock"),
-                              allow_seats=(e or {}).get("allow_seats", False))
+            e = e or {}
+            r = self._do_link(device, addr=e.get("addr"), sock=e.get("sock"),
+                              allow_seats=e.get("allow_seats", False),
+                              fleet=(e.get("kind") == "fleet"),
+                              remote_in=e.get("remote_in"),
+                              identity_file=e.get("identity_file"),
+                              key_fp=e.get("key_fp"))
             if not r.get("ok"):
                 self.log("re-link failed:", device, r.get("err"))
 
@@ -1376,35 +1564,58 @@ class Homi:
             return {"ok": False, "err": "bad envelope"}
         if mid in self.seen_dev.setdefault(device, set()):
             return {"ok": True, "ack": mid, "dup": True}
+        # A fleet (cross-operator) link is deny-by-default: the sender may only
+        # address explicitly-granted names, no name is auto-created for them, and
+        # the sender is proxied FLEET-QUALIFIED so a foreign fleet can never
+        # shadow or squat a local name. Same-operator device links keep the
+        # trusting behaviour (auto-claim, bare proxies).
+        fleet = self._link_fleet(device)
+        if fleet and not self._is_granted(fleet, to):
+            # One deliberately-ambiguous error: never reveal which names exist.
+            return {"ok": False, "err": "unknown or ungranted"}
+        with self.mu:
+            local_to = (to in self.identities
+                        and self.identities[to].get("kind") == "local")
         if kind == "r":
             # A reply routed home from a remote target: resolve the pending ask
             # (by corr) and store durably in the asker's inbox.
             corr = env.get("corr") or ""
             self._fill_ask(corr, text, frm)
-            with self.mu:
-                have = (to in self.identities
-                        and self.identities[to].get("kind") == "local")
-            if not have:
-                self._do_claim(to)
+            if not local_to:
+                if fleet:
+                    return {"ok": False, "err": "unknown or ungranted"}
+                self._do_claim(to)  # device link: auto-claim as before
             self._store(to, {"ts": time.time(), "msg_id": mid, "from": "",
                              "from_name": frm, "text": text, "corr": corr})
             self._remember_dev_msg(device, mid)
             threading.Thread(target=self._safe_deliver, args=(to,), daemon=True).start()
             return {"ok": True, "ack": mid}
-        self._ensure_proxy(frm, device)
+        proxy_name = ("%s@%s" % (frm, fleet)) if fleet else frm
+        if fleet:
+            # Boundary rewrite (the token is a return address): an ask token
+            # embeds the asker's DEVICE name, which means nothing here — the
+            # valid route back is the arrival link's fleet petname.
+            text = re.sub(
+                r"(reply\s+[a-z0-9][a-z0-9._-]*)@[a-z0-9._-]+~([0-9a-f]+)",
+                r"\1@%s~\2" % fleet, text)
+        self._ensure_proxy(proxy_name, device)
         with self.mu:
             ent = self.identities.get(to)
-            kind = ent.get("kind") if ent else None
-        if kind == "proxy":
+            tkind = ent.get("kind") if ent else None
+        if tkind == "proxy":
             return {"ok": False,
                     "err": "%s is not local here (multi-hop not supported)" % to}
         if ent is None:
-            r = self._do_claim(to)  # auto-claim: local mail never bounces
+            if fleet:
+                # No mailbox-creation oracle for foreigners: a granted name that
+                # is not actually claimed here is treated as absent.
+                return {"ok": False, "err": "unknown or ungranted"}
+            r = self._do_claim(to)  # device link: local mail never bounces
             if not r.get("ok"):
                 return {"ok": False, "err": "cannot claim %s: %s" % (to, r.get("err"))}
             self.log("auto-claimed", to, "for inbound mail via", device)
         entry = {"ts": time.time(), "msg_id": mid, "from": "",
-                 "from_name": frm, "via": device, "text": text}
+                 "from_name": proxy_name, "via": device, "text": text}
         self._store(to, entry)
         self._resolve_ask_natural(to, text, frm)
         self._remember_dev_msg(device, mid)
@@ -1687,7 +1898,19 @@ class Homi:
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
                                  sock=req.get("sock"),
                                  print_cmd=bool(req.get("print_cmd")),
-                                 allow_seats=req.get("allow_seats"))
+                                 allow_seats=req.get("allow_seats"),
+                                 fleet=bool(req.get("fleet")),
+                                 remote_in=req.get("remote_in"),
+                                 identity_file=req.get("identity_file"),
+                                 key_fp=req.get("key_fp"))
+        if op == "grant":
+            return self._do_grant(req.get("fleet", ""), req.get("name", ""))
+        if op == "revoke-grant":
+            return self._do_revoke_grant(req.get("fleet", ""), req.get("name", ""))
+        if op == "grants":
+            return {"ok": True, "grants": {f: sorted(s) for f, s in self.grants.items()}}
+        if op == "card":
+            return self._do_card()
         if op == "unlink":
             return self._do_unlink(req.get("device", ""))
         if op == "stop":
@@ -1723,6 +1946,20 @@ class Homi:
             req = json.loads(line.decode("utf-8", "replace"))
         except Exception:
             req = {}
+        # Control-plane gate. Once any fleet (cross-operator) link exists, a
+        # forward-only peer could reach homi.sock by forwarding to it — so
+        # control ops must present the control token, a file they cannot read
+        # (the forward-only key forbids exec/read). Local/device-only use keeps
+        # the 0700 dir as the only guard (no token needed).
+        if self._needs_token() and req.get("op") not in (None, "status"):
+            if req.get("auth") != self.control_token:
+                resp = {"ok": False, "err": "control token required (fleet link active)"}
+                try:
+                    conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+                    conn.close()
+                except OSError:
+                    pass
+                return
         try:
             resp = self.op(req)
         except Exception as e:
@@ -1842,6 +2079,8 @@ class Homi:
         signal.signal(signal.SIGINT, self._on_signal)
         self.log("homi starting: device=%s pid=%d root=%s sockdir=%s"
                  % (self.device, self.pid, self.root, self.sockdir))
+        self.control_token = self._ensure_control_token()
+        self._load_grants()
         threading.Thread(target=self.control_server, daemon=True).start()
         self._load_identities()
         self._load_links()
@@ -1853,8 +2092,162 @@ class Homi:
 
 # ---- CLI client ("call") -------------------------------------------------------
 
+def _encode_card(card):
+    import base64
+    return base64.b64encode(json.dumps(card).encode()).decode()
+
+
+def _decode_card(blob):
+    import base64
+    return json.loads(base64.b64decode(blob.encode()))
+
+
+def _authkeys_path():
+    return os.path.join(os.path.expanduser("~"), ".ssh", "authorized_keys")
+
+
+def _authkeys_add(pubkey, peer_fleet, from_ip):
+    """Append the peer's forward-only key so THEY can dial into us. restrict =
+    deny-all; port-forwarding re-grants exactly the transport; the forced command
+    makes any exec attempt run /usr/bin/false; from= pins the source IP. A marker
+    comment makes revocation exact. Idempotent by marker."""
+    marker = "homi-fleet:%s" % peer_fleet
+    p = _authkeys_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    existing = ""
+    try:
+        with open(p) as f:
+            existing = f.read()
+    except OSError:
+        pass
+    if marker in existing:
+        return "already present"
+    frm = ('from="%s",' % from_ip) if from_ip else ""
+    line = ('restrict,port-forwarding,%scommand="/usr/bin/false" %s %s\n'
+            % (frm, pubkey, marker))
+    with open(p, "a") as f:
+        f.write(line)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return "added"
+
+
+def _authkeys_remove(peer_fleet):
+    marker = "homi-fleet:%s" % peer_fleet
+    p = _authkeys_path()
+    try:
+        with open(p) as f:
+            lines = f.readlines()
+    except OSError:
+        return "no authorized_keys"
+    kept = [l for l in lines if marker not in l]
+    if len(kept) == len(lines):
+        return "not found"
+    with open(p, "w") as f:
+        f.writelines(kept)
+    return "removed"
+
+
+def _cli_federate(args):
+    if not args:
+        sys.stderr.write("usage: communicate homi federate {invite|accept|revoke|status} ...\n")
+        return 1
+    sub, rest = args[0], args[1:]
+    if sub == "invite":
+        r = _call({"op": "card"})
+        if not r.get("ok"):
+            sys.stderr.write((r.get("err") or "failed") + "\n")
+            return 1
+        card = r["card"]
+        blob = _encode_card(card)
+        peer = rest[0] if rest else "<peer>"
+        print("# Your homi-card (fleet=%s, device=%s, fp=%s)."
+              % (card["fleet"], card["device"], card.get("fingerprint")))
+        print("# Send it to %s over a trusted channel; they run:" % peer)
+        print("communicate homi federate accept %s --card '%s'" % (card["fleet"], blob))
+        return 0
+    if sub == "accept":
+        if not rest:
+            sys.stderr.write("usage: communicate homi federate accept <peer-fleet> --card '<blob>' "
+                             "[--yes] [--no-authkey]\n")
+            return 1
+        peer_fleet = rest[0]
+        if "--card" not in rest:
+            sys.stderr.write("--card '<blob>' required\n")
+            return 1
+        try:
+            peer = _decode_card(rest[rest.index("--card") + 1])
+        except Exception as e:
+            sys.stderr.write("bad card: %s\n" % e)
+            return 1
+        if peer.get("kind") != "homi-card":
+            sys.stderr.write("not a homi-card\n")
+            return 1
+        mine = _call({"op": "card"})
+        if not mine.get("ok"):
+            sys.stderr.write("cannot read own card: %s\n" % mine.get("err"))
+            return 1
+        my_fleet = mine["card"]["fleet"]
+        sys.stderr.write("peer fleet=%s device=%s fingerprint=%s\n"
+                         % (peer.get("fleet"), peer.get("device"), peer.get("fingerprint")))
+        if "--yes" not in rest:
+            sys.stderr.write("re-run with --yes to install the key + link.\n")
+            return 1
+        if "--no-authkey" not in rest and peer.get("pubkey"):
+            st = _authkeys_add(peer["pubkey"], peer_fleet, peer.get("tailscale_ip"))
+            sys.stderr.write("authorized_keys: %s\n" % st)
+        # Link outbound to them: our mail lands on THEIR in/<my_fleet>.sock.
+        remote_in = os.path.join(peer.get("inbound_dir", ""), my_fleet + ".sock")
+        req = {"op": "link", "device": peer_fleet, "fleet": True,
+               "addr": peer.get("addr"), "remote_in": remote_in,
+               "identity_file": mine["card"].get("identity_file"),
+               "key_fp": peer.get("fingerprint")}
+        r = _call(req)
+        if r.get("ok"):
+            print("federated with %s (fleet link). Grant identities with: "
+                  "communicate homi grant %s <name>" % (peer_fleet, peer_fleet))
+            return 0
+        sys.stderr.write((r.get("err") or "link failed") + "\n")
+        return 1
+    if sub == "revoke":
+        if not rest:
+            sys.stderr.write("usage: communicate homi federate revoke <peer-fleet>\n")
+            return 1
+        peer_fleet = rest[0]
+        st = _authkeys_remove(peer_fleet)
+        _call({"op": "unlink", "device": peer_fleet})
+        print("revoked %s (authorized_keys: %s, link removed)" % (peer_fleet, st))
+        return 0
+    if sub == "status":
+        c = _call({"op": "card"})
+        if c.get("ok"):
+            card = c["card"]
+            print("fleet=%s device=%s ip=%s fp=%s"
+                  % (card["fleet"], card["device"], card.get("tailscale_ip"),
+                     card.get("fingerprint")))
+        g = _call({"op": "grants"})
+        for f, names in sorted((g.get("grants") or {}).items()):
+            print("  grant %-16s %s" % (f, ", ".join(names) or "(none)"))
+        return 0
+    sys.stderr.write("unknown federate subcommand: %s\n" % sub)
+    return 1
+
+
 def _call(req, timeout=10.0):
     path = os.path.join(state_root(), "homi.sock")
+    # Carry the control credential if one exists (harmless when the daemon isn't
+    # enforcing it; required once a fleet link is active). Local file read —
+    # the 0700 state dir means only this uid can see it.
+    if "auth" not in req:
+        try:
+            with open(os.path.join(state_root(), "control.token")) as f:
+                tok = f.read().strip()
+            if tok:
+                req = dict(req, auth=tok)
+        except OSError:
+            pass
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -2211,6 +2604,32 @@ def cli_call(argv):
             return 0 if r.get("ok") else 1
         sys.stderr.write("unknown seat op: %s\n" % sub)
         return 1
+    if op in ("grant", "ungrant"):
+        if len(args) < 2:
+            sys.stderr.write("usage: communicate homi %s <fleet> <name>\n" % op)
+            return 1
+        r = _call({"op": "grant" if op == "grant" else "revoke-grant",
+                   "fleet": args[0], "name": args[1]})
+        if r.get("ok"):
+            print("%s: %s" % (r["fleet"], ", ".join(r.get("granted") or []) or "(none)"))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "grants":
+        r = _call({"op": "grants"})
+        for f, names in sorted((r.get("grants") or {}).items()):
+            print("%-20s %s" % (f, ", ".join(names) or "(none)"))
+        return 0 if r.get("ok") else 1
+    if op == "card":
+        r = _call({"op": "card"})
+        if r.get("ok"):
+            print(json.dumps(r["card"], indent=1) if "--json" in args
+                  else _encode_card(r["card"]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "federate":
+        return _cli_federate(args)
     if op in ("link", "unlink"):
         if not args:
             sys.stderr.write("usage: communicate homi %s <device> [--addr user@host] [--sock path]\n" % op)
@@ -2234,6 +2653,17 @@ def cli_call(argv):
             req["allow_seats"] = True
         if "--revoke-seats" in args:
             req["allow_seats"] = False
+        if "--fleet" in args:
+            req["fleet"] = True
+        for flag, key in (("--remote-in", "remote_in"),
+                          ("--identity-file", "identity_file"),
+                          ("--key-fp", "key_fp")):
+            if flag in args:
+                try:
+                    req[key] = args[args.index(flag) + 1]
+                except IndexError:
+                    sys.stderr.write("%s needs a value\n" % flag)
+                    return 1
         r = _call(req)
         if r.get("ok") and r.get("cmd"):
             print(" ".join(r["cmd"]))

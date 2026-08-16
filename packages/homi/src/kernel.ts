@@ -103,9 +103,24 @@ export interface CallOpts {
   noAutostart?: boolean;
 }
 
+function controlAuth(): string | null {
+  // The control credential (required once a fleet link exists). A local file
+  // read — the 0700 state dir means only this uid can see it.
+  try {
+    const tok = fs.readFileSync(path.join(stateRoot(), "control.token"), "utf8").trim();
+    return tok || null;
+  } catch {
+    return null;
+  }
+}
+
 // One request, one reply. The reply is a single JSON object terminated by \n.
 export async function call(req: Record<string, unknown>, opts: CallOpts = {}): Promise<any> {
   const timeoutMs = opts.timeoutMs ?? 15000;
+  if (!("auth" in req)) {
+    const tok = controlAuth();
+    if (tok) req = { ...req, auth: tok };
+  }
   let s: net.Socket;
   try {
     s = await connect(controlSocket(), 3000);
