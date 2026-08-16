@@ -1,4 +1,4 @@
-# The Agent Fabric — durable identity, store-and-forward addressing, the postmaster daemon, and sandboxed permission planes — Design
+# The Agent Fabric — durable identity, store-and-forward addressing, the homi daemon, and sandboxed permission planes — Design
 
 Date: 2026-08-15 · Status: **draft, awaiting review** · Home: the `communicate` repo (grows into v0.3)
 
@@ -28,7 +28,7 @@ The organizing spine is the four-layer decomposition:
 |---|---|---|---|
 | **1 Identity** | a durable name, decoupled from any process; == the session's `/rename` name | registry object + rename-sync | communicate sidecar `name`; beam's `custom-title` append; Switchboard `aliases:` |
 | **2 Address** | a durable mailbox; inbound and outbound are *separate* addresses | store-and-forward + typed reach | cc_peer mailbox `inbox.jsonl`; anu reply-file channel |
-| **3 Network mgmt** | the per-device **postmaster** daemon that routes, probes, and does store→wake | launchd singleton | anu `watchd` lifecycle; Switchboard launchd persistence; communicate socket-wake |
+| **3 Network mgmt** | the per-device **homi** daemon that routes, probes, and does store→wake | launchd singleton | anu `watchd` lifecycle; Switchboard launchd persistence; communicate socket-wake |
 | **4 Permissions** | (a) who may message whom; (b) what compute/fs/net an identity is bound to | mailbox ACL + forward-only key + apple/container | peer's restricted key; `box`; apple/container v1.0.0 |
 
 ## Decisions taken (with the fork they resolve)
@@ -39,9 +39,9 @@ The organizing spine is the four-layer decomposition:
    "identity is a registry object, not a pane id" — is the thesis but **no longer exists on
    GitHub; the only copy is on this disk** (push it somewhere before designing further on it).
 
-2. **Postmaster per device, not per agent.** One lightweight launchd-managed daemon owns the
+2. **Homi per device, not per agent.** One lightweight launchd-managed daemon owns the
    mailboxes, the route table, the liveness loop, and the store→wake handoff. Individual
-   agents do **not** need a stable reachable address; the postmaster does. This collapses the
+   agents do **not** need a stable reachable address; the homi does. This collapses the
    N×N socket-management mess (PR #9's whole struggle) into one stable link per device pair.
    *Rejected:* per-agent adapters only (Switchboard shape) — cannot self-probe, cannot
    store-and-forward, cannot close the received→acted-on gap. *Rejected:* a full herdr-style
@@ -57,7 +57,7 @@ The organizing spine is the four-layer decomposition:
    parallel scheme. Read the live name from the sidecar `name` field (Claude already
    maintains it; `/rename` updates it); drive a rename by sending `/rename <name>` to a live
    session, or appending a `custom-title` record to a dormant transcript (beam's proven
-   method). The postmaster reconciles registry-name ⟷ sidecar-name continuously.
+   method). The homi reconciles registry-name ⟷ sidecar-name continuously.
 
 5. **v1 = local + your own Tailscale network.** Full-SSH transport is acceptable *on your own
    tailnet* because you own both ends; the forward-only restricted key is a cross-**fleet**
@@ -74,9 +74,9 @@ The organizing spine is the four-layer decomposition:
 **A name is a claimed, owned registry object — never a bare string.** Today communicate
 resolves name collisions by "newest `startedAt` wins," silently hijacking all future
 routing, and `--as NAME` lets any socket-writer forge attribution. The fabric closes both:
-the postmaster is the authority for name ownership; a name is *claimed* (first claimant holds
+the homi is the authority for name ownership; a name is *claimed* (first claimant holds
 it until it releases or is measured dead), and attribution on the wire is stamped by the
-postmaster, not chosen by the sender.
+homi, not chosen by the sender.
 
 **Registry entry (extends the PR #2 schema, unchanged fields plus typed `reach:`):**
 
@@ -85,7 +85,7 @@ name: peer-agent        # durable identity == the session's /rename name
 kind: claude-code | codex | mailbox | box
 operator: peer
 reach:
-  mail:  peer-agent@peer-device   # agent↔agent, durable (postmaster-owned)
+  mail:  peer-agent@peer-device   # agent↔agent, durable (homi-owned)
   pane:  air-2:%82                           # agent↔pane, ephemeral (tmux route)
   box:   box-fdtd-3 / 192.168.64.5           # sandboxed (v2)
 aliases: [agent-2, librarian]     # historical / session names still resolve
@@ -94,7 +94,7 @@ updated: 2026-08-15
 
 **Rename-sync (the mechanism behind decision 4):**
 - *session → fabric (read):* the sidecar `~/.claude/sessions/<pid>.json` `name` field mirrors
-  `/rename` live. The postmaster watches it; a human rename updates the route table (and adds
+  `/rename` live. The homi watches it; a human rename updates the route table (and adds
   the old name to `aliases:`).
 - *fabric → session (write):* to make the human-visible name match a fabric-assigned identity,
   send `/rename <name>` into a live session; for a dormant transcript, append a `custom-title`
@@ -105,27 +105,27 @@ updated: 2026-08-15
 
 ## Layer 2 — Address
 
-**Per-identity durable mailbox, owned by the postmaster, not by any session.** This is the
+**Per-identity durable mailbox, owned by the homi, not by any session.** This is the
 principle beneath "the mailbox": *an address must not die with a process.* Store-and-forward
 converts the hard synchronization problem (both ends alive at once — which fails constantly
-for intermittent agents) into an easy durability problem (a file the postmaster controls).
+for intermittent agents) into an easy durability problem (a file the homi controls).
 
 - **Mailbox** = `~/.local/share/communicate/mail/<identity>/inbox.jsonl`, append-only, atomic
   write (the anu reply-channel discipline). Lines: `{"ts","from","msg_id","text","reply_to"}`.
 - **Inbound ≠ outbound.** The old `ssh -N -L …-R …` welded receive and send onto one tunnel,
-  so a peer's stale socket litter disabled *your* sending (issue #7/#8). The postmaster's
+  so a peer's stale socket litter disabled *your* sending (issue #7/#8). The homi's
   inbound listener and outbound sender are **independent channels that fail independently**.
 - **Delivery semantics the wire already hints at:** every message carries a `msg_id`; the
-  receiving postmaster writes an ack referencing it. At-least-once delivery; the sender
+  receiving homi writes an ack referencing it. At-least-once delivery; the sender
   retries until acked or dead-lettered. (communicate generates `msg_id` and drops it today.)
 - **Liveness is measured and provenance-labelled, never inferred from a file existing** (the
   26-hour bug). Ladder: `probed > reported > reachable-host > declared`. "A socket file is not
   a listener" → probe = connect then measure *time-to-EOF* (dead ends EOF in ~5 ms; a live
-  listener holds the line). **Self-probe is a first-class duty**: the postmaster measures its
+  listener holds the line). **Self-probe is a first-class duty**: the homi measures its
   *own* published addresses, not just peers' — the rule that cost 4 days when applied only
   outward.
 
-## Layer 3 — Network management: the postmaster daemon
+## Layer 3 — Network management: the homi daemon
 
 **A single per-device singleton**, launchd `RunAtLoad` + `KeepAlive`, so it survives sleep,
 restart, network change, and ssh-agent wedge — the durable state the hand-rolled tunnel never
@@ -142,9 +142,9 @@ shape: pidfile, atomic-mkdir lock, self-enforcement, auto-exit when its substrat
    the mailbox (durable) **then** attempt attention-delivery into a live session via
    communicate's socket protocol (which surfaces it as a peer *turn* / wakes an idle session).
    If no live session: hold; deliver the instant one appears (a new sidecar shows up). "A
-   message sitting in inbox.jsonl doesn't wake anything" — now the postmaster is the thing
+   message sitting in inbox.jsonl doesn't wake anything" — now the homi is the thing
    that does.
-5. **Cross-device = postmaster ↔ postmaster.** Exactly one link per device pair. On your own
+5. **Cross-device = homi ↔ homi.** Exactly one link per device pair. On your own
    tailnet (v1): ordinary SSH. Cross-fleet (v2): the forward-only restricted key. **GitHub
    remains the auditable slow-path fallback** (peer's #8 argument: the only channel that
    worked all day, and it leaves a trail).
@@ -152,12 +152,12 @@ shape: pidfile, atomic-mkdir lock, self-enforcement, auto-exit when its substrat
 **Efficiency:** one mostly-idle process — a probe timer, a kqueue/inotify watch on the mailbox
 dirs, and a listener socket. Not N daemons. Per-agent launchd adapter sockets are added only
 where an agent must stay *reachable while its own session is down* (the Switchboard durability
-case); the postmaster handles everything else.
+case); the homi handles everything else.
 
 **Integration seam with anu (validated as unusually clean):** `pane` is one bin with
 separable `resolve / classify / transport` concerns, and everything (the MCP server, `box`,
 `context carry`, `ncn`) calls it as a subprocess. The fabric **replaces `_resolve` only** —
-teach resolution to return a *route* (local tmux pane / remote pane via the postmaster /
+teach resolution to return a *route* (local tmux pane / remote pane via the homi /
 socket peer / mailbox) instead of a bare `%id`. `_classify` + `cmd_send` become the
 **local-tmux backend**, one backend among several. The reply-file dir becomes the fabric's
 response bus (it already crosses the box boundary and survives the pane). Nothing above
@@ -186,7 +186,7 @@ socket can inject a turn."
 - **Sandbox-identity = apple/container** (v1.0.0, this host is macOS 26 with the full
   networking story). Each box is its own VM with a routable IP; **a unix socket crosses the VM
   boundary** (`--publish-socket` / virtiofs) — so a boxed agent exposes a `cc-socks` socket to
-  the host postmaster, gets a sidecar, and becomes a **first-class peer**: sandbox identity and
+  the host homi, gets a sidecar, and becomes a **first-class peer**: sandbox identity and
   mailbox identity unify. Bind `agent-N ↔ box ↔ dedicated IP ↔ per-agent key ↔ label`.
   Hardening `box` needs today (it runs as guest root, worktree fully writable, Claude creds and
   reply-dir shared across all workers, full internet): `--user`, `--cap-drop ALL`, per-agent
@@ -196,13 +196,13 @@ socket can inject a turn."
 
 ## What v1 actually ships
 
-Identity with `/rename`-sync · the durable per-identity mailbox · the postmaster daemon
+Identity with `/rename`-sync · the durable per-identity mailbox · the homi daemon
 (launchd) with the store→wake handoff · cross-device over **your own tailnet** (ordinary SSH)
 · the anu `pane` `_resolve` adapter so `pane send <device>:<name>` routes through the fabric
 and confirmed replies come back over the reply-file bus · ack/at-least-once delivery.
 
 **Explicit v1 non-goals:** the forward-only cross-fleet key; container sandbox-identity;
-multi-hop routing (every path is one hop from the postmaster); a UI (PR #9's switchboard is
+multi-hop routing (every path is one hop from the homi); a UI (PR #9's switchboard is
 the eventual operator console, not v1).
 
 ## Invariants (testable properties, in order of what they cost to learn)
@@ -223,13 +223,13 @@ the eventual operator console, not v1).
 
 - Driving `/rename` into a **live** session cleanly (beam's append is dormant-only).
 - **Tailnet reachability from inside a box** is unverified — measure before Layer 4 depends on it.
-- **The postmaster can inject a turn into any local session** — it is a privileged local
+- **The homi can inject a turn into any local session** — it is a privileged local
   daemon; its own socket must be `0700`/owned, and it must honor Claude's held-message gate.
 - **HOMI-engine is one disk copy from lost** — preserve it; it's where the core idea is stated.
 - **Merge-order hazard:** PR #9's honest-liveness rule contradicts `communicate directory`'s
   file-existence join — the merge must pick the probe ladder and delete the other.
 - **Name-ownership mechanism** (claim/release/expiry) needs a concrete protocol, not just "the
-  postmaster decides."
+  homi decides."
 
 ## What each source contributes
 

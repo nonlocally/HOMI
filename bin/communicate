@@ -26,8 +26,8 @@
 #   communicate wake    <name> --on-pr <owner/repo> [--every SEC] [--catchup]  new-PR trigger
 #   communicate wake    stop <name|all> | wake ls
 #
-#   communicate pm      {start|stop|status|claim|release|send|inbox|link|unlink}
-#                       the postmaster: durable identities, mailboxes, device links
+#   communicate homi      {start|stop|status|claim|release|send|inbox|link|unlink}
+#                       the homi: durable identities, mailboxes, device links
 #
 set -o pipefail
 COMM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,8 +46,8 @@ source "$COMM_HOME/lib/router.sh"
 source "$COMM_HOME/lib/wake.sh"
 # shellcheck source=lib/directory.sh
 source "$COMM_HOME/lib/directory.sh"
-# shellcheck source=lib/pm.sh
-source "$COMM_HOME/lib/pm.sh"
+# shellcheck source=lib/homi.sh
+source "$COMM_HOME/lib/homi.sh"
 
 # Print the whole leading comment header (stops at the first non-comment line),
 # so the usage text can grow without a hardcoded line range going stale.
@@ -149,7 +149,7 @@ main() {
     whereis) router_whereis "$@" && echo;;
     route)   router_route "$@";;
     wake)    wake_cmd "$@";;
-    pm)      pm_cmd "$@";;
+    homi)    homi_cmd "$@";;
     # internal entrypoints (not for humans)
     __supervise-claude) _claude_supervise "$@";;
     __codex-peer-serve) _codex_peer_serve "$@";;

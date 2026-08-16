@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""postmaster — the communicate fabric daemon (agent-fabric v1).
+"""homi — the communicate fabric daemon (agent-fabric v1).
 
 One per-device daemon that gives agents durable identity and a durable
 address, independent of any process or session:
 
-  * identities   `claim <name>` binds a STABLE socket <sockdir>/pm-<name>.sock
+  * identities   `claim <name>` binds a STABLE socket <sockdir>/homi-<name>.sock
                  and plants a sweep-proof Claude sidecar, so the name is
                  messageable (SendMessage / cc-socks) even when no session
                  backs it. Never pid-derived paths.
   * mailboxes    every inbound frame is appended durably to
-                 $PM_STATE/mail/<name>/inbox.jsonl before anything else.
+                 $HOMI_STATE/mail/<name>/inbox.jsonl before anything else.
   * store→wake   when a REAL session with that name is alive (sidecar name
-                 match + live socket), the postmaster unplants its own sidecar
+                 match + live socket), the homi unplants its own sidecar
                  and drains undelivered mail into the session as protocol
                  turns; when the session dies it replants and holds.
   * liveness     measured, never inferred from a file existing. probe =
                  connect + recv(1): fast EOF => dead, timeout => a live
-                 listener holds the line. The postmaster probes ITS OWN
+                 listener holds the line. The homi probes ITS OWN
                  published sockets too (self-probe), provenance-labelled.
-  * links        postmaster↔postmaster, one per device pair. Outbound only
+  * links        homi↔homi, one per device pair. Outbound only
                  (`ssh -N -L` toward the peer's inbound socket for THIS
                  device) so inbound and outbound fail independently.
 
-State layout ($PM_STATE = ${COMM_STATE:-~/.local/state/communicate}/pm):
+State layout ($HOMI_STATE = ${COMM_STATE:-~/.local/state/communicate}/homi):
   daemon.pid daemon.log daemon.lock/   singleton bookkeeping
-  pm.sock                              control socket (CLI ops, one JSON/conn)
+  homi.sock                              control socket (CLI ops, one JSON/conn)
   identities.json                      claimed names (reloaded on start)
   mail/<name>/inbox.jsonl + .cursor    the durable address
   in/<device>.sock                     link inbound (arrival-line attribution)
@@ -33,7 +33,7 @@ State layout ($PM_STATE = ${COMM_STATE:-~/.local/state/communicate}/pm):
   seen/<device>                        dedup ring of received msg_ids
   routes.json                          materialized routes + measured liveness
 
-Env: COMM_STATE, PM_SOCK_DIR, PM_SESSIONS_DIR, PM_SELF, PM_TICK, PM_PROBE.
+Env: COMM_STATE, HOMI_SOCK_DIR, HOMI_SESSIONS_DIR, HOMI_SELF, HOMI_TICK, HOMI_PROBE.
 """
 import json
 import os
@@ -58,11 +58,11 @@ def state_root():
     base = os.environ.get("COMM_STATE") or os.path.join(
         os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
         "communicate")
-    return os.path.join(base, "pm")
+    return os.path.join(base, "homi")
 
 
 def sock_dir():
-    d = os.environ.get("PM_SOCK_DIR")
+    d = os.environ.get("HOMI_SOCK_DIR")
     if d:
         return d
     m = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
@@ -72,7 +72,7 @@ def sock_dir():
 
 
 def sessions_dir():
-    d = os.environ.get("PM_SESSIONS_DIR")
+    d = os.environ.get("HOMI_SESSIONS_DIR")
     if d:
         return d
     return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR")
@@ -95,7 +95,7 @@ def ensure_dir_0700(d):
 
 
 def self_device():
-    n = os.environ.get("PM_SELF")
+    n = os.environ.get("HOMI_SELF")
     if n:
         return n
     try:
@@ -153,15 +153,15 @@ _FROM_NAME_RE = re.compile(r'<cross-session-message\b[^>]*\bfrom-name="([^"]*)"'
 
 # ---- the daemon ----------------------------------------------------------------
 
-class PM:
+class Homi:
     def __init__(self):
         self.root = state_root()
         self.sockdir = sock_dir()
         self.sessdir = sessions_dir()
         self.device = self_device()
         self.pid = os.getpid()
-        self.tick_s = float(os.environ.get("PM_TICK") or 2)
-        self.probe_s = float(os.environ.get("PM_PROBE") or 30)
+        self.tick_s = float(os.environ.get("HOMI_TICK") or 2)
+        self.probe_s = float(os.environ.get("HOMI_PROBE") or 30)
         self.mu = threading.Lock()
         self.mail_mu = threading.Lock()
         self.stop_ev = threading.Event()
@@ -215,7 +215,7 @@ class PM:
                 if oldpid:
                     try:
                         os.kill(oldpid, 0)
-                        sys.stderr.write("postmaster already running (pid %d)\n" % oldpid)
+                        sys.stderr.write("homi already running (pid %d)\n" % oldpid)
                         sys.exit(3)
                     except ProcessLookupError:
                         pass  # stale
@@ -242,20 +242,20 @@ class PM:
 
     # -- identities ------------------------------------------------------------
     #
-    # A claimed identity is: a STABLE socket <sockdir>/pm-<name>.sock (bound for
+    # A claimed identity is: a STABLE socket <sockdir>/homi-<name>.sock (bound for
     # the daemon's whole life — cached senders and links keep working), a
-    # sweep-proof sidecar (our live pid; version "communicate-pm" so the
+    # sweep-proof sidecar (our live pid; version "communicate-homi" so the
     # reconciler can tell our plants from real sessions), and a mailbox dir.
 
     _NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
-    _RESERVED = {"pm", "self", "all", "postmaster"}
+    _RESERVED = {"pm", "self", "all", "homi"}
 
     def identity_sock(self, name):
-        return os.path.join(self.sockdir, "pm-%s.sock" % name)
+        return os.path.join(self.sockdir, "homi-%s.sock" % name)
 
     def sidecar_path(self, name):
         """Discovery only LISTS sidecars whose filename is pid-shaped (verified
-        live 2026-08-15: a pm-<name>.json plant survives the sweep but never
+        live 2026-08-15: a homi-<name>.json plant survives the sweep but never
         appears in ListAgents; the same object as 3999901.json is listed).
         So: deterministic numeric filenames well above any real pid
         (macOS pid_max is 99998), linear-probed on cross-name collision."""
@@ -281,7 +281,7 @@ class PM:
         if not ent:
             return
         obj = cc_peer._sidecar_obj(ent["sock"], name, self.pid)
-        obj["version"] = "communicate-pm"
+        obj["version"] = "communicate-homi"
         os.makedirs(self.sessdir, exist_ok=True)
         tmp = self.sidecar_path(name) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -415,7 +415,7 @@ class PM:
             if not fn.endswith(".json"):
                 continue
             d = _read_json(os.path.join(self.sessdir, fn), None)
-            if not isinstance(d, dict) or d.get("version") == "communicate-pm":
+            if not isinstance(d, dict) or d.get("version") == "communicate-homi":
                 continue
             name, pid, sock = d.get("name"), d.get("pid"), d.get("messagingSocketPath")
             if not name or not pid or not sock:
@@ -620,13 +620,13 @@ class PM:
         self.log("proxy identity:", name, "home", device)
         return ent
 
-    # -- links (postmaster ↔ postmaster) ------------------------------------------
+    # -- links (homi ↔ homi) ------------------------------------------
     #
     # One link per device pair; each side manages only its OUTBOUND half, so
     # inbound and outbound fail independently. Envelopes arrive on a
     # per-device inbound socket (in/<device>.sock) — attribution derives from
     # the ARRIVAL LINE, not a sender-claimed string. Delivery is
-    # at-least-once: files queue under out/<device>/ until the far postmaster
+    # at-least-once: files queue under out/<device>/ until the far homi
     # acks the msg_id; receivers dedup on a per-device ring.
 
     _DEV_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
@@ -667,7 +667,7 @@ class PM:
         never prompt), forward-only -L toward the peer's inbound socket FOR
         THIS device, StreamLocalBindUnlink so a dead tunnel's socket litter
         never blocks the redial."""
-        rin = "%s/.local/state/communicate/pm/in/%s.sock" % (
+        rin = "%s/.local/state/communicate/homi/in/%s.sock" % (
             remote_home or "<REMOTE_HOME>", self.device)
         lsock = self.path("links", device + ".sock")
         return ["ssh", "-N",
@@ -965,10 +965,10 @@ class PM:
     # -- status --
     def build_status(self, fresh_probe=True):
         socks = {}
-        own = {"pm.sock": self.path("pm.sock")}
+        own = {"homi.sock": self.path("homi.sock")}
         with self.mu:
             for name, ent in self.identities.items():
-                own["pm-%s.sock" % name] = ent["sock"]
+                own["homi-%s.sock" % name] = ent["sock"]
         for label, p in own.items():
             st = probe(p) if fresh_probe else "unknown"
             socks[label] = {"path": p, "state": st, "provenance": "probed",
@@ -1064,7 +1064,7 @@ class PM:
         self.shutdown()
 
     def control_server(self):
-        srv = self.bind_unix(self.path("pm.sock"))
+        srv = self.bind_unix(self.path("homi.sock"))
         while not self.stop_ev.is_set():
             try:
                 conn, _ = srv.accept()
@@ -1157,7 +1157,7 @@ class PM:
     # -- lifecycle --
     def shutdown(self, *_a):
         self.stop_ev.set()
-        paths = [self.path("pm.sock")]
+        paths = [self.path("homi.sock")]
         with self.mu:
             names = list(self.identities)
             for ent in self.identities.values():
@@ -1191,7 +1191,7 @@ class PM:
             os.rmdir(self.path("daemon.lock"))
         except OSError:
             pass
-        self.log("postmaster stopped")
+        self.log("homi stopped")
         os._exit(0)
 
     def run(self):
@@ -1199,7 +1199,7 @@ class PM:
         self.acquire_singleton()
         signal.signal(signal.SIGTERM, self.shutdown)
         signal.signal(signal.SIGINT, self.shutdown)
-        self.log("postmaster starting: device=%s pid=%d root=%s sockdir=%s"
+        self.log("homi starting: device=%s pid=%d root=%s sockdir=%s"
                  % (self.device, self.pid, self.root, self.sockdir))
         threading.Thread(target=self.control_server, daemon=True).start()
         self._load_identities()
@@ -1213,13 +1213,13 @@ class PM:
 # ---- CLI client ("call") -------------------------------------------------------
 
 def _call(req, timeout=10.0):
-    path = os.path.join(state_root(), "pm.sock")
+    path = os.path.join(state_root(), "homi.sock")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect(path)
     except OSError:
-        sys.stderr.write("postmaster not running (no listener at %s)\n" % path)
+        sys.stderr.write("homi not running (no listener at %s)\n" % path)
         sys.exit(2)
     try:
         s.sendall((json.dumps(req) + "\n").encode("utf-8"))
@@ -1237,14 +1237,14 @@ def _call(req, timeout=10.0):
         s.close()
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
-        sys.stderr.write("no reply from postmaster\n")
+        sys.stderr.write("no reply from homi\n")
         sys.exit(2)
     return json.loads(line.decode("utf-8", "replace"))
 
 
 def _human_status(st):
     self_ = st.get("self", {})
-    out = ["postmaster @ %s (pid %s)" % (self_.get("device"), self_.get("pid"))]
+    out = ["homi @ %s (pid %s)" % (self_.get("device"), self_.get("pid"))]
     for label, s in sorted((self_.get("socks") or {}).items()):
         out.append("  %-28s %-5s [%s]" % (label, s.get("state"), s.get("provenance")))
     idents = st.get("identities") or {}
@@ -1257,7 +1257,7 @@ def _human_status(st):
 
 def cli_call(argv):
     if not argv:
-        sys.stderr.write("usage: postmaster.py call <op> [args...]\n")
+        sys.stderr.write("usage: homi.py call <op> [args...]\n")
         return 1
     op, args = argv[0], argv[1:]
     if op == "status":
@@ -1273,7 +1273,7 @@ def cli_call(argv):
         return 0 if r.get("ok") else 1
     if op in ("claim", "release"):
         if not args:
-            sys.stderr.write("usage: communicate pm %s <name>\n" % op)
+            sys.stderr.write("usage: communicate homi %s <name>\n" % op)
             return 1
         r = _call({"op": op, "name": args[0]})
         if r.get("ok"):
@@ -1292,7 +1292,7 @@ def cli_call(argv):
                 return 1
             args = args[:i] + args[i + 2:]
         if len(args) < 2:
-            sys.stderr.write("usage: communicate pm send <name> <message...> [--from NAME]\n")
+            sys.stderr.write("usage: communicate homi send <name> <message...> [--from NAME]\n")
             return 1
         r = _call({"op": "send", "to": args[0], "text": " ".join(args[1:]),
                    "from": frm})
@@ -1303,7 +1303,7 @@ def cli_call(argv):
         return 1
     if op in ("link", "unlink"):
         if not args:
-            sys.stderr.write("usage: communicate pm %s <device> [--addr user@host] [--sock path]\n" % op)
+            sys.stderr.write("usage: communicate homi %s <device> [--addr user@host] [--sock path]\n" % op)
             return 1
         req = {"op": op, "device": args[0]}
         if "--sock" in args:
@@ -1337,7 +1337,7 @@ def cli_retitle(argv):
     """Dormant rename-sync (beam's method): append a custom-title record to a
     transcript so the session carries the fabric name when next resumed."""
     if len(argv) != 2:
-        sys.stderr.write("usage: postmaster.py retitle <transcript.jsonl|session-uuid> <name>\n")
+        sys.stderr.write("usage: homi.py retitle <transcript.jsonl|session-uuid> <name>\n")
         return 1
     target, name = argv
     path = target
@@ -1360,11 +1360,11 @@ def cli_retitle(argv):
 
 def main():
     if len(sys.argv) < 2:
-        sys.stderr.write("usage: postmaster.py {daemon|call|retitle|selfname} ...\n")
+        sys.stderr.write("usage: homi.py {daemon|call|retitle|selfname} ...\n")
         sys.exit(1)
     mode = sys.argv[1]
     if mode == "daemon":
-        PM().run()
+        Homi().run()
     elif mode == "selfname":
         print(self_device())
     elif mode == "retitle":
