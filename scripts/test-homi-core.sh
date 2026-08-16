@@ -214,6 +214,18 @@ if "$COMM" homi retitle "$FT" my-new-name >/dev/null 2>&1; then ok "retitle runs
 if tail -1 "$FT" | grep -q '"customTitle": "my-new-name"'; then ok "custom-title appended"; else bad "custom-title appended"; fi
 if tail -1 "$FT" | grep -q '"sessionId": "fake-transcript"'; then ok "sessionId from filename"; else bad "sessionId from filename"; fi
 
+echo "== identity record carries the four axes"
+"$COMM" homi start >/dev/null 2>&1
+"$COMM" homi claim axistest >/dev/null 2>&1
+python3 - "$COMM_STATE/homi/identities.json" <<'PY' && ok "identity has workspace/place/surface/card/aliases keys" || bad "four-axis record"
+import json,sys
+d=json.load(open(sys.argv[1]))["axistest"]
+for k in ("workspace","place","surface","card","aliases"):
+    assert k in d, (k, d)
+assert d["place"]["kind"]=="local", d["place"]
+assert d["aliases"]==[], d["aliases"]
+PY
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

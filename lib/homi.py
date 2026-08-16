@@ -365,7 +365,14 @@ class Homi:
                         "kind": e.get("kind", "local"),
                         "home": e.get("home"),
                         "seat": e.get("seat"),
-                        "boxed": e.get("boxed", False)}
+                        "boxed": e.get("boxed", False),
+                        "aliases": e.get("aliases") or [],
+                        "workspace": e.get("workspace"),
+                        "place": e.get("place") or {
+                            "kind": "boxed" if e.get("boxed") else "local",
+                            "device": e.get("home")},
+                        "surface": e.get("surface"),
+                        "card": e.get("card")}
                     for n, e in self.identities.items()}
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
@@ -1174,6 +1181,18 @@ class Homi:
         return {"ok": False,
                 "err": "unknown identity: %s (claim it here, or address <name>@<device>)" % name}
 
+    def _blank_axes(self, boxed=False):
+        """The four axes, empty. Every identity carries them from birth so a
+        later writer never has to remember to create them (the registry law:
+        a field that needs a separate remembered write dies)."""
+        return {
+            "workspace": None,                       # {path, ref, branch, worktree}
+            "place": {"kind": "boxed" if boxed else "local", "device": None},
+            "surface": None,                         # {driver, handle, state, measured_at}
+            "card": None,                            # {what, ask_me_for, derived, updated}
+            "aliases": [],                           # durable role names for this identity
+        }
+
     def _do_claim(self, name, boxed=False):
         if not self._NAME_RE.match(name or ""):
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
@@ -1197,6 +1216,7 @@ class Homi:
                 # session the boxed agent looks like any other peer.
                 ent = {"sock": sock, "claimed_at": time.time(), "_srv": None,
                        "kind": "local", "boxed": True}
+                ent.update(self._blank_axes(boxed=True))
                 with self.mu:
                     self.identities[name] = ent
                 os.makedirs(self.path("mail", name), exist_ok=True)
@@ -1213,6 +1233,7 @@ class Homi:
             srv = self.bind_unix(sock)
             ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
                    "kind": "local"}
+            ent.update(self._blank_axes())
             with self.mu:
                 self.identities[name] = ent
             os.makedirs(self.path("mail", name), exist_ok=True)
@@ -1364,11 +1385,13 @@ class Homi:
             r = self._do_claim(name, boxed=bool(e.get("boxed")))
             if not r.get("ok"):
                 self.log("re-claim failed:", name, r.get("err"))
-            elif e.get("seat"):
-                # A bound seat survives a daemon restart (tmux outlives us).
-                with self.mu:
-                    if name in self.identities:
-                        self.identities[name]["seat"] = e["seat"]
+                continue
+            with self.mu:
+                if name in self.identities:
+                    for k in ("seat", "aliases", "workspace", "place",
+                              "surface", "card"):
+                        if e.get(k) is not None:
+                            self.identities[name][k] = e[k]
         self._persist_identities()
 
     def _name_for_socket(self, sock_path):
