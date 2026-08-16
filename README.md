@@ -147,6 +147,53 @@ communicate codex peer aadarshs-mac-studio codex-studio   # present it as a peer
 # ...now `codex-studio` is in ListAgents; SendMessage runs codex exec over there.
 ```
 
+## homi — durable identity + store-and-forward (v0.3)
+
+Everything above is rendezvous: both ends must be alive at the same moment, and
+a "name" is whatever a sidecar file says right now. **homi** (named for the
+HOMI-engine lineage; its role is the device's postmaster) is the per-device
+daemon that fixes both:
+
+- `communicate homi claim <name>` gives a name a **stable address that
+  survives the process behind it**: an always-answerable socket, a sweep-proof
+  sidecar (the name stays in `ListAgents`), and a durable mailbox
+  (`$COMM_STATE/homi/mail/<name>/inbox.jsonl`) that stores every inbound
+  message before anything else is attempted.
+- **store→wake.** While a real session owns the name (`/rename` — the sidecar
+  mirrors it), homi steps aside and drains held mail into the session as
+  protocol turns (a message is a wake). When the session dies, homi takes the
+  name back and holds mail durably. The gap between "received" and "acted on"
+  is homi's job.
+- **Measured liveness.** `homi status` probes sockets — its own included — and
+  labels every route `probed`/`reported`. A socket file is not a listener.
+- **Device links.** `homi link <dev> --addr user@host` dials **outbound-only**
+  (`ssh -N -L`, BatchMode, `StreamLocalBindUnlink`) toward the peer homi's
+  per-device inbound socket, so inbound and outbound fail independently.
+  Envelopes are acked, queued under `out/<dev>/`, retried with backoff, and
+  deduped by `msg_id`. Address remote agents as `<name>@<device>`; remote
+  senders appear locally as proxy peers you can reply to by bare name, and a
+  reply for an unclaimed name auto-creates its mailbox — local mail never
+  bounces.
+- **Persistence.** `homi install` puts it under launchd (`KeepAlive` +
+  `RunAtLoad`; systemd --user on linux). `communicate down` deliberately does
+  **not** stop homi — it is infrastructure; `homi uninstall` removes it.
+- **Rename-sync.** The identity name *is* the session's `/rename` name.
+  `homi adopt <name> --pane <id>` drives a live rename (via anu's `pane`);
+  `homi retitle <transcript|uuid> <name>` retitles a dormant transcript.
+
+```sh
+communicate homi start                # or: homi install  (survives reboots)
+communicate homi claim gds-agent      # durable address; appears in ListAgents
+communicate homi send gds-agent "…"   # stored durably, delivered as a turn when live
+communicate homi inbox gds-agent      # the mailbox is a plain JSONL file
+communicate homi link mini-1 --addr aadarshs-mac-mini-1   # then: send <name>@mini-1
+communicate homi status --json        # routes, measured liveness, queues
+```
+
+Tests: `scripts/test-homi-core.sh` (lifecycle → identities → store→wake →
+probes), `scripts/test-homi-link.sh` (two homis: envelopes/acks/retry/dedup/
+proxy/reply), `scripts/test-homi-persist.sh` (launchd KeepAlive; manual).
+
 ## Safety model
 
 - Transport is strictly SSH over a network you own. A forwarded socket is only
@@ -171,6 +218,8 @@ lib/peer.sh         Tier 3: present Codex as a native peer; raw peer sender
 lib/router.sh       the agent-router: name -> socket table, whereis, route
 lib/wake.sh         heartbeat loop over the router
 lib/cc_peer.py      the cc-socks wire protocol (serve / send / recv)
+lib/homi.py         the homi daemon: durable identities, mailboxes, store→wake, links
+lib/homi.sh         communicate homi verbs (start/claim/send/link/install/adopt/…)
 docs/MECHANISM.md   how Claude Code peer messaging actually works
 scripts/            end-to-end tests (codex-peer, codex, claude-bridge)
 ```
@@ -180,3 +229,10 @@ scripts/            end-to-end tests (codex-peer, codex, claude-bridge)
 Tier 1 (Claude↔Claude bridge) and Tier 3 (Codex-as-peer) are verified
 end-to-end; Tier 2 (`codex ask`) including `resume` continuity is verified
 locally. See `scripts/` for the tests.
+
+homi v1 is verified: 44/44 core, 20/20 link, 6/6 launchd-persistence checks,
+plus a live proof on a real machine — a claimed identity appeared in
+`ListAgents`, a real `SendMessage` landed in its durable mailbox with the same
+`msg_id`, and a CLI `homi send` to a live session's name was delivered into
+that session as an attributed cross-session turn. Cross-device homi↔homi over
+real ssh awaits a second device with a valid tailnet node key.
