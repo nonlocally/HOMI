@@ -161,19 +161,33 @@ class Tools:
         return names
 
     def _directory(self):
-        out = self._run(["directory", "--json"], 30)
+        """Agents reachable through homi, with measured liveness — replaces
+        the old registry/*.md read (that registry is gone; homi's roster is
+        the source of truth now)."""
+        out = self._run(["homi", "agents", "--json"], 30)
         if out.returncode != 0:
-            raise RuntimeError(out.stderr.strip()[-500:] or "communicate directory failed")
-        return json.loads(out.stdout)
+            raise RuntimeError(out.stderr.strip()[-500:] or "communicate homi agents failed")
+        data = json.loads(out.stdout or "{}")
+        rows = []
+        for a in data.get("agents", []):
+            card = a.get("card") or {}
+            rows.append({
+                "name": a.get("name"),
+                "kind": a.get("kind"),
+                "device": a.get("home") or data.get("device"),
+                "live": a.get("state") == "live",
+                "what": card.get("what", ""),
+            })
+        return rows
 
     def list_agents(self) -> str:
-        """List every agent in the communicate registry: name, kind, live/reachable now, dispatchable from here, and what it is for. Call this before choosing where to send work."""
+        """List every agent reachable through homi: name, kind, live/reachable now, dispatchable from here, and what it is for. Call this before choosing where to send work."""
         try:
             rows = self._directory()
         except Exception as e:
             return f"ERROR listing agents: {e}"
         if not rows:
-            return "No agents in the registry."
+            return "No agents in the homi roster."
         lines = []
         for r in rows:
             name = r.get("name", "?")
@@ -181,17 +195,7 @@ class Tools:
             live = "LIVE" if r.get("live") else "offline"
             dispatchable = (kind == "codex" and bool(r.get("workdir"))) or \
                 (kind in ("claude", "claude-code") and bool(r.get("device")))
-            summary = ""
-            f = r.get("file")
-            if f:
-                path = os.path.join(os.path.dirname(os.path.dirname(self.valves.communicate_path)), f)
-                try:
-                    body = open(path, encoding="utf-8").read().split("---", 2)[-1]
-                    paras = [p.strip().replace("\n", " ") for p in body.split("\n\n")
-                             if p.strip() and not p.strip().startswith("#")]
-                    summary = (paras[0][:300]) if paras else ""
-                except OSError:
-                    pass
+            summary = r.get("what") or ""
             lines.append(
                 f"- {name} [{kind}, {live}, "
                 f"{'dispatchable via ask_agent' if dispatchable else 'NOT dispatchable from this surface'}]"

@@ -6,3 +6,8 @@ __pycache__/
 # guard against accidental local copies:
 /state/
 /.state/
+
+# Capability cards describe real hosts/corpora — schema is shared, entries are not.
+registry/*.md
+!registry/README.md
+!registry/EXAMPLE.md
