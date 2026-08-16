@@ -676,8 +676,8 @@ class Homi:
                         % (asker, r.get("err"))}
         corr = uuid.uuid4().hex
         token = self._ask_token(asker, corr)
-        wrapped = ("%s\n\n[reply with: communicate homi reply %s \"<answer>\"]"
-                   % (text, token))
+        wrapped = ("%s\n\n[reply with: communicate homi reply %s \"<answer>\" "
+                   "--from %s]" % (text, token, to.split("@", 1)[0]))
         slot = self._register_ask(corr, asker, to.split("@", 1)[0])
         r = self._do_send(to, wrapped, asker)
         if not r.get("ok"):
@@ -1209,6 +1209,12 @@ class Homi:
             r = self._do_claim(name)
             if not r.get("ok"):
                 self.log("re-claim failed:", name, r.get("err"))
+            elif e.get("seat"):
+                # A bound seat survives a daemon restart (tmux outlives us).
+                with self.mu:
+                    if name in self.identities:
+                        self.identities[name]["seat"] = e["seat"]
+        self._persist_identities()
 
     def _name_for_socket(self, sock_path):
         """Reverse-resolve a sender socket to a session name (for envelope
@@ -2839,6 +2845,12 @@ def cli_call(argv):
         if cmd is None and cli:
             if cli == "claude":
                 cmd = os.environ.get("HOMI_CLAUDE_CMD", "claude"); adopt = True
+                # A homi-spawned worker must be able to RECEIVE homi mail as
+                # turns without a human clicking through a held-message dialog —
+                # scoped to this agent's process, never the user's settings.
+                if "crossSessionInbound" not in cmd:
+                    cmd += " --settings '" + json.dumps(
+                        {"crossSessionInbound": "accept"}) + "'"
             elif cli == "codex":
                 cmd = os.environ.get("HOMI_CODEX_CMD", "codex"); adopt = False
             else:

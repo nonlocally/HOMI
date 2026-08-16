@@ -167,8 +167,12 @@ const TOOLS: Tool[] = [
       cwd: z.string().optional(),
     },
     run: (a) => {
-      const cmd = a.cmd || (a.cli === "codex" ? (process.env.HOMI_CODEX_CMD || "codex") : (process.env.HOMI_CLAUDE_CMD || "claude"));
+      let cmd = a.cmd || (a.cli === "codex" ? (process.env.HOMI_CODEX_CMD || "codex") : (process.env.HOMI_CLAUDE_CMD || "claude"));
       const adopt = a.cli !== "codex" && !a.cmd; // claude default adopts
+      // A homi-spawned claude worker must receive homi mail as turns without a
+      // held-message dialog — scoped to this agent, never the user's settings.
+      if (adopt && !cmd.includes("crossSessionInbound"))
+        cmd += " --settings '" + JSON.stringify({ crossSessionInbound: "accept" }) + "'";
       return call({ op: "spawn", name: a.name, cmd, cwd: a.cwd, adopt }, { timeoutMs: 60_000 });
     },
   },

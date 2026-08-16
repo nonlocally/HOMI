@@ -46,8 +46,10 @@ _BUSY_HINT = re.compile(r"esc to interrupt|to interrupt\)|interrupt\b", re.I)
 # present (a lone "yes" in prose is not an approval prompt).
 _PERM_ASK = re.compile(
     r"do you want|would you like|allow this|proceed\?|permission to|"
-    r"grant access|approve|confirm|\(y/n\)|\[y/n\]", re.I)
-_AFFORD = re.compile(r"❯\s*\d|›\s*\d|^\s*\d[.)]\s|\(y/n\)|\[y/n\]|\by/n\b", re.M)
+    r"grant access|approve|confirm|\(y/n\)|\[y/n\]|"
+    r"held message|deliver this message|drop it and tell the sender", re.I)
+_AFFORD = re.compile(r"❯\s*\d|›\s*\d|^\s*\d[.)]\s|\(y/n\)|\[y/n\]|\by/n\b"
+                     r"|^\s*[❯›]\s+\S", re.M)  # bare highlighted row (unnumbered menus)
 # Secret shapes to mask on read unless --raw.
 _SECRETS = [
     # Distinctive credential prefixes — matched anywhere (a leading word char,
@@ -189,16 +191,34 @@ class SeatDriver:
             self._tmux("send-keys", "-t", seat, "-X", "cancel")
         self._tmux("send-keys", "-t", seat, "-l", "--", msg, check=True)
         time.sleep(0.3)
-        # Submit with a SEPARATE Enter, retried; break as soon as the composer's
-        # paste marker clears. Never re-send the text (would duplicate a prompt).
-        for attempt in range(4):
+        # Submit with a SEPARATE Enter, retried with growing delays; verify by
+        # the composer actually CLEARING (neither the paste marker nor the
+        # staged text still visible on the prompt line — a booting CLI can eat
+        # an early Enter). Never re-send the text (would duplicate a prompt).
+        probe = msg[:60]
+        for attempt in range(5):
             self._tmux("send-keys", "-t", seat, "Enter")
-            time.sleep(0.4)
-            if not self._has_paste_marker(seat):
+            time.sleep(0.4 + 0.4 * attempt)
+            if self._has_paste_marker(seat):
+                continue
+            if not self._composer_holds(seat, probe):
                 return {"ok": True, "sent": True}
         # Still staged: report unconfirmed rather than claim success.
         return {"ok": False, "sent": True, "confirmed": False,
-                "err": "staged but not submitted (composer still holds a paste)"}
+                "err": "staged but not submitted (composer still holds the text)"}
+
+    def _composer_holds(self, seat, probe):
+        """True if the staged text still sits on a prompt line near the bottom
+        (an unsubmitted composer). Echoed history lines don't match: we only
+        look at the last few rows and require a prompt glyph before the text."""
+        if not probe:
+            return False
+        tail = self._capture(seat, 8)
+        for ln in tail:
+            s = ln.strip()
+            if (s.startswith(("❯", ">", "›")) and probe in s):
+                return True
+        return False
 
     def _has_paste_marker(self, seat):
         return any(_PASTE_MARKER in ln for ln in self._capture(seat, 10))
@@ -271,24 +291,85 @@ class SeatDriver:
         # allow: choose the first numbered option that is a plain yes (not
         # "always"/"don't ask"). If the menu is numbered, send that digit; if
         # it's a (y/n), send 'y'. Otherwise accept the highlighted default.
-        choice = None
-        for ln in bottom:
-            m = re.search(r"[❯›]?\s*(\d)[.)]\s*(.+)", ln)
-            if m and not re.search(r"always|don'?t ask|all future", m.group(2), re.I):
-                if re.search(r"yes|allow|approve|proceed|ok\b", m.group(2), re.I):
-                    choice = m.group(1)
-                    break
-        if choice:
-            self._tmux("send-keys", "-t", seat, "-l", "--", choice)
+        # Menus may be numbered or bare-highlighted (claude's held-message gate
+        # has no digits: ❯ marks the row, arrows move it). Parse ONLY the
+        # contiguous menu block around the highlighted row — prose above the
+        # menu ("this is what will be delivered") must never count as an
+        # option. If no clearly-affirmative option exists, FAIL CLOSED — a bare
+        # default-Enter could pick a highlighted Deny.
+        aff = re.compile(r"yes|allow|approve|proceed|deliver|accept|ok\b", re.I)
+        neg = re.compile(r"always|don'?t ask|all future|deny|decline|drop", re.I)
+        menu = self._menu_block(bottom)
+        if not menu:
+            return {"ok": False, "err": "no menu block found on screen"}
+        target = next((r for r in menu
+                       if aff.search(r["text"]) and not neg.search(r["text"])), None)
+        if target is None:
+            return {"ok": False,
+                    "err": "no clearly-affirmative option in the menu — refusing "
+                           "to guess (respond by hand or seat send)"}
+        if target["digit"]:
+            self._tmux("send-keys", "-t", seat, "-l", "--", target["digit"])
             self._tmux("send-keys", "-t", seat, "Enter")
-            return {"ok": True, "responded": "option %s" % choice}
-        if any(re.search(r"\(y/n\)|\[y/n\]|\by/n\b", ln, re.I) for ln in bottom):
-            self._tmux("send-keys", "-t", seat, "-l", "--", "y")
-            self._tmux("send-keys", "-t", seat, "Enter")
-            return {"ok": True, "responded": "y"}
-        # last resort: accept the highlighted default with a bare Enter
+            return {"ok": True, "responded": "option %s" % target["digit"]}
+        cur = next((i for i, r in enumerate(menu) if r["hl"]), None)
+        if cur is not None:
+            delta = menu.index(target) - cur
+            key = "Down" if delta > 0 else "Up"
+            for _ in range(abs(delta)):
+                self._tmux("send-keys", "-t", seat, key)
+                time.sleep(0.12)
         self._tmux("send-keys", "-t", seat, "Enter")
-        return {"ok": True, "responded": "default"}
+        return {"ok": True, "responded": target["text"][:40]}
+
+    @staticmethod
+    def _menu_block(lines):
+        """The contiguous option rows around the highlighted (❯/›) line: walk up
+        and down from it until a blank, border, or prose-shaped line. Option
+        rows are short-ish and either highlighted, numbered, or indented like
+        their highlighted sibling."""
+        hl_idx = None
+        for i, ln in enumerate(lines):
+            if re.match(r"^\s*[❯›]\s+\S", ln):
+                hl_idx = i
+        if hl_idx is None:
+            # numbered menu without a highlight glyph
+            rows = []
+            for ln in lines:
+                m = re.match(r"^\s*(\d)[.)]\s+(\S.*)", ln)
+                if m:
+                    rows.append({"hl": False, "digit": m.group(1),
+                                 "text": m.group(2).strip()})
+            return rows
+        hl_indent = len(lines[hl_idx]) - len(lines[hl_idx].lstrip())
+
+        def row_of(ln):
+            m = re.match(r"^(\s*)([❯›]\s+)?(?:(\d)[.)]\s+)?(\S.*)$", ln)
+            if not m:
+                return None
+            indent = len(m.group(1))
+            hl = bool(m.group(2))
+            # sibling rows sit at the highlight's column (± the glyph width)
+            if not hl and abs(indent - hl_indent) > 3:
+                return None
+            return {"hl": hl, "digit": m.group(3), "text": m.group(4).strip()}
+
+        block = []
+        i = hl_idx
+        while i >= 0:
+            r = row_of(lines[i])
+            if r is None or re.match(r"^\s*[│╰╭─└┌]", lines[i]):
+                break
+            block.insert(0, r)
+            i -= 1
+        i = hl_idx + 1
+        while i < len(lines):
+            r = row_of(lines[i])
+            if r is None or re.match(r"^\s*[│╰╭─└┌]", lines[i]):
+                break
+            block.append(r)
+            i += 1
+        return block
 
     def interrupt(self, seat):
         if not self._pane_exists(seat):
