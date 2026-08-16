@@ -173,6 +173,7 @@ class Homi:
         self.probe_s = float(os.environ.get("HOMI_PROBE") or 30)
         self.mu = threading.Lock()
         self.mail_mu = threading.Lock()
+        self.mail_cv = threading.Condition()   # signals wait_for_message pollers
         self.claim_mu = threading.RLock()   # serializes claim/proxy/release/rebind
         self.deliver_mu = {}                # name -> Lock (one drain per name)
         self.stop_ev = threading.Event()
@@ -474,6 +475,10 @@ class Homi:
                 f.flush()
                 os.fsync(f.fileno())
             ids.add(entry["msg_id"])
+        # Wake any wait_for_message long-pollers (MCP's inbound-wake for runtimes
+        # with no socket push). _store is the mail-change event.
+        with self.mail_cv:
+            self.mail_cv.notify_all()
         return True
 
     # -- store→wake ---------------------------------------------------------------
@@ -855,6 +860,66 @@ class Homi:
         ans["name"] = name
         ans["reused"] = reused
         return ans
+
+    # -- inbox / wait / roster (read surface for the MCP faces) -----------------
+
+    def _inbox_entries(self, name, tail=50, after_msg_id=None):
+        with self.mail_mu:
+            lines = self._inbox_lines(name)
+        out = []
+        started = after_msg_id is None
+        for ln in lines:
+            try:
+                e = json.loads(ln)
+            except Exception:
+                continue
+            if not started:
+                if e.get("msg_id") == after_msg_id:
+                    started = True
+                continue
+            out.append(e)
+        return out[-tail:] if (after_msg_id is None) else out
+
+    def _do_inbox(self, name, tail=50, after_msg_id=None):
+        if not self._NAME_RE.match(name or ""):
+            return {"ok": False, "err": "invalid name"}
+        return {"ok": True, "name": name,
+                "messages": self._inbox_entries(name, tail, after_msg_id)}
+
+    def _do_wait(self, name, timeout, after_msg_id=None):
+        """Block until a message beyond after_msg_id (or beyond the current tail)
+        lands for `name`. This is the inbound wake for MCP runtimes with no
+        socket push; Claude sessions get native socket delivery instead."""
+        if not self._NAME_RE.match(name or ""):
+            return {"ok": False, "err": "invalid name"}
+        # Anchor at the current tail when no cursor was given.
+        if after_msg_id is None:
+            cur = self._inbox_entries(name, tail=1)
+            after_msg_id = cur[-1]["msg_id"] if cur else None
+        deadline = time.time() + timeout
+        while True:
+            new = self._inbox_entries(name, tail=1000, after_msg_id=after_msg_id)
+            if new:
+                return {"ok": True, "name": name, "messages": new}
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return {"ok": False, "err": "timeout", "name": name}
+            with self.mail_cv:
+                self.mail_cv.wait(min(remaining, 5.0))
+
+    def _do_agents(self):
+        st = self.build_status()
+        agents = []
+        for n, e in sorted((st.get("identities") or {}).items()):
+            route = e.get("route") or {}
+            agents.append({
+                "name": n, "kind": e.get("kind", "local"),
+                "home": e.get("home"),
+                "state": route.get("state"), "provenance": route.get("provenance"),
+                "undelivered": (e.get("inbox") or {}).get("undelivered", 0),
+                "seat": e.get("seat"),
+            })
+        return {"ok": True, "device": st["self"]["device"], "agents": agents}
 
     def _do_notify(self, reason, from_name):
         if not reason:
@@ -1503,9 +1568,9 @@ class Homi:
         smap = self._scan_sidecars()
         with self.mu:
             items = [(n, e["sock"], e["claimed_at"], e.get("kind", "local"),
-                      e.get("home")) for n, e in self.identities.items()]
+                      e.get("home"), e.get("seat")) for n, e in self.identities.items()]
         idents = {}
-        for n, sockp, claimed, kind, home in items:
+        for n, sockp, claimed, kind, home, seat in items:
             if kind == "proxy":
                 idents[n] = {"kind": "proxy", "home": home, "sock": sockp,
                              "claimed_at": claimed}
@@ -1533,6 +1598,7 @@ class Homi:
                                        "startedAt": sess.get("startedAt")}
                                       if sess else None)},
                 "inbox": {"count": count, "undelivered": max(0, count - cur)},
+                "seat": seat,
             }
         with self.mu:
             linkents = {d: dict(e) for d, e in self.links.items()}
@@ -1574,6 +1640,16 @@ class Homi:
         op = req.get("op")
         if op == "status":
             return self.build_status()
+        if op == "agents":
+            return self._do_agents()
+        if op == "inbox":
+            return self._do_inbox(req.get("name", ""),
+                                  tail=int(req.get("tail") or 50),
+                                  after_msg_id=req.get("after_msg_id"))
+        if op == "wait":
+            return self._do_wait(req.get("name", ""),
+                                 float(req.get("timeout") or 60),
+                                 after_msg_id=req.get("after_msg_id"))
         if op == "claim":
             return self._do_claim(req.get("name", ""))
         if op == "release":
@@ -1835,6 +1911,33 @@ def cli_call(argv):
     if op == "stop":
         r = _call({"op": "stop"})
         print("stopped" if r.get("ok") else json.dumps(r))
+        return 0 if r.get("ok") else 1
+    if op == "agents":
+        r = _call({"op": "agents"})
+        if "--json" in args:
+            print(json.dumps(r, indent=1))
+        else:
+            for a in r.get("agents", []):
+                seat = ("  seat:" + a["seat"]) if a.get("seat") else ""
+                print("%-22s %-6s %-8s%s" % (a["name"], a["kind"],
+                                             a.get("state") or "-", seat))
+        return 0 if r.get("ok") else 1
+    if op == "wait":
+        if not args:
+            sys.stderr.write("usage: communicate homi wait <name> [--timeout SEC] [--json]\n")
+            return 1
+        to = 60.0
+        if "--timeout" in args:
+            to = float(args[args.index("--timeout") + 1])
+        name = [a for a in args if not a.startswith("--") and a != str(to)][0]
+        r = _call({"op": "wait", "name": name, "timeout": to}, timeout=to + 15)
+        if "--json" in args:
+            print(json.dumps(r))
+        elif r.get("ok"):
+            for m in r.get("messages", []):
+                print("%s: %s" % (m.get("from_name") or "?", m.get("text", "")))
+        else:
+            sys.stderr.write("timeout\n")
         return 0 if r.get("ok") else 1
     if op in ("claim", "release"):
         if not args:
