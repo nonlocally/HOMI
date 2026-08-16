@@ -256,7 +256,7 @@ class Homi:
     def acquire_singleton(self):
         lockdir = self.path("daemon.lock")
         pidfile = self.path("daemon.pid")
-        for attempt in (1, 2):
+        for attempt in (1, 2, 3):
             try:
                 os.mkdir(lockdir)
                 break
@@ -274,6 +274,17 @@ class Homi:
                         oldpid = int(f.read().strip())
                 except (OSError, ValueError):
                     pass
+                if oldpid is None:
+                    # Lock present but no pidfile yet = ANOTHER daemon is between
+                    # its mkdir and its pidfile write (the concurrent-autostart
+                    # window two MCP clients can hit). Do NOT reclaim the lock —
+                    # that would delete the winner's lock and split-brain. Back
+                    # off and re-probe; the winner binds homi.sock within a beat.
+                    if attempt < 3:
+                        time.sleep(0.4 * attempt)
+                        continue
+                    sys.stderr.write("another homi is starting; giving way\n")
+                    sys.exit(3)
                 if oldpid:
                     try:
                         os.kill(oldpid, 0)
@@ -1036,36 +1047,47 @@ class Homi:
         except OSError as e:
             return {"ok": False, "err": "staged inbox unreadable: %s" % e}
         cursor = max(0, min(int(cursor or 0), len(entries)))
+        # Hold the per-name deliver lock across the recompose: _deliver_pending
+        # releases mail_mu mid-delivery (holding only this lock), then advances
+        # the cursor by index — a concurrent recompose that reorders the file
+        # under it would scramble those indices (redelivery). lk -> mail_mu is
+        # the same order _deliver_pending uses, so no deadlock.
         with self.mail_mu:
-            seen = self.seen.setdefault(name, set())
-            # Seed from the full file (the in-memory ring only holds a tail).
-            existing = []
-            existing_ids = set()
-            for ln in self._inbox_lines(name):
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    e = json.loads(ln)
-                except Exception:
-                    continue
-                existing.append(e)
-                if e.get("msg_id"):
-                    existing_ids.add(e["msg_id"])
-            fresh_del = [e for e in entries[:cursor]
-                         if e.get("msg_id") and e["msg_id"] not in existing_ids]
-            fresh_und = [e for e in entries[cursor:]
-                         if e.get("msg_id") and e["msg_id"] not in existing_ids]
-            tcur = self._read_cursor(name)
-            tcur = max(0, min(tcur, len(existing)))
-            merged = (existing[:tcur] + fresh_del
-                      + existing[tcur:] + fresh_und)
-            os.makedirs(self.mail_dir(name), exist_ok=True)
-            _atomic_write(self.inbox_path(name),
-                          "".join(json.dumps(e) + "\n" for e in merged))
-            self._write_cursor(name, tcur + len(fresh_del))
-            for e in fresh_del + fresh_und:
-                seen.add(e["msg_id"])
+            lk = self.deliver_mu.setdefault(name, threading.Lock())
+        lk.acquire()
+        try:
+            with self.mail_mu:
+                seen = self.seen.setdefault(name, set())
+                # Seed from the full file (the in-memory ring only holds a tail).
+                existing = []
+                existing_ids = set()
+                for ln in self._inbox_lines(name):
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        e = json.loads(ln)
+                    except Exception:
+                        continue
+                    existing.append(e)
+                    if e.get("msg_id"):
+                        existing_ids.add(e["msg_id"])
+                fresh_del = [e for e in entries[:cursor]
+                             if e.get("msg_id") and e["msg_id"] not in existing_ids]
+                fresh_und = [e for e in entries[cursor:]
+                             if e.get("msg_id") and e["msg_id"] not in existing_ids]
+                tcur = self._read_cursor(name)
+                tcur = max(0, min(tcur, len(existing)))
+                merged = (existing[:tcur] + fresh_del
+                          + existing[tcur:] + fresh_und)
+                os.makedirs(self.mail_dir(name), exist_ok=True)
+                _atomic_write(self.inbox_path(name),
+                              "".join(json.dumps(e) + "\n" for e in merged))
+                self._write_cursor(name, tcur + len(fresh_del))
+                for e in fresh_del + fresh_und:
+                    seen.add(e["msg_id"])
+        finally:
+            lk.release()
         if fresh_und or len(existing) > tcur:
             threading.Thread(target=self._safe_deliver, args=(name,),
                              daemon=True).start()
@@ -1093,9 +1115,13 @@ class Homi:
         self.log("notify:", reason)
         return {"ok": True}
 
-    def _do_send(self, to, text, from_name):
+    def _do_send(self, to, text, from_name, msg_id=None):
         if not text:
             return {"ok": False, "err": "empty message"}
+        # A caller-supplied msg_id makes the send idempotent end-to-end (the
+        # boxed outbox re-offers frames after a lost ack): store/envelope dedup
+        # by this id instead of minting a fresh one that dedup can never catch.
+        mid = msg_id or uuid.uuid4().hex
         name, dev = (to.split("@", 1) if "@" in to else (to, None))
         # Validate LOCALLY: a bad name queued toward a device would come back
         # as a deterministic negative ack from the far side.
@@ -1126,13 +1152,16 @@ class Homi:
                 self._do_grant(dev, from_name)
                 self.log("auto-granted return path:", from_name, "to fleet", dev)
             env = {"v": 1, "kind": "m", "to": name, "from": from_name,
-                   "msg_id": uuid.uuid4().hex, "text": text, "ts": time.time()}
+                   "msg_id": mid, "text": text, "ts": time.time()}
             self._queue_out(dev, env)
             return {"ok": True, "routed": "link:%s" % dev}
         if kind == "local":
-            entry = {"ts": time.time(), "msg_id": uuid.uuid4().hex, "from": "",
+            entry = {"ts": time.time(), "msg_id": mid, "from": "",
                      "from_name": from_name, "text": text}
-            self._store(name, entry)
+            dup = not self._store(name, entry)   # False => msg_id already seen
+            if dup:
+                return {"ok": True, "routed": "dup"}
+            self._resolve_ask_natural(name, text, from_name)
             self._resolve_ask_natural(name, text, from_name)
             try:
                 self._deliver_pending(name)
@@ -1204,10 +1233,14 @@ class Homi:
         identity itself."""
         out_sock = self.path("boxes", name, "outbox.sock")
         backoff = 1.0
-        while not self.stop_ev.is_set():
+
+        def still_boxed():
             with self.mu:
                 ent = self.identities.get(name)
-            if not ent or not ent.get("boxed"):
+            return bool(ent and ent.get("boxed"))
+
+        while not self.stop_ev.is_set():
+            if not still_boxed():
                 return  # released or re-claimed unboxed: stop draining
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(2.0)
@@ -1219,6 +1252,11 @@ class Homi:
                     try:
                         chunk = s.recv(65536)
                     except socket.timeout:
+                        # Re-check ownership on every idle tick: a release or
+                        # re-claim-unboxed must stop this drain within ~2s, not
+                        # keep routing a detached container's frames as `name`.
+                        if not still_boxed():
+                            return
                         continue
                     if not chunk:
                         break  # box side closed; reconnect
@@ -1231,14 +1269,26 @@ class Homi:
                             fr = json.loads(line.decode("utf-8", "replace"))
                         except Exception:
                             continue
+                        if not still_boxed():
+                            return
                         to = fr.get("to") or ""
                         text = fr.get("text") or ""
                         mid = fr.get("msg_id") or ""
-                        if to and text:
-                            r = self._do_send(to, text, name)
+                        if to and text and mid:
+                            # Route with the frame's OWN msg_id so a re-offer
+                            # after a lost ack is deduped end-to-end (a fresh id
+                            # would slip past every seen-set).
+                            r = self._do_send(to, text, name, msg_id=mid)
                             ok = bool(r.get("ok"))
+                            fatal = (not ok) and bool(r.get("err"))
                         else:
-                            ok = False
+                            ok, fatal = False, True  # malformed: never routable
+                        # A permanently-unroutable frame must not spin forever
+                        # (the box re-offers on every nack). Ack it as accepted
+                        # after dead-lettering, mirroring the link poison path.
+                        if fatal:
+                            self._box_deadletter(name, fr)
+                            ok = True
                         try:
                             s.sendall((json.dumps(
                                 {"ack": mid, "ok": ok}) + "\n").encode())
@@ -1253,6 +1303,17 @@ class Homi:
                     pass
             self.stop_ev.wait(backoff)
             backoff = min(backoff * 2, 15.0)
+
+    def _box_deadletter(self, name, frame):
+        d = self.path("boxes", name, "dead")
+        os.makedirs(d, exist_ok=True)
+        try:
+            _atomic_write(os.path.join(d, "%d-%s.json" % (
+                int(time.time() * 1000), (frame.get("msg_id") or "x")[:16])),
+                json.dumps(frame))
+        except Exception as e:
+            self.log("box dead-letter failed:", name, e)
+        self.log("box frame dead-lettered:", name, frame.get("to"))
 
     def _do_release(self, name):
         with self.claim_mu:
@@ -2192,7 +2253,13 @@ class Homi:
         # control ops must present the control token, a file they cannot read
         # (the forward-only key forbids exec/read). Local/device-only use keeps
         # the 0700 dir as the only guard (no token needed).
-        if self._needs_token() and req.get("op") not in (None, "status"):
+        if self._needs_token() and req.get("op") is not None:
+            # Once a fleet link exists, EVERY control op needs the token —
+            # including status, which returns the full roster + link topology
+            # (a name-enumeration oracle that would defeat the fleet path's
+            # deliberate "unknown or ungranted" masking). Local + MCP callers
+            # attach `auth` from control.token automatically. A bare liveness
+            # probe (empty line, op=None) is the only exemption.
             if req.get("auth") != self.control_token:
                 resp = {"ok": False, "err": "control token required (fleet link active)"}
                 try:
@@ -2359,11 +2426,30 @@ def _authkeys_path():
     return os.path.join(os.path.expanduser("~"), ".ssh", "authorized_keys")
 
 
+_PUBKEY_RE = re.compile(
+    r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|"
+    r"ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com) "
+    r"[A-Za-z0-9+/]+={0,3}( [^\r\n]*)?$")
+_IP_RE = re.compile(r"^[0-9a-fA-F:.]{3,45}$")
+
+
 def _authkeys_add(pubkey, peer_fleet, from_ip):
     """Append the peer's forward-only key so THEY can dial into us. restrict =
     deny-all; port-forwarding re-grants exactly the transport; the forced command
     makes any exec attempt run /usr/bin/false; from= pins the source IP. A marker
-    comment makes revocation exact. Idempotent by marker."""
+    comment makes revocation exact. Idempotent by marker.
+
+    Every field is peer-controlled (from a base64 card), so a smuggled newline
+    in `pubkey`/`from_ip` could write a SECOND, unrestricted authorized_keys
+    line = full host compromise. Validate strictly (single line, exact shape)
+    and refuse anything that doesn't match — never write unvalidated bytes."""
+    pubkey = (pubkey or "").strip()
+    if not _PUBKEY_RE.match(pubkey):
+        raise ValueError("refusing card: pubkey is not a single well-formed ssh key")
+    if from_ip and not _IP_RE.match(from_ip):
+        raise ValueError("refusing card: tailscale_ip is not an IP")
+    if not re.match(r"^[a-z0-9][a-z0-9._-]{0,63}$", peer_fleet or ""):
+        raise ValueError("refusing card: bad fleet name")
     marker = "homi-fleet:%s" % peer_fleet
     p = _authkeys_path()
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -2445,14 +2531,26 @@ def _cli_federate(args):
         my_fleet = mine["card"]["fleet"]
         sys.stderr.write("peer fleet=%s device=%s fingerprint=%s\n"
                          % (peer.get("fleet"), peer.get("device"), peer.get("fingerprint")))
+        if not re.match(r"^[a-z0-9][a-z0-9._-]{0,63}$", peer_fleet):
+            sys.stderr.write("bad peer-fleet name\n")
+            return 1
         if "--yes" not in rest:
             sys.stderr.write("re-run with --yes to install the key + link.\n")
             return 1
         if "--no-authkey" not in rest and peer.get("pubkey"):
-            st = _authkeys_add(peer["pubkey"], peer_fleet, peer.get("tailscale_ip"))
+            try:
+                st = _authkeys_add(peer["pubkey"], peer_fleet, peer.get("tailscale_ip"))
+            except ValueError as e:
+                sys.stderr.write(str(e) + "\n")
+                return 1
             sys.stderr.write("authorized_keys: %s\n" % st)
         # Link outbound to them: our mail lands on THEIR in/<my_fleet>.sock.
-        remote_in = os.path.join(peer.get("inbound_dir", ""), my_fleet + ".sock")
+        # Guard the card's inbound_dir (it flows into a socket path we dial).
+        idir = peer.get("inbound_dir", "")
+        if "\n" in idir or "\x00" in idir:
+            sys.stderr.write("refusing card: bad inbound_dir\n")
+            return 1
+        remote_in = os.path.join(idir, my_fleet + ".sock")
         req = {"op": "link", "device": peer_fleet, "fleet": True,
                "addr": peer.get("addr"), "remote_in": remote_in,
                "identity_file": mine["card"].get("identity_file"),
@@ -2585,6 +2683,19 @@ def _cli_move(args):
         sys.stderr.write("usage: communicate homi move <name> <device> "
                          "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run]\n")
         return 1
+    # Names/devices flow into ssh + rsync REMOTE paths (passed through the remote
+    # login shell). Validate strictly so a crafted name can't inject a command.
+    NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    DEV_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    if not NAME_RE.match(name):
+        sys.stderr.write("invalid agent name\n"); return 1
+    if not DEV_RE.match(dev):
+        sys.stderr.write("invalid device name\n"); return 1
+    if as_name is not None and not NAME_RE.match(as_name):
+        sys.stderr.write("invalid --as name (want [a-z0-9][a-z0-9._-])\n"); return 1
+    if addr is not None and (addr.startswith("-") or "\n" in addr
+                             or not re.match(r"^[A-Za-z0-9._@-]+$", addr)):
+        sys.stderr.write("invalid --addr\n"); return 1
     if fork and not as_name:
         sys.stderr.write("--fork needs --as <new-name>: two live claimants of one "
                          "name on two devices would diverge silently\n")
@@ -2658,7 +2769,7 @@ def _cli_move(args):
         side = os.path.join(os.path.dirname(transcript), sid)
         if os.path.isdir(side):
             srcs.append(side)
-        rc = subprocess.run(["rsync", "-az", "-e", ssh_e] + srcs
+        rc = subprocess.run(["rsync", "-az", "-s", "-e", ssh_e] + srcs
                             + ["%s:%s/" % (addr, rdir)]).returncode
         if rc != 0:
             sys.stderr.write("transcript rsync failed\n")
@@ -2682,7 +2793,7 @@ def _cli_move(args):
     if os.path.exists(pre["mailbox"]):
         staged = "%s/staging-%s-inbox.jsonl" % (rstate, target_name)
         rc, _, err = _ssh_run(addr, "mkdir -p %s" % _shq(rstate))
-        rc = subprocess.run(["rsync", "-az", "-e", ssh_e, pre["mailbox"],
+        rc = subprocess.run(["rsync", "-az", "-s", "-e", ssh_e, pre["mailbox"],
                              "%s:%s" % (addr, staged)]).returncode
         if rc != 0:
             sys.stderr.write("mailbox rsync failed (mail stays at origin; "

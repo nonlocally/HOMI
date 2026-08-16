@@ -74,28 +74,53 @@ function connect(sock: string, timeoutMs: number): Promise<net.Socket> {
   });
 }
 
+async function waitForSocket(tries: number): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const s = await connect(controlSocket(), 500);
+      s.destroy();
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  return false;
+}
+
 async function autostart(): Promise<void> {
   if (process.env.HOMI_AUTOSTART === "0") throw new Error("daemon not running");
   const py = resolvePython();
   const daemon = daemonFile();
   fs.mkdirSync(stateRoot(), { recursive: true });
-  const log = fs.openSync(path.join(stateRoot(), "daemon.log"), "a");
-  const child = spawn(py, [daemon, "daemon"], {
-    detached: true,
-    stdio: ["ignore", log, log],
-  });
-  child.unref();
-  // Poll for the control socket to answer.
-  for (let i = 0; i < 50; i++) {
-    try {
-      const s = await connect(controlSocket(), 500);
-      s.destroy();
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
+  // Cross-process spawn lock: two MCP clients (a claude and a codex both
+  // configured with homi) can autostart at the same instant. O_EXCL means
+  // exactly one wins the right to spawn; the loser waits for the socket the
+  // winner's daemon will bind. The daemon's own singleton is the backstop.
+  const lock = path.join(stateRoot(), "autostart.lock");
+  let holder = false;
+  try {
+    const fd = fs.openSync(lock, "wx");
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+    holder = true;
+  } catch {
+    // someone else is spawning — just wait for the socket
+    if (await waitForSocket(60)) return;
+    // stale lock (spawner died)? clear it and fall through to spawn ourselves
+    try { fs.unlinkSync(lock); } catch {}
   }
-  throw new Error("daemon failed to start (see " + stateRoot() + "/daemon.log)");
+  try {
+    const log = fs.openSync(path.join(stateRoot(), "daemon.log"), "a");
+    const child = spawn(py, [daemon, "daemon"], {
+      detached: true,
+      stdio: ["ignore", log, log],
+    });
+    child.unref();
+    if (await waitForSocket(50)) return;
+    throw new Error("daemon failed to start (see " + stateRoot() + "/daemon.log)");
+  } finally {
+    if (holder) { try { fs.unlinkSync(lock); } catch {} }
+  }
 }
 
 export interface CallOpts {

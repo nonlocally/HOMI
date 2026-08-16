@@ -77,6 +77,36 @@ if ! grep -q '"intruder"' "$T/b/homi/identities.json" 2>/dev/null; then ok "intr
 bcomm homi claim tokentest >/dev/null 2>&1
 grep -q '"tokentest"' "$T/b/homi/identities.json" && ok "token-bearing CLI still works" || bad "CLI with token"
 
+echo "== control gate covers status too (no roster oracle for a fleet peer)"
+raw="$(python3 - "$T/b/homi/homi.sock" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])
+s.sendall(b'{"op":"status"}\n'); s.shutdown(socket.SHUT_WR)
+buf=b""
+while b"\n" not in buf:
+    c=s.recv(4096)
+    if not c: break
+    buf+=c
+print(buf.decode().strip())
+PY
+)"
+if printf '%s' "$raw" | grep -q 'control token required'; then ok "tokenless status refused (no enumeration)"; else bad "status gate (got: $raw)"; fi
+if ! printf '%s' "$raw" | grep -q 'librarian'; then ok "no identity names leaked to an unauthed status"; else bad "status leaked names"; fi
+# the token-bearing CLI status still works
+bcomm homi status >/dev/null 2>&1 && ok "authed status still works" || bad "authed status"
+
+echo "== authorized_keys injection is refused (newline in a card pubkey)"
+BADCARD="$(python3 -c '
+import base64,json
+c={"v":1,"kind":"homi-card","fleet":"evil","device":"evilbox","addr":"e@evilbox",
+   "tailscale_ip":"100.64.0.9","fingerprint":"SHA256:x","inbound_dir":"/tmp/x/in",
+   "pubkey":"ssh-ed25519 AAAAreal keyx\nssh-ed25519 AAAABACKDOOR attacker@evil"}
+print(base64.b64encode(json.dumps(c).encode()).decode())')"
+FAKEHOME="$T/fakehome"; mkdir -p "$FAKEHOME/.ssh"
+inj="$(HOME="$FAKEHOME" bcomm homi federate accept evil --card "$BADCARD" --yes 2>&1)"
+if printf '%s' "$inj" | grep -qi 'refusing card\|not a single'; then ok "newline-injected pubkey refused"; else bad "injection not refused (got: $inj)"; fi
+if [ ! -f "$FAKEHOME/.ssh/authorized_keys" ] || ! grep -q 'BACKDOOR' "$FAKEHOME/.ssh/authorized_keys" 2>/dev/null; then ok "no backdoor key written"; else bad "BACKDOOR key landed in authorized_keys"; fi
+
 echo "== card / invite encoding round-trips"
 CARD="$(acomm homi card 2>/dev/null)"
 if printf '%s' "$CARD" | python3 -c '

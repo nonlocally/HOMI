@@ -83,6 +83,21 @@ sleep 2
 n="$(ls "$BOXDIR/spool"/*.json 2>/dev/null | wc -l | tr -d ' ')"
 [ "$n" = "0" ] && ok "spool cleared on ack (at-least-once complete)" || bad "spool cleanup ($n left)"
 
+echo "== outbound dedup: a re-offered frame (lost ack) delivers exactly once"
+# Spool the SAME msg_id twice by hand (simulating the shim re-offering after a
+# dropped ack); the boxed identity routes both, but end-to-end msg_id dedup
+# must land it in the host mailbox only once.
+"$COMM" homi claim sink >/dev/null 2>&1
+before="$("$COMM" homi inbox sink 2>/dev/null | grep -c 'dupe-once' || true)"
+DUPID="fixedmsgid0000000000000000000000aa"
+printf '{"to":"sink","text":"dupe-once please","msg_id":"%s","ts":1}\n' "$DUPID" > "$BOXDIR/spool/1-$DUPID.json"
+sleep 2
+# re-offer the identical frame (as a reconnect would)
+printf '{"to":"sink","text":"dupe-once please","msg_id":"%s","ts":1}\n' "$DUPID" > "$BOXDIR/spool/2-$DUPID.json"
+sleep 2
+after="$("$COMM" homi inbox sink 2>/dev/null | grep -c 'dupe-once' || true)"
+if [ "$after" = "1" ]; then ok "re-offered frame delivered exactly once (end-to-end dedup)"; else bad "boxed dedup (landed $after times)"; fi
+
 echo "== box dies: liveness honestly returns to stored; mail holds again"
 kill "$SHIMPID" 2>/dev/null; SHIMPID=""
 sleep 1

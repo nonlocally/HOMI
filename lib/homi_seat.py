@@ -221,7 +221,14 @@ class SeatDriver:
         return False
 
     def _has_paste_marker(self, seat):
-        return any(_PASTE_MARKER in ln for ln in self._capture(seat, 10))
+        # Only a marker on a COMPOSER line (prompt-glyph row) means the text is
+        # still staged. A rendered "[Pasted Content #n]" placeholder in the
+        # transcript/scrollback after a successful submit must not trigger more
+        # Enters, so we require the prompt glyph on the same row.
+        for ln in self._capture(seat, 8):
+            if _PASTE_MARKER in ln and re.search(r"[❯›>]", ln):
+                return True
+        return False
 
     # -- spawn / read / wait / respond / interrupt -----------------------------
     def spawn(self, cmd, cwd=None, window_name=None):
@@ -283,44 +290,66 @@ class SeatDriver:
         if st != "approval":
             return {"ok": False, "err": "no approval prompt (state=%s)" % st}
         bottom = self._capture(seat, 16)
-        if decision in ("deny", "no", "reject"):
-            # Prefer an explicit deny/no option; else send 'n'.
-            self._tmux("send-keys", "-t", seat, "-l", "--", "n")
-            self._tmux("send-keys", "-t", seat, "Enter")
-            return {"ok": True, "responded": "deny"}
-        # allow: choose the first numbered option that is a plain yes (not
-        # "always"/"don't ask"). If the menu is numbered, send that digit; if
-        # it's a (y/n), send 'y'. Otherwise accept the highlighted default.
-        # Menus may be numbered or bare-highlighted (claude's held-message gate
-        # has no digits: ❯ marks the row, arrows move it). Parse ONLY the
-        # contiguous menu block around the highlighted row — prose above the
-        # menu ("this is what will be delivered") must never count as an
-        # option. If no clearly-affirmative option exists, FAIL CLOSED — a bare
-        # default-Enter could pick a highlighted Deny.
+        # Parse ONLY the contiguous menu block around the highlighted row — prose
+        # above it ("this is what will be delivered") must never count as an
+        # option. Both allow and deny drive to a matching row and Enter; NEITHER
+        # ever presses a bare Enter on an unknown default (that could confirm the
+        # opposite of what was asked). No matching row => FAIL CLOSED.
         aff = re.compile(r"yes|allow|approve|proceed|deliver|accept|ok\b", re.I)
-        neg = re.compile(r"always|don'?t ask|all future|deny|decline|drop", re.I)
+        skip = re.compile(r"always|don'?t ask|all future", re.I)
+        neg = re.compile(r"\bno\b|deny|decline|drop|reject|cancel", re.I)
         menu = self._menu_block(bottom)
+        if decision in ("deny", "no", "reject"):
+            if not menu:
+                if any(re.search(r"\(y/n\)|\[y/n\]|\by/n\b", ln, re.I) for ln in bottom):
+                    self._tmux("send-keys", "-t", seat, "-l", "--", "n")
+                    self._tmux("send-keys", "-t", seat, "Enter")
+                    return {"ok": True, "responded": "n"}
+                return {"ok": False, "err": "no menu to deny in — refusing to guess"}
+            tgt = next((r for r in menu
+                        if neg.search(r["text"]) and not aff.search(r["text"])), None)
+            if tgt is None:
+                return {"ok": False, "err": "no clear deny option — refusing to guess"}
+            return self._drive_menu(seat, menu, tgt, "deny")
         if not menu:
             return {"ok": False, "err": "no menu block found on screen"}
         target = next((r for r in menu
-                       if aff.search(r["text"]) and not neg.search(r["text"])), None)
+                       if aff.search(r["text"]) and not skip.search(r["text"])
+                       and not neg.search(r["text"])), None)
         if target is None:
             return {"ok": False,
                     "err": "no clearly-affirmative option in the menu — refusing "
                            "to guess (respond by hand or seat send)"}
+        return self._drive_menu(seat, menu, target, "allow")
+
+    def _drive_menu(self, seat, menu, target, kind):
+        """Select `target` in `menu` and confirm. Prefer the digit (unambiguous);
+        else step the highlight to it and Enter. Verify the highlight actually
+        LANDED on the target before Enter — a wrapped/multi-line row can make
+        positional counts wrong, and pressing Enter on the wrong row could
+        confirm the opposite. If we can't confirm the landing, fail closed."""
         if target["digit"]:
             self._tmux("send-keys", "-t", seat, "-l", "--", target["digit"])
             self._tmux("send-keys", "-t", seat, "Enter")
-            return {"ok": True, "responded": "option %s" % target["digit"]}
+            return {"ok": True, "responded": "%s option %s" % (kind, target["digit"])}
         cur = next((i for i, r in enumerate(menu) if r["hl"]), None)
-        if cur is not None:
-            delta = menu.index(target) - cur
-            key = "Down" if delta > 0 else "Up"
-            for _ in range(abs(delta)):
-                self._tmux("send-keys", "-t", seat, key)
-                time.sleep(0.12)
+        if cur is None:
+            return {"ok": False, "err": "no highlighted row to move from — refusing"}
+        delta = menu.index(target) - cur
+        key = "Down" if delta > 0 else "Up"
+        for _ in range(abs(delta)):
+            self._tmux("send-keys", "-t", seat, key)
+            time.sleep(0.12)
+        # Verify: the highlighted row's text must now match the target's.
+        landed = self._menu_block(self._capture(seat, 16))
+        hl = next((r for r in landed if r["hl"]), None)
+        want = target["text"][:24]
+        if hl is None or want not in hl["text"]:
+            return {"ok": False,
+                    "err": "could not land the highlight on the intended option "
+                           "(menu may wrap) — refusing to guess"}
         self._tmux("send-keys", "-t", seat, "Enter")
-        return {"ok": True, "responded": target["text"][:40]}
+        return {"ok": True, "responded": "%s: %s" % (kind, target["text"][:40])}
 
     @staticmethod
     def _menu_block(lines):
@@ -349,10 +378,18 @@ class SeatDriver:
                 return None
             indent = len(m.group(1))
             hl = bool(m.group(2))
-            # sibling rows sit at the highlight's column (± the glyph width)
-            if not hl and abs(indent - hl_indent) > 3:
-                return None
-            return {"hl": hl, "digit": m.group(3), "text": m.group(4).strip()}
+            text = m.group(4).strip()
+            # The highlighted row is always in. For non-highlighted candidates,
+            # exclude PROSE that happens to share the indent: a message body in
+            # guillemets, or a label/sentence ending in a colon (e.g. "…what
+            # will be delivered:"). Otherwise "delivered" in prose would be
+            # picked as the affirmative option. Options never end with ':'.
+            if not hl:
+                if abs(indent - hl_indent) > 3:
+                    return None
+                if text.endswith(":") or "«" in text or "»" in text:
+                    return None
+            return {"hl": hl, "digit": m.group(3), "text": text}
 
         block = []
         i = hl_idx
