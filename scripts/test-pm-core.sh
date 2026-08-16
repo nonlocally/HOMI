@@ -75,6 +75,71 @@ if [ ! -S "$ASOCK" ] && [ ! -f "$ASIDE" ]; then ok "release unbinds + unplants";
 if [ -S "$ASOCK" ] && [ -f "$ASIDE" ]; then ok "claim survives restart"; else bad "claim survives restart"; fi
 "$COMM" pm stop >/dev/null 2>&1
 
+echo "== section 4: inbox store + dedup"
+"$COMM" pm start >/dev/null 2>&1
+"$COMM" pm claim alice >/dev/null 2>&1
+ASOCK="$PM_SOCK_DIR/pm-alice.sock"
+AINBOX="$PMS/mail/alice/inbox.jsonl"
+python3 "$HERE/lib/cc_peer.py" send --to "$ASOCK" --text "hello alice" \
+  --from "$T/sender.sock" --name tester 2>/dev/null
+sleep 0.5
+if [ "$(wc -l < "$AINBOX" 2>/dev/null | tr -d ' ')" = "1" ]; then ok "frame stored"; else bad "frame stored"; fi
+if grep -q '"text": "hello alice"' "$AINBOX" && grep -q '"from_name": "tester"' "$AINBOX"; then
+  ok "stored unwrapped text + attribution"
+else bad "stored unwrapped text + attribution"; fi
+python3 - "$ASOCK" <<'PY'
+import json, socket, sys
+frame = {"type": "user", "message": {"role": "user", "content": "dup-test"},
+         "priority": "next", "from": "uds:/tmp/nowhere.sock", "msg_id": "fixed123"}
+for _ in range(2):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5); s.connect(sys.argv[1])
+    s.sendall((json.dumps(frame) + "\n").encode()); s.close()
+PY
+sleep 0.5
+if [ "$(grep -c 'fixed123' "$AINBOX")" = "1" ]; then ok "msg_id dedup"; else bad "msg_id dedup"; fi
+if "$COMM" pm send alice "via control op" --from opsender >/dev/null 2>&1; then ok "pm send (local)"; else bad "pm send (local)"; fi
+sleep 0.3
+if grep -q '"text": "via control op"' "$AINBOX"; then ok "pm send stored"; else bad "pm send stored"; fi
+if [ "$("$COMM" pm inbox alice 2>/dev/null | wc -l | tr -d ' ')" = "3" ]; then ok "pm inbox prints 3"; else bad "pm inbox prints 3"; fi
+
+echo "== section 5: store→wake"
+"$COMM" pm claim bob >/dev/null 2>&1
+BINBOX="$PMS/mail/bob/inbox.jsonl"
+BCUR="$PMS/mail/bob/.cursor"
+"$COMM" pm send bob "M1 while down" --from opsender >/dev/null 2>&1
+sleep 0.5
+if [ "$(cat "$BCUR" 2>/dev/null || echo 0)" = "0" ]; then ok "M1 held (cursor 0)"; else bad "M1 held (cursor 0)"; fi
+STANDIN_SOCK="$PM_SOCK_DIR/real-bob.sock"
+STANDIN_MAIL="$T/bob-standin.jsonl"
+python3 "$HERE/lib/cc_peer.py" mailbox --socket "$STANDIN_SOCK" --name bob \
+  --sessions-dir "$PM_SESSIONS_DIR" --mailbox "$STANDIN_MAIL" >/dev/null 2>&1 &
+STANDIN_PID=$!
+deadline=$((SECONDS + 8)); woke=0
+while [ $SECONDS -lt $deadline ]; do
+  grep -q "M1 while down" "$STANDIN_MAIL" 2>/dev/null && { woke=1; break; }
+  sleep 0.5
+done
+if [ "$woke" = "1" ]; then ok "store→wake drained M1 into live session"; else bad "store→wake drained M1"; fi
+if [ "$(cat "$BCUR" 2>/dev/null || echo 0)" = "1" ]; then ok "cursor advanced"; else bad "cursor advanced"; fi
+sleep 1.5
+if [ ! -f "$PM_SESSIONS_DIR/pm-bob.json" ]; then ok "pm sidecar unplanted while live"; else bad "pm sidecar unplanted while live"; fi
+"$COMM" pm send bob "M2 while live" --from opsender >/dev/null 2>&1
+deadline=$((SECONDS + 6)); m2=0
+while [ $SECONDS -lt $deadline ]; do
+  grep -q "M2 while live" "$STANDIN_MAIL" 2>/dev/null && { m2=1; break; }
+  sleep 0.5
+done
+if [ "$m2" = "1" ]; then ok "live delivery M2"; else bad "live delivery M2"; fi
+kill "$STANDIN_PID" 2>/dev/null; sleep 2.5
+if [ -f "$PM_SESSIONS_DIR/pm-bob.json" ]; then ok "sidecar replanted after death"; else bad "sidecar replanted after death"; fi
+"$COMM" pm send bob "M3 after death" --from opsender >/dev/null 2>&1
+sleep 0.5
+if [ "$(cat "$BCUR" 2>/dev/null)" = "2" ] && grep -q "M3 after death" "$BINBOX"; then
+  ok "M3 held durably"
+else bad "M3 held durably"; fi
+"$COMM" pm stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

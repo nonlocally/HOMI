@@ -146,6 +146,10 @@ def _read_json(path, default):
         return default
 
 
+# from-name attribution inside a cross-session-message wrapper (cc_peer._wrap).
+_FROM_NAME_RE = re.compile(r'<cross-session-message\b[^>]*\bfrom-name="([^"]*)"')
+
+
 # ---- the daemon ----------------------------------------------------------------
 
 class PM:
@@ -158,8 +162,10 @@ class PM:
         self.tick_s = float(os.environ.get("PM_TICK") or 2)
         self.probe_s = float(os.environ.get("PM_PROBE") or 30)
         self.mu = threading.Lock()
+        self.mail_mu = threading.Lock()
         self.stop_ev = threading.Event()
         self.identities = {}   # name -> {"sock": path, "claimed_at": ts}
+        self.seen = {}         # name -> set of received msg_ids (dedup)
         self.routes = {}       # latest materialized snapshot (dict)
         self.log_f = None
 
@@ -286,7 +292,168 @@ class PM:
         line = raw.split(b"\n", 1)[0].strip()
         if not line:
             return  # liveness probe
-        # Storing lands in the store-and-forward task.
+        try:
+            msg = json.loads(line.decode("utf-8", "replace"))
+        except Exception:
+            return
+        if msg.get("type") != "user":
+            return
+        content = cc_peer._extract_text((msg.get("message") or {}).get("content"))
+        if not content:
+            return
+        m = _FROM_NAME_RE.search(content)
+        entry = {"ts": time.time(),
+                 "msg_id": msg.get("msg_id") or uuid.uuid4().hex,
+                 "from": cc_peer._addr_from(msg.get("from")) or "",
+                 "from_name": m.group(1) if m else None,
+                 "text": cc_peer._WRAP_INNER(content)}
+        if self._store(name, entry):
+            self.log("stored for", name, "msg_id", entry["msg_id"])
+            try:
+                self._deliver_pending(name)
+            except Exception as e:
+                self.log("wake failed:", name, e)
+
+    # -- mail (the durable address) ---------------------------------------------
+
+    def mail_dir(self, name):
+        return self.path("mail", name)
+
+    def inbox_path(self, name):
+        return os.path.join(self.mail_dir(name), "inbox.jsonl")
+
+    def cursor_path(self, name):
+        return os.path.join(self.mail_dir(name), ".cursor")
+
+    def _read_cursor(self, name):
+        try:
+            with open(self.cursor_path(name)) as f:
+                return int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            return 0
+
+    def _write_cursor(self, name, v):
+        _atomic_write(self.cursor_path(name), str(int(v)))
+
+    def _inbox_lines(self, name):
+        try:
+            with open(self.inbox_path(name), encoding="utf-8") as f:
+                return f.readlines()
+        except OSError:
+            return []
+
+    def _seed_seen(self, name):
+        ids = set()
+        for line in self._inbox_lines(name)[-200:]:
+            try:
+                mid = json.loads(line).get("msg_id")
+                if mid:
+                    ids.add(mid)
+            except Exception:
+                continue
+        self.seen[name] = ids
+
+    def _store(self, name, entry):
+        """Durably append one inbox line. Returns False on a duplicate msg_id.
+        The append happens BEFORE any delivery attempt — durability first."""
+        with self.mail_mu:
+            ids = self.seen.setdefault(name, set())
+            if entry["msg_id"] in ids:
+                return False
+            os.makedirs(self.mail_dir(name), exist_ok=True)
+            with open(self.inbox_path(name), "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+                f.flush()
+            ids.add(entry["msg_id"])
+        return True
+
+    # -- store→wake ---------------------------------------------------------------
+
+    def _scan_sidecars(self):
+        """One pass over the sessions dir -> {name: [real session sidecars]}.
+        'Real' = not one of our own plants, pid alive, socket file present."""
+        out = {}
+        try:
+            files = os.listdir(self.sessdir)
+        except OSError:
+            return out
+        for fn in files:
+            if not fn.endswith(".json"):
+                continue
+            d = _read_json(os.path.join(self.sessdir, fn), None)
+            if not isinstance(d, dict) or d.get("version") == "communicate-pm":
+                continue
+            name, pid, sock = d.get("name"), d.get("pid"), d.get("messagingSocketPath")
+            if not name or not pid or not sock:
+                continue
+            try:
+                os.kill(int(pid), 0)
+            except (OSError, ValueError):
+                continue
+            if not os.path.exists(sock):
+                continue
+            out.setdefault(name, []).append(d)
+        return out
+
+    @staticmethod
+    def _choose_session(cands):
+        """Collision rule (names DO collide in the wild): prefer interactive,
+        then newest startedAt. Deterministic, so the choice doesn't flap."""
+        cands = sorted(cands, key=lambda d: (d.get("kind") == "interactive",
+                                             d.get("startedAt") or 0), reverse=True)
+        return cands[0] if cands else None
+
+    def _deliver_pending(self, name, sess=None):
+        """Drain undelivered inbox lines into the live session, in order, as
+        protocol turns (an inbound message wakes an idle session). The cursor
+        advances only after a successful socket write — at-least-once."""
+        with self.mail_mu:
+            lines = self._inbox_lines(name)
+            cur = self._read_cursor(name)
+        if cur >= len(lines):
+            return
+        if sess is None:
+            sess = self._choose_session(self._scan_sidecars().get(name) or [])
+        if not sess:
+            return
+        to_sock = sess.get("messagingSocketPath")
+        for i in range(cur, len(lines)):
+            try:
+                obj = json.loads(lines[i])
+            except Exception:
+                obj = {"text": lines[i].strip()}
+            frm = obj.get("from") or self.identity_sock(name)
+            try:
+                cc_peer.deliver(to_sock, obj.get("text") or "", frm,
+                                from_name=obj.get("from_name") or None)
+            except OSError as e:
+                # Listener gone mid-drain: hold the rest, stay addressable.
+                self.log("deliver to", name, "failed (hold):", e)
+                self._plant(name)
+                return
+            with self.mail_mu:
+                self._write_cursor(name, i + 1)
+        self.log("drained", len(lines) - cur, "message(s) to live", name)
+
+    def _do_send(self, to, text, from_name):
+        if not text:
+            return {"ok": False, "err": "empty message"}
+        with self.mu:
+            local = to in self.identities
+        if local:
+            entry = {"ts": time.time(), "msg_id": uuid.uuid4().hex, "from": "",
+                     "from_name": from_name, "text": text}
+            self._store(to, entry)
+            try:
+                self._deliver_pending(to)
+            except Exception as e:
+                self.log("wake failed:", to, e)
+            with self.mail_mu:
+                routed = ("live" if self._read_cursor(to) >= len(self._inbox_lines(to))
+                          else "inbox")
+            return {"ok": True, "routed": routed}
+        return {"ok": False,
+                "err": "unknown identity: %s (not claimed here; device links land later)" % to}
 
     def _do_claim(self, name):
         if not self._NAME_RE.match(name or ""):
@@ -302,6 +469,7 @@ class PM:
         with self.mu:
             self.identities[name] = ent
         os.makedirs(self.path("mail", name), exist_ok=True)
+        self._seed_seen(name)
         self._plant(name)
         threading.Thread(target=self._identity_server, args=(name, srv),
                          daemon=True).start()
@@ -373,6 +541,9 @@ class PM:
             return self._do_claim(req.get("name", ""))
         if op == "release":
             return self._do_release(req.get("name", ""))
+        if op == "send":
+            return self._do_send(req.get("to", ""), req.get("text", ""),
+                                 req.get("from") or "cli")
         if op == "stop":
             threading.Thread(target=self._delayed_shutdown, daemon=True).start()
             return {"ok": True, "stopping": True}
@@ -434,16 +605,26 @@ class PM:
                 self.write_routes()
 
     def reconcile(self):
-        # Keep claimed sidecars planted (the discovery sweep is a GC; a live
-        # pid + a present file keeps the identity listed). Store→wake refines
-        # this to unplant while a real session owns the name.
+        """The store→wake heart, every tick: for each claimed identity, if a
+        REAL session owns the name, step aside (unplant, so local discovery
+        resolves to the session) and drain held mail into it; if none does,
+        keep our sweep-proof sidecar planted and hold mail durably."""
+        smap = self._scan_sidecars()
         with self.mu:
             names = list(self.identities)
         for name in names:
-            try:
-                self._plant(name)
-            except Exception as e:
-                self.log("plant failed:", name, e)
+            sess = self._choose_session(smap.get(name) or [])
+            if sess:
+                self._unplant(name)
+                try:
+                    self._deliver_pending(name, sess)
+                except Exception as e:
+                    self.log("drain failed:", name, e)
+            else:
+                try:
+                    self._plant(name)
+                except Exception as e:
+                    self.log("plant failed:", name, e)
 
     # -- lifecycle --
     def shutdown(self, *_a):
@@ -554,6 +735,26 @@ def cli_call(argv):
         r = _call({"op": op, "name": args[0]})
         if r.get("ok"):
             print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "send":
+        frm = "cli"
+        if "--from" in args:
+            i = args.index("--from")
+            try:
+                frm = args[i + 1]
+            except IndexError:
+                sys.stderr.write("--from needs a value\n")
+                return 1
+            args = args[:i] + args[i + 2:]
+        if len(args) < 2:
+            sys.stderr.write("usage: communicate pm send <name> <message...> [--from NAME]\n")
+            return 1
+        r = _call({"op": "send", "to": args[0], "text": " ".join(args[1:]),
+                   "from": frm})
+        if r.get("ok"):
+            print("routed: %s" % r.get("routed"))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
