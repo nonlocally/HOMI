@@ -140,6 +140,51 @@ if [ "$(cat "$BCUR" 2>/dev/null)" = "2" ] && grep -q "M3 after death" "$BINBOX";
 else bad "M3 held durably"; fi
 "$COMM" pm stop >/dev/null 2>&1
 
+echo "== section 6: routes/provenance + socket self-heal"
+export PM_PROBE=2
+"$COMM" pm start >/dev/null 2>&1
+"$COMM" pm claim carol >/dev/null 2>&1
+sleep 0.5
+st="$("$COMM" pm status --json 2>/dev/null)"
+if [ "$(printf '%s' "$st" | jget identities carol route state)" = "stored" ]; then
+  ok "carol route stored (no session)"
+else bad "carol route stored"; fi
+"$COMM" pm send carol "held for carol" >/dev/null 2>&1
+st="$("$COMM" pm status --json 2>/dev/null)"
+if [ "$(printf '%s' "$st" | jget identities carol inbox undelivered)" = "1" ]; then
+  ok "undelivered count 1"
+else bad "undelivered count 1"; fi
+CSTAND="$T/carol-standin.jsonl"
+python3 "$HERE/lib/cc_peer.py" mailbox --socket "$PM_SOCK_DIR/real-carol.sock" --name carol \
+  --sessions-dir "$PM_SESSIONS_DIR" --mailbox "$CSTAND" >/dev/null 2>&1 &
+CPID=$!
+deadline=$((SECONDS + 8)); livec=0
+while [ $SECONDS -lt $deadline ]; do
+  st="$("$COMM" pm status --json 2>/dev/null)"
+  [ "$(printf '%s' "$st" | jget identities carol route state)" = "live" ] && { livec=1; break; }
+  sleep 0.5
+done
+if [ "$livec" = "1" ]; then ok "route flips to live"; else bad "route flips to live"; fi
+deadline=$((SECONDS + 6)); drained=0
+while [ $SECONDS -lt $deadline ]; do
+  st="$("$COMM" pm status --json 2>/dev/null)"
+  [ "$(printf '%s' "$st" | jget identities carol inbox undelivered)" = "0" ] && { drained=1; break; }
+  sleep 0.5
+done
+if [ "$drained" = "1" ]; then ok "undelivered drained to 0"; else bad "undelivered drained to 0"; fi
+kill "$CPID" 2>/dev/null; sleep 1
+rm -f "$PM_SOCK_DIR/pm-carol.sock"
+deadline=$((SECONDS + 6)); healed=0
+while [ $SECONDS -lt $deadline ]; do
+  [ -S "$PM_SOCK_DIR/pm-carol.sock" ] && { healed=1; break; }
+  sleep 0.5
+done
+if [ "$healed" = "1" ]; then ok "lost socket re-bound (self-heal)"; else bad "lost socket re-bound"; fi
+if [ -f "$PMS/routes.json" ] && python3 -c "import json;json.load(open('$PMS/routes.json'))" 2>/dev/null; then
+  ok "routes.json materialized + parses"
+else bad "routes.json materialized"; fi
+"$COMM" pm stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

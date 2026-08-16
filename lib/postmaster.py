@@ -495,6 +495,20 @@ class PM:
         self.log("released identity:", name)
         return {"ok": True}
 
+    def _rebind(self, name):
+        with self.mu:
+            ent = self.identities.get(name)
+        if not ent:
+            return
+        try:
+            ent["_srv"].close()
+        except (OSError, KeyError):
+            pass
+        srv = self.bind_unix(ent["sock"])
+        ent["_srv"] = srv
+        threading.Thread(target=self._identity_server, args=(name, srv),
+                         daemon=True).start()
+
     def _load_identities(self):
         data = _read_json(self.path("identities.json"), {})
         for name in sorted(data):
@@ -513,10 +527,35 @@ class PM:
             st = probe(p) if fresh_probe else "unknown"
             socks[label] = {"path": p, "state": st, "provenance": "probed",
                             "ts": time.time()}
+        smap = self._scan_sidecars()
         with self.mu:
-            idents = {n: {"kind": "local", "sock": e["sock"],
-                          "claimed_at": e["claimed_at"]}
-                      for n, e in self.identities.items()}
+            items = [(n, e["sock"], e["claimed_at"]) for n, e in self.identities.items()]
+        idents = {}
+        for n, sockp, claimed in items:
+            cands = smap.get(n) or []
+            sess = self._choose_session(cands)
+            if sess and fresh_probe:
+                alive = probe(sess["messagingSocketPath"]) == "live"
+                state, prov = ("live", "probed") if alive else ("stored", "probed")
+            elif sess:
+                state, prov = "live", "reported"
+            else:
+                # Absence measured from sidecars + pid liveness, not a socket probe.
+                state, prov = "stored", "reported"
+            with self.mail_mu:
+                count = len(self._inbox_lines(n))
+                cur = self._read_cursor(n)
+            idents[n] = {
+                "kind": "local", "sock": sockp, "claimed_at": claimed,
+                "route": {"state": state, "provenance": prov,
+                          "ambiguous": len(cands) > 1,
+                          "session": ({"pid": sess.get("pid"),
+                                       "socket": sess.get("messagingSocketPath"),
+                                       "kind": sess.get("kind"),
+                                       "startedAt": sess.get("startedAt")}
+                                      if sess else None)},
+                "inbox": {"count": count, "undelivered": max(0, count - cur)},
+            }
         return {"ok": True,
                 "self": {"device": self.device, "pid": self.pid,
                          "state_root": self.root, "sock_dir": self.sockdir,
@@ -612,7 +651,16 @@ class PM:
         smap = self._scan_sidecars()
         with self.mu:
             names = list(self.identities)
+            socks = {n: self.identities[n]["sock"] for n in names}
         for name in names:
+            # Self-heal: a lost socket file means our published address is a
+            # lie; re-bind before anything else (self-probe discipline).
+            if not os.path.exists(socks[name]):
+                self.log("identity socket lost, re-binding:", name)
+                try:
+                    self._rebind(name)
+                except Exception as e:
+                    self.log("rebind failed:", name, e)
             sess = self._choose_session(smap.get(name) or [])
             if sess:
                 self._unplant(name)
