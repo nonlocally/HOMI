@@ -230,9 +230,14 @@ Tier 1 (Claude↔Claude bridge) and Tier 3 (Codex-as-peer) are verified
 end-to-end; Tier 2 (`codex ask`) including `resume` continuity is verified
 locally. See `scripts/` for the tests.
 
-homi v1 is verified: 44/44 core, 20/20 link, 6/6 launchd-persistence checks,
-plus a live proof on a real machine — a claimed identity appeared in
-`ListAgents`, a real `SendMessage` landed in its durable mailbox with the same
-`msg_id`, and a CLI `homi send` to a live session's name was delivered into
-that session as an attributed cross-session turn. Cross-device homi↔homi over
-real ssh awaits a second device with a valid tailnet node key.
+homi v1 is verified: 46/46 core, 23/23 link, 6/6 launchd-persistence checks,
+plus two live proofs on real machines. Single-device: a claimed identity
+appeared in `ListAgents`, a real `SendMessage` landed in its durable mailbox
+with the same `msg_id`, and a CLI `homi send` to a live session's name was
+delivered into that session as an attributed cross-session turn.
+Cross-device (2026-08-15, aadarshs-mac-mini-2 ↔ aadarshs-mac-air-2, real
+`ssh -N -L` links both ways): `homi send air-echo@aadarshs-mac-air-2` arrived
+in the far durable inbox with arrival-line attribution (`via`), the reply
+addressed `communicate@aadarshs-mac-mini-2` came back over the far side's own
+outbound link, and store→wake delivered it into the live originating session
+as a turn; both outbound queues drained to zero (acked).

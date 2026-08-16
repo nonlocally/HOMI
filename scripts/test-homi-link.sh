@@ -95,6 +95,23 @@ PY
 sleep 0.5
 if [ "$(grep -c 'dup envelope' "$BX")" = "1" ]; then ok "envelope dedup"; else bad "envelope dedup"; fi
 
+echo "== dead-letter + local validation (a poison envelope must not wedge the queue)"
+if acomm homi send 'Bad@beta' "nope" --from tester >/dev/null 2>&1; then
+  bad "invalid remote name refused locally"
+else ok "invalid remote name refused locally"; fi
+python3 - "$A_STATE/homi/out/beta" <<'PY'
+import json, os, sys
+d = sys.argv[1]; os.makedirs(d, exist_ok=True)
+env = {"v": 1, "kind": "m", "to": "no such name", "from": "tester",
+       "msg_id": "poison1", "text": "poison", "ts": 0}
+open(os.path.join(d, "0000000000000000-poison1.json"), "w").write(json.dumps(env))
+PY
+acomm homi send remote-x@beta "after poison" --from tester >/dev/null 2>&1
+wait_for 12 "queue drained past the poison envelope" grep -q "after poison" "$BX"
+if [ -f "$A_STATE/homi/out/beta/dead/0000000000000000-poison1.json" ]; then
+  ok "poison dead-lettered"
+else bad "poison dead-lettered"; fi
+
 echo "== ssh transport dial (golden command + graceful failure)"
 cmd="$(acomm homi link gamma --addr fake@nowhere.invalid --print-cmd 2>/dev/null)"
 case "$cmd" in

@@ -148,6 +148,8 @@ Description=communicate homi (agent fabric)
 ExecStart=$COMM_HOME/bin/communicate homi __daemon
 Environment=COMM_STATE=${COMM_STATE:-%h/.local/state/communicate}
 Environment=HOMI_SELF=$selfdev
+${HOMI_SOCK_DIR:+Environment=HOMI_SOCK_DIR=$HOMI_SOCK_DIR}
+${HOMI_SESSIONS_DIR:+Environment=HOMI_SESSIONS_DIR=$HOMI_SESSIONS_DIR}
 Restart=always
 RestartSec=2
 
@@ -158,7 +160,12 @@ EOF
   systemctl --user daemon-reload || die "systemctl daemon-reload failed"
   systemctl --user enable --now communicate-homi.service \
     || die "systemctl enable --now failed"
-  ok "homi installed (systemd --user, device=$selfdev)"
+  local i
+  for i in $(seq 1 50); do
+    python3 "$HOMI_PY" call status >/dev/null 2>&1 && { ok "homi installed (systemd --user, device=$selfdev)"; return 0; }
+    sleep 0.2
+  done
+  die "installed but not answering — check: journalctl --user -u communicate-homi"
 }
 
 homi_uninstall() {

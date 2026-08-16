@@ -133,10 +133,18 @@ def probe(path, timeout=0.35):
 
 
 def _atomic_write(path, data):
-    tmp = path + ".tmp"
+    # Unique temp name: concurrent writers must not clobber each other's
+    # in-flight temp file (interleaved persists could drop the newest state).
+    tmp = "%s.tmp-%s" % (path, uuid.uuid4().hex[:8])
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(data)
     os.replace(tmp, path)
+
+
+class NegativeAck(Exception):
+    """The far homi answered with a well-formed refusal ({"ok": false}).
+    Retrying is pointless — the envelope must be dead-lettered, not requeued,
+    or one poison message wedges every later message to that device."""
 
 
 def _read_json(path, default):
@@ -164,6 +172,8 @@ class Homi:
         self.probe_s = float(os.environ.get("HOMI_PROBE") or 30)
         self.mu = threading.Lock()
         self.mail_mu = threading.Lock()
+        self.claim_mu = threading.RLock()   # serializes claim/proxy/release/rebind
+        self.deliver_mu = {}                # name -> Lock (one drain per name)
         self.stop_ev = threading.Event()
         self.identities = {}   # name -> {"sock", "claimed_at", "kind", ["home"]}
         self.seen = {}         # name -> set of received msg_ids (dedup)
@@ -197,6 +207,16 @@ class Homi:
         self.log_f = open(self.path("daemon.log"), "a", encoding="utf-8")
 
     # -- singleton --
+    def _pid_is_homi(self, pid):
+        """Is this pid actually a homi daemon of ours? Pids get reused —
+        especially across reboots — so a live pid alone proves nothing."""
+        try:
+            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=5)
+            return "homi" in (out.stdout or "")
+        except Exception:
+            return False
+
     def acquire_singleton(self):
         lockdir = self.path("daemon.lock")
         pidfile = self.path("daemon.pid")
@@ -205,21 +225,31 @@ class Homi:
                 os.mkdir(lockdir)
                 break
             except FileExistsError:
-                old = _read_json(pidfile, None)
+                # The truth test is "does the control socket answer" — never
+                # pid arithmetic alone (kill -9 + reboot leaves a stale lock,
+                # and the old pid may now belong to anything, even another
+                # user's process, where kill(0) raises PermissionError).
+                if probe(self.path("homi.sock")) == "live":
+                    sys.stderr.write("homi already running (control socket answers)\n")
+                    sys.exit(3)
                 oldpid = None
                 try:
                     with open(pidfile) as f:
                         oldpid = int(f.read().strip())
-                except Exception:
+                except (OSError, ValueError):
                     pass
                 if oldpid:
                     try:
                         os.kill(oldpid, 0)
-                        sys.stderr.write("homi already running (pid %d)\n" % oldpid)
+                        alive = True
+                    except (ProcessLookupError, PermissionError, OSError):
+                        alive = False
+                    if alive and self._pid_is_homi(oldpid):
+                        sys.stderr.write("homi lock held by live homi pid %d "
+                                         "with a dead control socket — refusing "
+                                         "to double-bind\n" % oldpid)
                         sys.exit(3)
-                    except ProcessLookupError:
-                        pass  # stale
-                # stale lock: reclaim
+                # stale lock (dead pid, reused pid, or foreign pid): reclaim
                 try:
                     os.rmdir(lockdir)
                 except OSError:
@@ -247,7 +277,7 @@ class Homi:
     # sweep-proof sidecar (our live pid; version "communicate-homi" so the
     # reconciler can tell our plants from real sessions), and a mailbox dir.
 
-    _NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+    _NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
     _RESERVED = {"pm", "self", "all", "homi"}
 
     def identity_sock(self, name):
@@ -263,9 +293,24 @@ class Homi:
         while True:
             p = os.path.join(self.sessdir, "%d.json" % n)
             d = _read_json(p, None)
-            if d is None or d.get("name") == name:
-                return p
-            n += 1
+            if d is not None and d.get("name") != name:
+                n += 1
+                continue
+            if d is None:
+                # Linux pid_max can be 4194304, overlapping this window; never
+                # squat a slot whose number IS a live pid — a real session
+                # could later write its own sidecar at that filename.
+                try:
+                    os.kill(n, 0)
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                except OSError:
+                    alive = True
+                if alive:
+                    n += 1
+                    continue
+            return p
 
     def _persist_identities(self):
         with self.mu:
@@ -321,12 +366,20 @@ class Homi:
         content = cc_peer._extract_text((msg.get("message") or {}).get("content"))
         if not content:
             return
-        m = _FROM_NAME_RE.search(content)
+        # Only a LEADING wrapper is attribution (that is where cc_peer._wrap
+        # and Claude's own PCr() put it); a wrapper quoted mid-text is content
+        # and must be neither trusted nor stripped.
+        if content.startswith("<cross-session-message"):
+            m = _FROM_NAME_RE.match(content)
+            from_name = m.group(1) if m else None
+            text = cc_peer._WRAP_INNER(content)
+        else:
+            from_name, text = None, content
         entry = {"ts": time.time(),
                  "msg_id": msg.get("msg_id") or uuid.uuid4().hex,
                  "from": cc_peer._addr_from(msg.get("from")) or "",
-                 "from_name": m.group(1) if m else None,
-                 "text": cc_peer._WRAP_INNER(content)}
+                 "from_name": from_name,
+                 "text": text}
         with self.mu:
             ent = self.identities.get(name) or {}
             kind, home = ent.get("kind", "local"), ent.get("home")
@@ -389,15 +442,28 @@ class Homi:
 
     def _store(self, name, entry):
         """Durably append one inbox line. Returns False on a duplicate msg_id.
-        The append happens BEFORE any delivery attempt — durability first."""
+        The append happens BEFORE any delivery attempt — durability first.
+        fsync'd (an acked message must survive power loss), and a torn final
+        line from a past crash is newline-terminated so entries never merge."""
         with self.mail_mu:
             ids = self.seen.setdefault(name, set())
             if entry["msg_id"] in ids:
                 return False
             os.makedirs(self.mail_dir(name), exist_ok=True)
-            with open(self.inbox_path(name), "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+            p = self.inbox_path(name)
+            prefix = b""
+            try:
+                if os.path.getsize(p) > 0:
+                    with open(p, "rb") as rf:
+                        rf.seek(-1, os.SEEK_END)
+                        if rf.read(1) != b"\n":
+                            prefix = b"\n"
+            except OSError:
+                pass
+            with open(p, "ab") as f:
+                f.write(prefix + (json.dumps(entry) + "\n").encode("utf-8"))
                 f.flush()
+                os.fsync(f.fileno())
             ids.add(entry["msg_id"])
         return True
 
@@ -431,48 +497,85 @@ class Homi:
 
     @staticmethod
     def _choose_session(cands):
-        """Collision rule (names DO collide in the wild): prefer interactive,
-        then newest startedAt. Deterministic, so the choice doesn't flap."""
+        """Collision rule (names DO collide in the wild): prefer a probe-live
+        socket, then interactive, then newest startedAt. Deterministic, so the
+        choice doesn't flap; the probe only runs when there IS a collision."""
         cands = sorted(cands, key=lambda d: (d.get("kind") == "interactive",
                                              d.get("startedAt") or 0), reverse=True)
+        if len(cands) > 1:
+            live = [d for d in cands
+                    if probe(d.get("messagingSocketPath") or "") == "live"]
+            if live:
+                return live[0]
         return cands[0] if cands else None
+
+    def _reply_addr(self, from_name):
+        """Reply address for a delivered turn. NEVER the recipient's own
+        socket: a protocol-faithful peer replying to `from` would loop the
+        reply straight back into the same mailbox and session (with a codex
+        peer behind the name — forever). The sender's identity/proxy socket
+        routes replies correctly; otherwise a dead-drop path nothing listens
+        on, so a reply fails visibly instead of looping silently."""
+        if from_name:
+            with self.mu:
+                ent = self.identities.get(from_name)
+            if ent:
+                return ent["sock"]
+        return self.path("drop.sock")
 
     def _deliver_pending(self, name, sess=None):
         """Drain undelivered inbox lines into the live session, in order, as
         protocol turns (an inbound message wakes an idle session). The cursor
-        advances only after a successful socket write — at-least-once."""
+        advances only after a successful socket write — at-least-once. One
+        drain per name at a time (tick, socket arrival, link receive, and
+        control send may all race here), and the cursor only moves forward."""
         with self.mail_mu:
-            lines = self._inbox_lines(name)
-            cur = self._read_cursor(name)
-        if cur >= len(lines):
-            return
-        if sess is None:
-            sess = self._choose_session(self._scan_sidecars().get(name) or [])
-        if not sess:
-            return
-        to_sock = sess.get("messagingSocketPath")
-        for i in range(cur, len(lines)):
-            try:
-                obj = json.loads(lines[i])
-            except Exception:
-                obj = {"text": lines[i].strip()}
-            frm = obj.get("from") or self.identity_sock(name)
-            try:
-                cc_peer.deliver(to_sock, obj.get("text") or "", frm,
-                                from_name=obj.get("from_name") or None)
-            except OSError as e:
-                # Listener gone mid-drain: hold the rest, stay addressable.
-                self.log("deliver to", name, "failed (hold):", e)
-                self._plant(name)
-                return
+            lk = self.deliver_mu.setdefault(name, threading.Lock())
+        if not lk.acquire(blocking=False):
+            return  # a drain for this name is already in flight
+        try:
             with self.mail_mu:
-                self._write_cursor(name, i + 1)
-        self.log("drained", len(lines) - cur, "message(s) to live", name)
+                lines = self._inbox_lines(name)
+                cur = self._read_cursor(name)
+            if cur >= len(lines):
+                return
+            if sess is None:
+                sess = self._choose_session(self._scan_sidecars().get(name) or [])
+            if not sess:
+                return
+            to_sock = sess.get("messagingSocketPath")
+            for i in range(cur, len(lines)):
+                try:
+                    obj = json.loads(lines[i])
+                except Exception:
+                    obj = {"text": lines[i].strip()}
+                frm = obj.get("from") or self._reply_addr(obj.get("from_name") or "")
+                try:
+                    cc_peer.deliver(to_sock, obj.get("text") or "", frm,
+                                    from_name=obj.get("from_name") or None)
+                except OSError as e:
+                    # Listener gone mid-drain: hold the rest, stay addressable.
+                    self.log("deliver to", name, "failed (hold):", e)
+                    self._plant(name)
+                    return
+                with self.mail_mu:
+                    if i + 1 > self._read_cursor(name):
+                        self._write_cursor(name, i + 1)
+            self.log("drained", len(lines) - cur, "message(s) to live", name)
+        finally:
+            lk.release()
 
     def _do_send(self, to, text, from_name):
         if not text:
             return {"ok": False, "err": "empty message"}
         name, dev = (to.split("@", 1) if "@" in to else (to, None))
+        # Validate LOCALLY: a bad name queued toward a device would come back
+        # as a deterministic negative ack from the far side.
+        if not self._NAME_RE.match(name or ""):
+            return {"ok": False,
+                    "err": "invalid name %r (want [a-z0-9][a-z0-9._-]{0,63})" % name}
+        if dev is not None and not self._DEV_RE.match(dev):
+            return {"ok": False, "err": "invalid device %r" % dev}
         if dev == self.device:
             dev = None
         with self.mu:
@@ -510,58 +613,62 @@ class Homi:
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
         if name in self._RESERVED:
             return {"ok": False, "err": "'%s' is reserved" % name}
-        with self.mu:
-            ent = self.identities.get(name)
-        if ent is not None and ent.get("kind") == "proxy":
-            # A local claim outranks a remote proxy for the same name.
-            self._do_release(name)
-        elif ent is not None:
-            return {"ok": True, "already": True}
-        sock = self.identity_sock(name)
-        srv = self.bind_unix(sock)
-        ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv, "kind": "local"}
-        with self.mu:
-            self.identities[name] = ent
-        os.makedirs(self.path("mail", name), exist_ok=True)
-        self._seed_seen(name)
-        self._plant(name)
-        threading.Thread(target=self._identity_server, args=(name, srv),
-                         daemon=True).start()
-        self._persist_identities()
+        with self.claim_mu:  # check+bind+insert must be one atomic step
+            with self.mu:
+                ent = self.identities.get(name)
+            if ent is not None and ent.get("kind") == "proxy":
+                # A local claim outranks a remote proxy for the same name.
+                self._do_release(name)
+            elif ent is not None:
+                return {"ok": True, "already": True}
+            sock = self.identity_sock(name)
+            srv = self.bind_unix(sock)
+            ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
+                   "kind": "local"}
+            with self.mu:
+                self.identities[name] = ent
+            os.makedirs(self.path("mail", name), exist_ok=True)
+            self._seed_seen(name)
+            self._plant(name)
+            threading.Thread(target=self._identity_server, args=(name, srv),
+                             daemon=True).start()
+            self._persist_identities()
         self.log("claimed identity:", name, "->", sock)
         return {"ok": True}
 
     def _do_release(self, name):
-        with self.mu:
-            ent = self.identities.pop(name, None)
-        if not ent:
-            return {"ok": False, "err": "not claimed: %s" % name}
-        try:
-            ent["_srv"].close()
-        except OSError:
-            pass
-        try:
-            os.unlink(ent["sock"])
-        except OSError:
-            pass
-        self._unplant(name)
-        self._persist_identities()
+        with self.claim_mu:
+            with self.mu:
+                ent = self.identities.pop(name, None)
+            if not ent:
+                return {"ok": False, "err": "not claimed: %s" % name}
+            try:
+                ent["_srv"].close()
+            except OSError:
+                pass
+            try:
+                os.unlink(ent["sock"])
+            except OSError:
+                pass
+            self._unplant(name)
+            self._persist_identities()
         self.log("released identity:", name)
         return {"ok": True}
 
     def _rebind(self, name):
-        with self.mu:
-            ent = self.identities.get(name)
-        if not ent:
-            return
-        try:
-            ent["_srv"].close()
-        except (OSError, KeyError):
-            pass
-        srv = self.bind_unix(ent["sock"])
-        ent["_srv"] = srv
-        threading.Thread(target=self._identity_server, args=(name, srv),
-                         daemon=True).start()
+        with self.claim_mu:
+            with self.mu:
+                ent = self.identities.get(name)
+            if not ent:
+                return
+            try:
+                ent["_srv"].close()
+            except (OSError, KeyError):
+                pass
+            srv = self.bind_unix(ent["sock"])
+            ent["_srv"] = srv
+            threading.Thread(target=self._identity_server, args=(name, srv),
+                             daemon=True).start()
 
     def _load_identities(self):
         data = _read_json(self.path("identities.json"), {})
@@ -599,24 +706,32 @@ class Homi:
         Never shadows a locally-claimed identity."""
         if not self._NAME_RE.match(name or "") or name in self._RESERVED:
             return None
-        with self.mu:
-            ent = self.identities.get(name)
+        with self.claim_mu:  # atomic vs concurrent claims/proxies/releases
+            with self.mu:
+                ent = self.identities.get(name)
             if ent is not None:
-                return ent if ent.get("kind") == "proxy" else None
-        sock = self.identity_sock(name)
-        try:
-            srv = self.bind_unix(sock)
-        except OSError as e:
-            self.log("proxy bind failed:", name, e)
-            return None
-        ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
-               "kind": "proxy", "home": device}
-        with self.mu:
-            self.identities[name] = ent
-        self._plant(name)
-        threading.Thread(target=self._identity_server, args=(name, srv),
-                         daemon=True).start()
-        self._persist_identities()
+                if ent.get("kind") != "proxy":
+                    return None
+                if ent.get("home") != device:
+                    # Two devices sending as one name: first home wins;
+                    # surface it instead of silently misrouting replies.
+                    self.log("proxy home collision:", name, "stays",
+                             ent.get("home"), "— also seen via", device)
+                return ent
+            sock = self.identity_sock(name)
+            try:
+                srv = self.bind_unix(sock)
+            except OSError as e:
+                self.log("proxy bind failed:", name, e)
+                return None
+            ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
+                   "kind": "proxy", "home": device}
+            with self.mu:
+                self.identities[name] = ent
+            self._plant(name)
+            threading.Thread(target=self._identity_server, args=(name, srv),
+                             daemon=True).start()
+            self._persist_identities()
         self.log("proxy identity:", name, "home", device)
         return ent
 
@@ -629,7 +744,7 @@ class Homi:
     # at-least-once: files queue under out/<device>/ until the far homi
     # acks the msg_id; receivers dedup on a per-device ring.
 
-    _DEV_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+    _DEV_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 
     def link_in_sock(self, device):
         return self.path("in", device + ".sock")
@@ -644,12 +759,17 @@ class Homi:
 
     def _seed_seen_dev(self, device):
         ids = set()
+        tail = []
         try:
             with open(self.path("seen", device), encoding="utf-8") as f:
-                for line in f.readlines()[-500:]:
-                    line = line.strip()
-                    if line:
-                        ids.add(line)
+                tail = [l.strip() for l in f.readlines() if l.strip()][-500:]
+        except OSError:
+            pass
+        for line in tail:
+            ids.add(line)
+        # Keep the on-disk file a ring too (it is append-only between loads).
+        try:
+            _atomic_write(self.path("seen", device), "\n".join(tail) + ("\n" if tail else ""))
         except OSError:
             pass
         self.seen_dev[device] = ids
@@ -750,8 +870,20 @@ class Homi:
         os.makedirs(self.path("out", device), exist_ok=True)
         with self.mu:
             prev = self.links.get(device) or {}
+        if prev.get("addr") and addr and prev["addr"] != addr:
+            # Address changed: the old tunnel would silently keep carrying
+            # traffic to the old host. Kill it and re-resolve the remote home.
+            proc = self.ssh_procs.pop(device, None)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            prev = {}
+        with self.mu:
             self.links[device] = {"addr": addr, "sock": sock,
-                                  "remote_home": prev.get("remote_home"),
+                                  "remote_home": (prev.get("remote_home")
+                                                  if prev.get("addr") == addr else None),
                                   "created_at": time.time()}
         self._persist_links()
         self.out_ev.set()
@@ -856,11 +988,16 @@ class Homi:
                  "from_name": frm, "via": device, "text": text}
         self._store(to, entry)
         self._remember_dev_msg(device, mid)
-        try:
-            self._deliver_pending(to)
-        except Exception as e:
-            self.log("wake failed:", to, e)
+        # Ack now (the message is durable); wake asynchronously — a slow local
+        # session must not push the sender into ack-timeout retry churn.
+        threading.Thread(target=self._safe_deliver, args=(to,), daemon=True).start()
         return {"ok": True, "ack": mid}
+
+    def _safe_deliver(self, name):
+        try:
+            self._deliver_pending(name)
+        except Exception as e:
+            self.log("wake failed:", name, e)
 
     def _queue_out(self, device, env):
         d = self.path("out", device)
@@ -892,8 +1029,11 @@ class Homi:
         if not line:
             raise OSError("no ack")
         resp = json.loads(line.decode("utf-8", "replace"))
-        if not (resp.get("ok") and resp.get("ack") == env["msg_id"]):
-            raise OSError("bad ack: %r" % (resp,))
+        if resp.get("ok") and resp.get("ack") == env["msg_id"]:
+            return
+        if resp.get("ok") is False and resp.get("err"):
+            raise NegativeAck(resp["err"])   # deterministic refusal: dead-letter
+        raise OSError("bad ack: %r" % (resp,))
 
     def outbound_loop(self):
         """Drain out/<device>/ queues in order; ack-then-delete; exponential
@@ -912,7 +1052,9 @@ class Homi:
                     continue
                 qdir = self.path("out", dev)
                 try:
-                    files = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))
+                    files = sorted(f for f in os.listdir(qdir)
+                                   if f.endswith(".json")
+                                   and os.path.isfile(os.path.join(qdir, f)))
                 except OSError:
                     continue
                 if not files:
@@ -942,6 +1084,17 @@ class Homi:
                         continue
                     try:
                         self._send_envelope(endpoint, env)
+                    except NegativeAck as e:
+                        # A refusal is final: dead-letter and KEEP DRAINING —
+                        # one poison envelope must never wedge the queue.
+                        dead = os.path.join(qdir, "dead")
+                        os.makedirs(dead, exist_ok=True)
+                        try:
+                            os.replace(fp, os.path.join(dead, fn))
+                        except OSError:
+                            pass
+                        self.log("link", dev, "dead-lettered", fn, "—", e)
+                        continue
                     except (OSError, ValueError) as e:
                         st["backoff_s"] = (1 if not st.get("backoff_s")
                                            else min(st["backoff_s"] * 2, 30))
@@ -1012,13 +1165,19 @@ class Homi:
         links = {}
         for d, e in linkents.items():
             lst = self.link_state.get(d, {})
+            qdir = self.path("out", d)
             try:
-                q = len([f for f in os.listdir(self.path("out", d))
-                         if f.endswith(".json")])
+                q = len([f for f in os.listdir(qdir)
+                         if f.endswith(".json")
+                         and os.path.isfile(os.path.join(qdir, f))])
             except OSError:
                 q = 0
+            try:
+                dead = len(os.listdir(os.path.join(qdir, "dead")))
+            except OSError:
+                dead = 0
             links[d] = {"endpoint": e.get("sock") or e.get("addr"),
-                        "queue": q, "last_ok": lst.get("last_ok"),
+                        "queue": q, "dead": dead, "last_ok": lst.get("last_ok"),
                         "last_err": lst.get("last_err"),
                         "in_sock": self.link_in_sock(d)}
         return {"ok": True,
@@ -1055,13 +1214,13 @@ class Homi:
         if op == "unlink":
             return self._do_unlink(req.get("device", ""))
         if op == "stop":
-            threading.Thread(target=self._delayed_shutdown, daemon=True).start()
+            threading.Thread(target=self._delayed_stop, daemon=True).start()
             return {"ok": True, "stopping": True}
         return {"ok": False, "err": "unknown op: %r" % op}
 
-    def _delayed_shutdown(self):
+    def _delayed_stop(self):
         time.sleep(0.2)  # let the stop reply flush to the client first
-        self.shutdown()
+        self.stop_ev.set()  # the MAIN thread runs shutdown (no lock reentrancy)
 
     def control_server(self):
         srv = self.bind_unix(self.path("homi.sock"))
@@ -1155,6 +1314,9 @@ class Homi:
                     self.log("plant failed:", name, e)
 
     # -- lifecycle --
+    def _on_signal(self, *_a):
+        self.stop_ev.set()
+
     def shutdown(self, *_a):
         self.stop_ev.set()
         paths = [self.path("homi.sock")]
@@ -1197,8 +1359,10 @@ class Homi:
     def run(self):
         self.setup_dirs()
         self.acquire_singleton()
-        signal.signal(signal.SIGTERM, self.shutdown)
-        signal.signal(signal.SIGINT, self.shutdown)
+        # Handlers only set the event: shutdown() takes locks the interrupted
+        # main thread may already hold (a handler calling it would deadlock).
+        signal.signal(signal.SIGTERM, self._on_signal)
+        signal.signal(signal.SIGINT, self._on_signal)
         self.log("homi starting: device=%s pid=%d root=%s sockdir=%s"
                  % (self.device, self.pid, self.root, self.sockdir))
         threading.Thread(target=self.control_server, daemon=True).start()
