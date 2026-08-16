@@ -698,7 +698,49 @@ class Homi:
             self._seat = homi_seat.SeatDriver(log=self.log)
         return self._seat
 
+    def _seat_target_device(self, sub, req):
+        """A seat may be addressed <device>:<seat> (or spawned with args.device).
+        Returns (device_or_None, rewritten_req) with the device stripped."""
+        dev = None
+        seat = req.get("seat") or ""
+        if ":" in seat:
+            d, s = seat.split(":", 1)
+            if self._DEV_RE.match(d) and d != self.device:
+                dev, req = d, dict(req, seat=s)
+        if sub == "spawn" and req.get("device") and req["device"] != self.device:
+            dev = req["device"]
+            req = {k: v for k, v in req.items() if k != "device"}
+        return dev, req
+
     def _do_seat(self, sub, req):
+        # Remote seat ops ride the link synchronously: the ack carries the
+        # result. Requires --allow-seats granted on the far side's link to us.
+        dev, req = self._seat_target_device(sub, req)
+        if dev:
+            with self.mu:
+                have = dev in self.links
+            if not have:
+                return {"ok": False, "err": "device not linked: %s" % dev}
+            try:
+                endpoint = self._link_endpoint(dev)
+            except (OSError, ValueError) as e:
+                return {"ok": False, "err": "link to %s down: %s" % (dev, e)}
+            if not endpoint:
+                return {"ok": False, "err": "no transport to %s" % dev}
+            to = float(req.get("timeout") or 30) + 15 if sub == "wait" else 20
+            env = {"v": 1, "kind": "seat", "sub": sub, "args": req,
+                   "msg_id": uuid.uuid4().hex, "ts": time.time()}
+            try:
+                ack = self._send_envelope_result(endpoint, env, timeout=to)
+            except (OSError, ValueError) as e:
+                return {"ok": False, "err": "seat op to %s failed: %s" % (dev, e)}
+            if not ack.get("ok"):
+                return {"ok": False, "err": ack.get("err") or "remote refused"}
+            res = ack.get("result") or {}
+            # Re-qualify a spawned seat id with its device for the caller.
+            if sub == "spawn" and res.get("seat"):
+                res = dict(res, seat="%s:%s" % (dev, res["seat"]))
+            return res
         drv = self._seat_drv()
         try:
             if sub == "ls":
@@ -954,6 +996,7 @@ class Homi:
         with self.mu:
             data = {d: {"addr": e.get("addr"), "sock": e.get("sock"),
                         "remote_home": e.get("remote_home"),
+                        "allow_seats": e.get("allow_seats", False),
                         "created_at": e.get("created_at")}
                     for d, e in self.links.items()}
         _atomic_write(self.path("links.json"), json.dumps(data, indent=1))
@@ -1051,11 +1094,16 @@ class Homi:
             time.sleep(0.2)
         raise OSError("ssh link to %s did not come up" % device)
 
-    def _do_link(self, device, addr=None, sock=None, print_cmd=False):
+    def _do_link(self, device, addr=None, sock=None, print_cmd=False,
+                 allow_seats=None):
         if not self._DEV_RE.match(device or ""):
             return {"ok": False, "err": "invalid device name"}
         if device == self.device:
             return {"ok": False, "err": "refusing to link to self"}
+        # Seat-control grant: opt-in per link, upgradable in place. None = keep
+        # the current grant; True/False = set it. A link carries mail by default;
+        # driving this device's seats from the far side requires an explicit grant.
+        prior_grant = (self.links.get(device) or {}).get("allow_seats", False)
         if print_cmd:
             with self.mu:
                 stored = dict(self.links.get(device) or {})
@@ -1081,15 +1129,18 @@ class Homi:
                 except OSError:
                     pass
             prev = {}
+        grant = prior_grant if allow_seats is None else bool(allow_seats)
         with self.mu:
             self.links[device] = {"addr": addr, "sock": sock,
                                   "remote_home": (prev.get("remote_home")
                                                   if prev.get("addr") == addr else None),
+                                  "allow_seats": grant,
                                   "created_at": time.time()}
         self._persist_links()
         self.out_ev.set()
-        self.log("linked device:", device, "->", sock or addr or "?")
-        return {"ok": True}
+        self.log("linked device:", device, "->", sock or addr or "?",
+                 "(seats %s)" % ("granted" if grant else "denied"))
+        return {"ok": True, "allow_seats": grant}
 
     def _do_unlink(self, device):
         with self.mu:
@@ -1124,7 +1175,8 @@ class Homi:
         data = _read_json(self.path("links.json"), {})
         for device, e in sorted(data.items()):
             r = self._do_link(device, addr=(e or {}).get("addr"),
-                              sock=(e or {}).get("sock"))
+                              sock=(e or {}).get("sock"),
+                              allow_seats=(e or {}).get("allow_seats", False))
             if not r.get("ok"):
                 self.log("re-link failed:", device, r.get("err"))
 
@@ -1166,13 +1218,28 @@ class Homi:
         kind = env.get("kind")
         if env.get("v") != 1 or kind not in ("m", "r", "seat"):
             return {"ok": False, "err": "bad envelope"}
+        mid = env.get("msg_id") or ""
+        if not mid:
+            return {"ok": False, "err": "bad envelope"}
+        if kind == "seat":
+            # A seat op driven from a linked device. Opt-in per link: the far
+            # device may drive our seats only if this link was granted
+            # --allow-seats. Execute locally and return the RESULT in the ack
+            # (seat ops are synchronous request/response, NOT queued mail, so no
+            # dedup — one shot, executed live).
+            with self.mu:
+                granted = (self.links.get(device) or {}).get("allow_seats", False)
+            if not granted:
+                return {"ok": False, "err": "seat control not granted for %s "
+                        "(run: homi link %s --allow-seats)" % (device, device)}
+            result = self._do_seat(env.get("sub", ""), env.get("args") or {})
+            return {"ok": True, "ack": mid, "result": result}
         to = env.get("to") or ""
         frm = env.get("from") or "unknown"
-        mid = env.get("msg_id") or ""
         text = env.get("text") or ""
-        if not to or not mid:
+        if not to:
             return {"ok": False, "err": "bad envelope"}
-        if kind != "r" and not text:
+        if kind == "m" and not text:
             return {"ok": False, "err": "bad envelope"}
         if mid in self.seen_dev.setdefault(device, set()):
             return {"ok": True, "ack": mid, "dup": True}
@@ -1232,6 +1299,25 @@ class Homi:
         if ent.get("sock"):
             return ent["sock"]
         return self._ensure_ssh(device)
+
+    def _send_envelope_result(self, endpoint, env, timeout=10.0):
+        """Send an envelope and return the FULL ack dict (for synchronous
+        request/response like seat ops, where the ack carries the result)."""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(endpoint)
+            s.sendall((json.dumps(env) + "\n").encode("utf-8"))
+            raw = cc_peer._read_line(s, timeout=timeout)
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+        line = raw.split(b"\n", 1)[0].strip()
+        if not line:
+            raise OSError("no ack")
+        return json.loads(line.decode("utf-8", "replace"))
 
     def _send_envelope(self, endpoint, env):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1444,7 +1530,8 @@ class Homi:
         if op == "link":
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
                                  sock=req.get("sock"),
-                                 print_cmd=bool(req.get("print_cmd")))
+                                 print_cmd=bool(req.get("print_cmd")),
+                                 allow_seats=req.get("allow_seats"))
         if op == "unlink":
             return self._do_unlink(req.get("device", ""))
         if op == "stop":
@@ -1791,7 +1878,7 @@ def cli_call(argv):
                 print("%-7s %-12s %s" % (s["seat"], s["cmd"], s["title"]))
             return 0 if r.get("ok") else 1
         if sub == "spawn":
-            cwd = winname = None
+            cwd = winname = dev = None
             rest = []
             i = 0
             while i < len(sargs):
@@ -1799,12 +1886,16 @@ def cli_call(argv):
                     cwd = sargs[i + 1]; i += 2; continue
                 if sargs[i] == "--name" and i + 1 < len(sargs):
                     winname = sargs[i + 1]; i += 2; continue
+                if sargs[i] == "--device" and i + 1 < len(sargs):
+                    dev = sargs[i + 1]; i += 2; continue
                 rest.append(sargs[i]); i += 1
             if not rest:
-                sys.stderr.write("usage: communicate homi seat spawn <command...> [--cwd DIR] [--name WIN]\n")
+                sys.stderr.write("usage: communicate homi seat spawn <command...> "
+                                 "[--cwd DIR] [--name WIN] [--device DEV]\n")
                 return 1
-            req.update({"cmd": " ".join(rest), "cwd": cwd, "name": winname})
-            r = _call(req)
+            req.update({"cmd": " ".join(rest), "cwd": cwd, "name": winname,
+                        "device": dev})
+            r = _call(req, timeout=40)
             print(r.get("seat") if r.get("ok") else (r.get("err") or "failed"))
             return 0 if r.get("ok") else 1
         if sub in ("send",):
@@ -1885,12 +1976,19 @@ def cli_call(argv):
                 return 1
         if "--print-cmd" in args:
             req["print_cmd"] = True
+        if "--allow-seats" in args:
+            req["allow_seats"] = True
+        if "--revoke-seats" in args:
+            req["allow_seats"] = False
         r = _call(req)
         if r.get("ok") and r.get("cmd"):
             print(" ".join(r["cmd"]))
             return 0
         if r.get("ok"):
-            print("%sed %s" % (op, args[0]))
+            seatnote = ""
+            if "allow_seats" in r:
+                seatnote = " (seats %s)" % ("granted" if r["allow_seats"] else "denied")
+            print("%sed %s%s" % (op, args[0], seatnote))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
