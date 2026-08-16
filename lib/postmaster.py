@@ -37,6 +37,7 @@ Env: COMM_STATE, PM_SOCK_DIR, PM_SESSIONS_DIR, PM_SELF, PM_TICK, PM_PROBE.
 """
 import json
 import os
+import re
 import signal
 import socket
 import stat
@@ -226,6 +227,113 @@ class PM:
         srv.listen(backlog)
         return srv
 
+    # -- identities ------------------------------------------------------------
+    #
+    # A claimed identity is: a STABLE socket <sockdir>/pm-<name>.sock (bound for
+    # the daemon's whole life — cached senders and links keep working), a
+    # sweep-proof sidecar (our live pid; version "communicate-pm" so the
+    # reconciler can tell our plants from real sessions), and a mailbox dir.
+
+    _NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+    _RESERVED = {"pm", "self", "all", "postmaster"}
+
+    def identity_sock(self, name):
+        return os.path.join(self.sockdir, "pm-%s.sock" % name)
+
+    def sidecar_path(self, name):
+        return os.path.join(self.sessdir, "pm-%s.json" % name)
+
+    def _persist_identities(self):
+        with self.mu:
+            data = {n: {"claimed_at": e["claimed_at"]}
+                    for n, e in self.identities.items()}
+        _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
+
+    def _plant(self, name):
+        """Write the sidecar (compact separators — claude.sh greps it raw)."""
+        ent = self.identities.get(name)
+        if not ent:
+            return
+        obj = cc_peer._sidecar_obj(ent["sock"], name, self.pid)
+        obj["version"] = "communicate-pm"
+        os.makedirs(self.sessdir, exist_ok=True)
+        tmp = self.sidecar_path(name) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, separators=(",", ":"))
+        os.replace(tmp, self.sidecar_path(name))
+
+    def _unplant(self, name):
+        try:
+            os.unlink(self.sidecar_path(name))
+        except OSError:
+            pass
+
+    def _identity_server(self, name, srv):
+        while not self.stop_ev.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return  # released or shutting down
+            threading.Thread(target=self._identity_conn, args=(name, conn),
+                             daemon=True).start()
+
+    def _identity_conn(self, name, conn):
+        raw = cc_peer._read_line(conn, timeout=2.0)
+        try:
+            conn.close()
+        except OSError:
+            pass
+        line = raw.split(b"\n", 1)[0].strip()
+        if not line:
+            return  # liveness probe
+        # Storing lands in the store-and-forward task.
+
+    def _do_claim(self, name):
+        if not self._NAME_RE.match(name or ""):
+            return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
+        if name in self._RESERVED:
+            return {"ok": False, "err": "'%s' is reserved" % name}
+        with self.mu:
+            if name in self.identities:
+                return {"ok": True, "already": True}
+        sock = self.identity_sock(name)
+        srv = self.bind_unix(sock)
+        ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv}
+        with self.mu:
+            self.identities[name] = ent
+        os.makedirs(self.path("mail", name), exist_ok=True)
+        self._plant(name)
+        threading.Thread(target=self._identity_server, args=(name, srv),
+                         daemon=True).start()
+        self._persist_identities()
+        self.log("claimed identity:", name, "->", sock)
+        return {"ok": True}
+
+    def _do_release(self, name):
+        with self.mu:
+            ent = self.identities.pop(name, None)
+        if not ent:
+            return {"ok": False, "err": "not claimed: %s" % name}
+        try:
+            ent["_srv"].close()
+        except OSError:
+            pass
+        try:
+            os.unlink(ent["sock"])
+        except OSError:
+            pass
+        self._unplant(name)
+        self._persist_identities()
+        self.log("released identity:", name)
+        return {"ok": True}
+
+    def _load_identities(self):
+        data = _read_json(self.path("identities.json"), {})
+        for name in sorted(data):
+            r = self._do_claim(name)
+            if not r.get("ok"):
+                self.log("re-claim failed:", name, r.get("err"))
+
     # -- status --
     def build_status(self, fresh_probe=True):
         socks = {}
@@ -238,7 +346,9 @@ class PM:
             socks[label] = {"path": p, "state": st, "provenance": "probed",
                             "ts": time.time()}
         with self.mu:
-            idents = {n: dict(e) for n, e in self.identities.items()}
+            idents = {n: {"kind": "local", "sock": e["sock"],
+                          "claimed_at": e["claimed_at"]}
+                      for n, e in self.identities.items()}
         return {"ok": True,
                 "self": {"device": self.device, "pid": self.pid,
                          "state_root": self.root, "sock_dir": self.sockdir,
@@ -259,6 +369,10 @@ class PM:
         op = req.get("op")
         if op == "status":
             return self.build_status()
+        if op == "claim":
+            return self._do_claim(req.get("name", ""))
+        if op == "release":
+            return self._do_release(req.get("name", ""))
         if op == "stop":
             threading.Thread(target=self._delayed_shutdown, daemon=True).start()
             return {"ok": True, "stopping": True}
@@ -320,15 +434,27 @@ class PM:
                 self.write_routes()
 
     def reconcile(self):
-        pass  # store→wake lands in a later task
+        # Keep claimed sidecars planted (the discovery sweep is a GC; a live
+        # pid + a present file keeps the identity listed). Store→wake refines
+        # this to unplant while a real session owns the name.
+        with self.mu:
+            names = list(self.identities)
+        for name in names:
+            try:
+                self._plant(name)
+            except Exception as e:
+                self.log("plant failed:", name, e)
 
     # -- lifecycle --
     def shutdown(self, *_a):
         self.stop_ev.set()
         paths = [self.path("pm.sock")]
         with self.mu:
+            names = list(self.identities)
             for ent in self.identities.values():
                 paths.append(ent["sock"])
+        for n in names:
+            self._unplant(n)
         for p in paths:
             try:
                 os.unlink(p)
@@ -354,6 +480,7 @@ class PM:
         self.log("postmaster starting: device=%s pid=%d root=%s sockdir=%s"
                  % (self.device, self.pid, self.root, self.sockdir))
         threading.Thread(target=self.control_server, daemon=True).start()
+        self._load_identities()
         self.write_routes()
         self.tick_loop()
         self.shutdown()
@@ -420,6 +547,16 @@ def cli_call(argv):
         r = _call({"op": "stop"})
         print("stopped" if r.get("ok") else json.dumps(r))
         return 0 if r.get("ok") else 1
+    if op in ("claim", "release"):
+        if not args:
+            sys.stderr.write("usage: communicate pm %s <name>\n" % op)
+            return 1
+        r = _call({"op": op, "name": args[0]})
+        if r.get("ok"):
+            print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
     sys.stderr.write("unknown op: %s\n" % op)
     return 1
 

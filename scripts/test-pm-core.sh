@@ -49,6 +49,32 @@ pid_gone=1
 if [ -f "$PMS/daemon.pid" ] && kill -0 "$(cat "$PMS/daemon.pid" 2>/dev/null)" 2>/dev/null; then pid_gone=0; fi
 if [ "$pid_gone" -eq 1 ]; then ok "daemon exited"; else bad "daemon exited"; fi
 
+echo "== section 3: identities (claim/release)"
+"$COMM" pm start >/dev/null 2>&1
+if "$COMM" pm claim alice >/dev/null 2>&1; then ok "claim alice"; else bad "claim alice"; fi
+ASOCK="$PM_SOCK_DIR/pm-alice.sock"
+ASIDE="$PM_SESSIONS_DIR/pm-alice.json"
+if [ -S "$ASOCK" ]; then ok "identity socket bound"; else bad "identity socket bound"; fi
+amode="$(stat -f '%Lp' "$ASOCK" 2>/dev/null || stat -c '%a' "$ASOCK" 2>/dev/null)"
+if [ "$amode" = "600" ]; then ok "identity socket 0600"; else bad "identity socket 0600 (got $amode)"; fi
+if [ -f "$ASIDE" ] && grep -q '"name":"alice"' "$ASIDE" && grep -q '"version":"communicate-pm"' "$ASIDE"; then
+  ok "sweep-proof sidecar planted (compact)"
+else bad "sweep-proof sidecar planted"; fi
+dpid="$(cat "$PMS/daemon.pid")"
+if grep -q "\"pid\":$dpid" "$ASIDE"; then ok "sidecar pid is daemon's (live)"; else bad "sidecar pid is daemon's"; fi
+st="$("$COMM" pm status --json 2>/dev/null)"
+if [ "$(printf '%s' "$st" | jget identities alice kind)" = "local" ]; then ok "status lists alice"; else bad "status lists alice"; fi
+if [ "$(printf '%s' "$st" | jget self socks pm-alice.sock state)" = "live" ]; then ok "alice sock self-probed live"; else bad "alice sock self-probed live"; fi
+if [ -d "$PMS/mail/alice" ]; then ok "mailbox dir created"; else bad "mailbox dir created"; fi
+if "$COMM" pm release alice >/dev/null 2>&1; then ok "release alice"; else bad "release alice"; fi
+sleep 0.3
+if [ ! -S "$ASOCK" ] && [ ! -f "$ASIDE" ]; then ok "release unbinds + unplants"; else bad "release unbinds + unplants"; fi
+"$COMM" pm claim alice >/dev/null 2>&1
+"$COMM" pm stop >/dev/null 2>&1; sleep 0.5
+"$COMM" pm start >/dev/null 2>&1; sleep 1.5
+if [ -S "$ASOCK" ] && [ -f "$ASIDE" ]; then ok "claim survives restart"; else bad "claim survives restart"; fi
+"$COMM" pm stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
