@@ -788,6 +788,74 @@ class Homi:
         self.log("bound seat", seat, "->", name)
         return {"ok": True, "seat": seat, "name": name}
 
+    # -- spawn / fan / consult (the fabric creates agents) ----------------------
+    #
+    # spawn = claim a durable identity + launch an agent in a seat + bind + (for
+    # claude) adopt via rename-sync, so the agent is reachable by mail at its
+    # name AND watchable in a seat. The fabric becomes a creator of agents, not
+    # just a router — using its OWN seat plane, with no dependency on old anu.
+
+    def _do_spawn(self, name, cmd, cwd=None, adopt=False, boot_wait=25):
+        if not self._NAME_RE.match(name or "") or name in self._RESERVED:
+            return {"ok": False, "err": "invalid name %r" % name}
+        if not cmd:
+            return {"ok": False, "err": "spawn needs a command (--cli or a command)"}
+        r = self._do_claim(name)
+        if not r.get("ok"):
+            return {"ok": False, "err": "claim %s: %s" % (name, r.get("err"))}
+        sp = self._do_seat("spawn", {"cmd": cmd, "cwd": cwd, "name": name})
+        if not sp.get("ok"):
+            return {"ok": False, "err": "seat spawn: %s" % sp.get("err")}
+        seat = sp["seat"]
+        self._do_seat_bind(seat, name)
+        adopted = False
+        if adopt:
+            drv = self._seat_drv()
+            t0 = time.time()
+            # let the agent boot to a ready prompt
+            while time.time() - t0 < boot_wait:
+                if drv.state(seat) in ("idle", "approval"):
+                    break
+                time.sleep(0.5)
+            try:
+                drv.send(seat, "/rename %s" % name)
+            except homi_seat.SeatError as e:
+                self.log("adopt send failed:", e)
+            for _ in range(16):
+                if name in self._scan_sidecars():
+                    adopted = True
+                    break
+                time.sleep(0.5)
+        self.log("spawned", name, "in seat", seat, "adopted" if adopted else "")
+        return {"ok": True, "name": name, "seat": seat, "adopted": adopted}
+
+    def _do_fan(self, n, cmd, prefix, cwd=None, adopt=False):
+        if n < 1 or n > 32:
+            return {"ok": False, "err": "fan count must be 1..32"}
+        out = []
+        for i in range(1, n + 1):
+            nm = "%s-%d" % (prefix, i)
+            out.append(self._do_spawn(nm, cmd, cwd=cwd, adopt=adopt))
+        names = [r["name"] for r in out if r.get("ok")]
+        return {"ok": bool(names), "spawned": out, "group": names}
+
+    def _do_consult(self, name, cmd, text, timeout, adopt=False):
+        # spawn-or-reuse a private consultant, then ask it one question.
+        with self.mu:
+            exists = (name in self.identities
+                      and self.identities[name].get("kind") == "local")
+        reused = exists
+        if not exists:
+            r = self._do_spawn(name, cmd, adopt=adopt)
+            if not r.get("ok"):
+                return r
+        if not text:
+            return {"ok": True, "name": name, "reused": reused, "spawned": not reused}
+        ans = self._do_ask(name, text, "consultant", float(timeout))
+        ans["name"] = name
+        ans["reused"] = reused
+        return ans
+
     def _do_notify(self, reason, from_name):
         if not reason:
             return {"ok": False, "err": "empty reason"}
@@ -1527,6 +1595,18 @@ class Homi:
             return self._do_notify(req.get("reason", ""), req.get("from") or "")
         if op == "seat":
             return self._do_seat(req.get("sub", ""), req)
+        if op == "spawn":
+            return self._do_spawn(req.get("name", ""), req.get("cmd", ""),
+                                  cwd=req.get("cwd"), adopt=bool(req.get("adopt")))
+        if op == "fan":
+            return self._do_fan(int(req.get("n") or 1), req.get("cmd", ""),
+                                req.get("prefix") or "worker", cwd=req.get("cwd"),
+                                adopt=bool(req.get("adopt")))
+        if op == "consult":
+            return self._do_consult(req.get("name", ""), req.get("cmd", ""),
+                                    req.get("text", ""),
+                                    float(req.get("timeout") or 120),
+                                    adopt=bool(req.get("adopt")))
         if op == "link":
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
                                  sock=req.get("sock"),
@@ -1864,6 +1944,77 @@ def cli_call(argv):
         r = _call({"op": "notify", "reason": " ".join(args), "from": frm})
         print("notified" if r.get("ok") else (r.get("err") or "failed"))
         return 0 if r.get("ok") else 1
+    if op in ("spawn", "fan", "consult"):
+        # --cli claude|codex|<command>, or a raw command after --. adopt (via
+        # /rename) defaults on for claude (a cc-socks peer), off otherwise.
+        cli = None
+        cmd = None
+        cwd = prefix = None
+        n = 1
+        timeout = 120.0
+        want_json = "--json" in args
+        rest = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--cli" and i + 1 < len(args):
+                cli = args[i + 1]; i += 2; continue
+            if a == "--cwd" and i + 1 < len(args):
+                cwd = args[i + 1]; i += 2; continue
+            if a == "--prefix" and i + 1 < len(args):
+                prefix = args[i + 1]; i += 2; continue
+            if a == "--n" and i + 1 < len(args):
+                n = int(args[i + 1]); i += 2; continue
+            if a == "--timeout" and i + 1 < len(args):
+                timeout = float(args[i + 1]); i += 2; continue
+            if a == "--":
+                cmd = " ".join(args[i + 1:]); break
+            if a == "--json":
+                i += 1; continue
+            rest.append(a); i += 1
+        # Resolve the launch command + adopt default from --cli.
+        adopt = False
+        if cmd is None and cli:
+            if cli == "claude":
+                cmd = os.environ.get("HOMI_CLAUDE_CMD", "claude"); adopt = True
+            elif cli == "codex":
+                cmd = os.environ.get("HOMI_CODEX_CMD", "codex"); adopt = False
+            else:
+                cmd = cli  # a raw command name
+        if not cmd:
+            sys.stderr.write("provide --cli claude|codex|<cmd> or `-- <command>`\n")
+            return 1
+        if op == "spawn":
+            if not rest:
+                sys.stderr.write("usage: communicate homi spawn <name> --cli claude|codex "
+                                 "[--cwd DIR] [--json]\n")
+                return 1
+            req = {"op": "spawn", "name": rest[0], "cmd": cmd, "cwd": cwd,
+                   "adopt": adopt}
+            r = _call(req, timeout=60)
+            print(json.dumps(r) if want_json
+                  else (("%s -> %s" % (r.get("name"), r.get("seat")))
+                        if r.get("ok") else (r.get("err") or "failed")))
+            return 0 if r.get("ok") else 1
+        if op == "fan":
+            req = {"op": "fan", "n": n, "cmd": cmd,
+                   "prefix": prefix or (rest[0] if rest else "worker"),
+                   "cwd": cwd, "adopt": adopt}
+            r = _call(req, timeout=120)
+            print(json.dumps(r.get("group", [])) if not want_json else json.dumps(r))
+            return 0 if r.get("ok") else 1
+        if op == "consult":
+            if not rest:
+                sys.stderr.write("usage: communicate homi consult <question...> "
+                                 "--cli claude|codex [--timeout SEC] [--json]\n")
+                return 1
+            nm = "consult-" + (cli or "peer")
+            req = {"op": "consult", "name": nm, "cmd": cmd,
+                   "text": " ".join(rest), "timeout": timeout, "adopt": adopt}
+            r = _call(req, timeout=timeout + 30)
+            print(json.dumps(r) if want_json
+                  else (r.get("reply", "") if r.get("ok") else (r.get("err") or "failed")))
+            return 0 if r.get("ok") else 1
     if op == "seat":
         if not args:
             sys.stderr.write("usage: communicate homi seat "
