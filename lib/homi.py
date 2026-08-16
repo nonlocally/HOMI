@@ -1199,6 +1199,20 @@ class Homi:
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
         if name in self._RESERVED:
             return {"ok": False, "err": "'%s' is reserved" % name}
+        # Compute the workspace record BEFORE the claim lock: describe() and
+        # especially make_worktree() shell out to git, and make_worktree's own
+        # timeout is 60s — holding claim_mu (instance-wide) across that would
+        # stall every OTHER claim on this daemon, including the auto-claims on
+        # inbound mail (:1929) and _do_ask (:701). Best-effort in the fullest
+        # sense: ANY failure here (bad path, permission error, malformed cwd)
+        # must never fail the claim itself, only leave the axis unset.
+        ws = None
+        if cwd:
+            try:
+                ws = (homi_workspace.make_worktree(cwd, name) if worktree
+                      else homi_workspace.describe(cwd))
+            except Exception as e:
+                self.log("workspace not recorded for", name, ":", e)
         with self.claim_mu:  # check+bind+insert must be one atomic step
             with self.mu:
                 ent = self.identities.get(name)
@@ -1226,14 +1240,9 @@ class Homi:
                 self._plant(name)
                 threading.Thread(target=self._box_drain_loop, args=(name,),
                                  daemon=True).start()
-                if cwd:
-                    try:
-                        ws = (homi_workspace.make_worktree(cwd, name) if worktree
-                              else homi_workspace.describe(cwd))
-                        with self.mu:
-                            self.identities[name]["workspace"] = ws
-                    except homi_workspace.WorkspaceError as e:
-                        self.log("workspace not recorded for", name, ":", e)
+                if ws is not None:
+                    with self.mu:
+                        self.identities[name]["workspace"] = ws
                 self._persist_identities()
                 self.log("claimed BOXED identity:", name, "-> published", sock)
                 return {"ok": True, "boxed": True,
@@ -1250,14 +1259,9 @@ class Homi:
             self._plant(name)
             threading.Thread(target=self._identity_server, args=(name, srv),
                              daemon=True).start()
-            if cwd:
-                try:
-                    ws = (homi_workspace.make_worktree(cwd, name) if worktree
-                          else homi_workspace.describe(cwd))
-                    with self.mu:
-                        self.identities[name]["workspace"] = ws
-                except homi_workspace.WorkspaceError as e:
-                    self.log("workspace not recorded for", name, ":", e)
+            if ws is not None:
+                with self.mu:
+                    self.identities[name]["workspace"] = ws
             self._persist_identities()
         self.log("claimed identity:", name, "->", sock)
         return {"ok": True}

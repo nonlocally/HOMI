@@ -72,6 +72,30 @@ assert d["ws4"]["workspace"]["path"]!=d["ws5"]["workspace"]["path"]
 assert d["ws5"]["workspace"]["branch"]=="homi/ws5"
 PY
 
+echo "== a removed worktree with its branch intact is re-adopted, not orphaned"
+"$COMM" homi claim ws6 --cwd "$REPO" --worktree >/dev/null 2>&1
+WS6_PATH="$(python3 - "$ID" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["ws6"]["workspace"]["path"])
+PY
+)"
+"$COMM" homi release ws6 >/dev/null 2>&1
+# `git worktree remove` is the normal recovery path -- it deliberately leaves
+# the branch (homi/ws6) behind, only dropping the worktree's directory + the
+# administrative link back to it.
+( cd "$REPO" && git worktree remove --force "$WS6_PATH" ) >/dev/null 2>&1
+( cd "$REPO" && git worktree list | grep -q 'homi/ws6' ) && bad "worktree remove didn't remove it" || ok "worktree entry removed, branch left behind"
+"$COMM" homi claim ws6 --cwd "$REPO" --worktree >/dev/null 2>&1
+python3 - "$ID" <<'PY' && ok "re-claim adopts homi/ws6 (branch survives remove + re-claim)" || bad "re-claim orphaned the original branch"
+import json,sys,os
+d=json.load(open(sys.argv[1]))["ws6"]["workspace"]
+assert d["worktree"] is True, d
+assert d["branch"]=="homi/ws6", d
+assert os.path.isdir(d["path"]), d
+PY
+( cd "$REPO" && git branch --list ws6 | grep -q . ) && bad "stray branch 'ws6' was created" || ok "no stray branch named ws6"
+( cd "$REPO" && git worktree list | grep -q 'homi/ws6' ) && ok "git agrees homi/ws6 worktree exists again" || bad "worktree not recreated"
+
 "$COMM" homi stop >/dev/null 2>&1
 echo; echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

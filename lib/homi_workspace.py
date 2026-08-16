@@ -58,13 +58,21 @@ def make_worktree(repo, name, base=None):
                         "%s-worktrees" % os.path.basename(top), name)
     if os.path.isdir(dest):
         return describe(dest)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    args = ["worktree", "add"]
-    if _git(top, "rev-parse", "--verify", branch) is None:
-        args += ["-b", branch]
-    args.append(dest)
-    if base:
-        args.append(base)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+    except OSError as e:
+        raise WorkspaceError("cannot create worktree parent: %s" % e)
+    if _git(top, "rev-parse", "--verify", branch) is not None:
+        # The branch already exists (the normal recovery path: `git worktree
+        # remove` deliberately leaves the branch behind) — adopt it as the
+        # worktree's commit-ish. A bare `git worktree add <dest>` with no
+        # ref here would silently create a NEW branch named after the
+        # destination directory instead, orphaning the original `homi/<name>`.
+        args = ["worktree", "add", dest, branch]
+    else:
+        args = ["worktree", "add", "-b", branch, dest]
+        if base:
+            args.append(base)
     if _git(top, *args, timeout=60) is None:
         raise WorkspaceError("git worktree add failed for %s" % dest)
     return describe(dest)
