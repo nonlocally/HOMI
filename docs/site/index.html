@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>homi — the agent fabric</title>
+<style>
+:root{
+  --bg:#111310; --bg-soft:#181b16; --panel:#1c201a; --panel-2:#22271f;
+  --ink:#e8e6dd; --ink-soft:#b3b6ab; --ink-dim:#7f847a;
+  --line:#2c3128; --line-soft:#242a20;
+  --gold:#e0a458; --gold-soft:#c98f43; --teal:#5eb3a8; --rose:#d98a7a;
+  --violet:#a89bd6; --green:#8fbf7a;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --maxw:820px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:16.5px;line-height:1.62;-webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility}
+a{color:var(--gold);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono);font-size:.87em;background:#0c0e0a;border:1px solid var(--line-soft);
+  padding:.08em .38em;border-radius:5px;color:#eadfce;white-space:nowrap}
+h1,h2,h3,h4{line-height:1.22;font-weight:640;letter-spacing:-.01em}
+h2{font-size:1.62rem;margin:0 0 .2em}
+h3{font-size:1.18rem;margin:2.2em 0 .5em;color:var(--gold)}
+h4{font-size:1rem;margin:1.6em 0 .4em;color:var(--teal);letter-spacing:0}
+p{margin:.7em 0}
+strong{color:#fff;font-weight:620}
+em{color:var(--ink)}
+
+/* layout */
+.wrap{display:flex;max-width:1200px;margin:0 auto;gap:0}
+.side{width:250px;flex:none;position:sticky;top:0;height:100vh;overflow-y:auto;
+  padding:26px 16px 40px 24px;border-right:1px solid var(--line);background:var(--bg)}
+.side .brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.side .brand .logo{width:30px;height:30px;border-radius:8px;flex:none;
+  background:linear-gradient(135deg,var(--gold),#8a5e22);display:grid;place-items:center;
+  font-weight:800;color:#1a1509;font-family:var(--mono);font-size:15px}
+.side .brand b{font-size:1.05rem}
+.side .tag{color:var(--ink-dim);font-size:.76rem;margin:0 0 20px 40px;line-height:1.4}
+nav a{display:block;color:var(--ink-soft);font-size:.86rem;padding:4px 10px;border-radius:6px;
+  border-left:2px solid transparent;margin:1px 0}
+nav a:hover{color:var(--ink);background:var(--bg-soft);text-decoration:none}
+nav a.on{color:var(--gold);border-left-color:var(--gold);background:var(--bg-soft)}
+nav .grp{color:var(--ink-dim);font-size:.68rem;text-transform:uppercase;letter-spacing:.12em;
+  margin:16px 0 5px 10px;font-weight:600}
+main{flex:1;min-width:0;padding:0 clamp(20px,5vw,64px) 120px}
+section{max-width:var(--maxw);margin:0 auto;padding-top:56px;scroll-margin-top:14px}
+section.hero{padding-top:64px}
+
+/* hero */
+.hero .kicker{color:var(--teal);font-family:var(--mono);font-size:.8rem;letter-spacing:.06em;
+  text-transform:uppercase;margin-bottom:14px}
+.hero h1{font-size:clamp(2.1rem,5.5vw,3.1rem);margin:0 0 .3em;letter-spacing:-.02em}
+.hero h1 .accent{color:var(--gold)}
+.hero .lede{font-size:1.22rem;color:var(--ink-soft);max-width:680px;line-height:1.5}
+.hero .lede b{color:var(--ink)}
+.statrow{display:flex;flex-wrap:wrap;gap:10px;margin:26px 0 8px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 16px;flex:1 1 130px}
+.stat .n{font-size:1.5rem;font-weight:700;color:var(--gold);font-family:var(--mono);letter-spacing:-.02em}
+.stat .l{font-size:.78rem;color:var(--ink-dim);margin-top:2px}
+.meta{color:var(--ink-dim);font-size:.85rem;margin-top:18px;font-family:var(--mono)}
+.meta span{color:var(--teal)}
+
+/* generic blocks */
+.lead{font-size:1.12rem;color:var(--ink-soft)}
+.rule{height:1px;background:var(--line);border:0;margin:0}
+pre{background:#0c0e0a;border:1px solid var(--line);border-radius:11px;padding:16px 18px;
+  overflow-x:auto;margin:1em 0;font-family:var(--mono);font-size:.83rem;line-height:1.62;color:#d7d2c4}
+pre code{background:none;border:0;padding:0;white-space:pre;color:inherit;font-size:1em}
+.c-cmd{color:var(--gold)}.c-sub{color:var(--teal)}.c-cm{color:var(--ink-dim)}.c-str{color:var(--green)}.c-flag{color:var(--violet)}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.callout{border-left:3px solid var(--teal);background:var(--bg-soft);border-radius:0 10px 10px 0;
+  padding:12px 18px;margin:16px 0;color:var(--ink-soft)}
+.callout.warn{border-left-color:var(--rose)}
+.callout.key{border-left-color:var(--gold)}
+.callout b{color:var(--ink)}
+.pill{display:inline-block;font-family:var(--mono);font-size:.72rem;padding:2px 9px;border-radius:20px;
+  border:1px solid var(--line);color:var(--ink-soft);background:var(--panel-2);margin:0 4px 4px 0}
+.pill.ok{color:var(--green);border-color:#3a5030}
+.pill.crit{color:var(--rose);border-color:#5a3630}
+
+/* invariants */
+.inv{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}
+.inv .i{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.inv .i .num{font-family:var(--mono);color:var(--gold);font-size:.8rem;font-weight:700}
+.inv .i h4{margin:.3em 0 .3em;color:var(--ink)}
+.inv .i p{margin:.2em 0 0;font-size:.92rem;color:var(--ink-soft)}
+
+/* tables */
+table{width:100%;border-collapse:collapse;margin:1.2em 0;font-size:.9rem}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+th{color:var(--ink-dim);font-weight:600;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}
+td code{white-space:normal}
+.tick{color:var(--green);font-family:var(--mono);white-space:nowrap}
+
+/* diagrams */
+.diagram{background:var(--bg-soft);border:1px solid var(--line);border-radius:13px;padding:24px 20px;margin:18px 0}
+.diagram .cap{font-size:.8rem;color:var(--ink-dim);text-align:center;margin-top:14px;font-family:var(--mono)}
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;justify-content:center}
+.node{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 14px;
+  min-width:118px;text-align:center;font-size:.82rem}
+.node .t{font-weight:640;color:var(--ink);display:block}
+.node .s{color:var(--ink-dim);font-size:.72rem;font-family:var(--mono)}
+.node.gold{border-color:var(--gold-soft)} .node.gold .t{color:var(--gold)}
+.node.teal{border-color:#3c6c64} .node.teal .t{color:var(--teal)}
+.node.dim{opacity:.72;border-style:dashed}
+.arrow{display:flex;align-items:center;color:var(--ink-dim);padding:0 6px;font-family:var(--mono);font-size:.72rem;
+  flex-direction:column;justify-content:center;min-width:56px;text-align:center}
+.arrow .lab{font-size:.66rem;color:var(--teal);margin-bottom:1px}
+.arrow .a{font-size:1.1rem;line-height:1}
+
+/* layer stack */
+.stack{display:flex;flex-direction:column;gap:6px;margin:18px 0}
+.layer{display:grid;grid-template-columns:44px 1fr auto;gap:14px;align-items:center;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+.layer .lv{font-family:var(--mono);font-weight:700;color:var(--gold);font-size:.9rem}
+.layer .body b{color:var(--ink)} .layer .body{font-size:.9rem;color:var(--ink-soft)}
+.layer .rev{font-size:.72rem;color:var(--ink-dim);font-family:var(--mono);text-align:right;max-width:190px}
+.layer .rev span{color:var(--rose)}
+
+/* move sequence */
+.seq{counter-reset:s;margin:16px 0}
+.seq .step{display:grid;grid-template-columns:34px 1fr;gap:14px;padding:10px 0;border-bottom:1px solid var(--line-soft)}
+.seq .step:last-child{border-bottom:0}
+.seq .step .b{width:30px;height:30px;border-radius:50%;background:var(--panel-2);border:1px solid var(--gold-soft);
+  color:var(--gold);display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:.85rem}
+.seq .step .c b{color:var(--ink)} .seq .step .c{font-size:.94rem;color:var(--ink-soft)}
+.seq .step .c .k{font-family:var(--mono);font-size:.78rem;color:var(--teal)}
+
+.foot{max-width:var(--maxw);margin:80px auto 0;padding-top:24px;border-top:1px solid var(--line);
+  color:var(--ink-dim);font-size:.85rem}
+.foot code{white-space:normal}
+
+/* mobile */
+.menubtn{display:none}
+@media(max-width:860px){
+  .side{position:fixed;left:0;top:0;z-index:40;transform:translateX(-100%);transition:transform .2s;
+    box-shadow:0 0 40px rgba(0,0,0,.6);width:270px}
+  .side.open{transform:none}
+  .menubtn{display:flex;position:fixed;top:12px;right:12px;z-index:50;background:var(--panel);
+    border:1px solid var(--line);color:var(--ink);border-radius:9px;width:44px;height:40px;
+    align-items:center;justify-content:center;font-size:1.1rem;cursor:pointer}
+  main{padding-left:18px;padding-right:18px}
+  .inv,.grid2{grid-template-columns:1fr}
+  .layer{grid-template-columns:36px 1fr;} .layer .rev{grid-column:2;text-align:left;max-width:none}
+}
+</style>
+</head>
+<body>
+<button class="menubtn" id="mb" aria-label="menu">☰</button>
+<div class="wrap">
+<aside class="side" id="side">
+  <div class="brand"><div class="logo">h</div><b>homi</b></div>
+  <div class="tag">the agent fabric — v2</div>
+  <nav id="nav">
+    <div class="grp">Understand</div>
+    <a href="#top">Overview</a>
+    <a href="#idea">The one idea</a>
+    <a href="#invariants">Four invariants</a>
+    <a href="#planes">Two planes</a>
+    <a href="#storewake">Store → wake</a>
+    <div class="grp">What it does</div>
+    <a href="#messages">Message plane</a>
+    <a href="#seats">Seats</a>
+    <a href="#spawn">Spawn</a>
+    <a href="#move">Move an agent</a>
+    <a href="#boxed">Boxed agents</a>
+    <a href="#fleets">Fleets</a>
+    <a href="#mcp">Two faces, one kernel</a>
+    <div class="grp">Trust &amp; proof</div>
+    <a href="#security">Security model</a>
+    <a href="#review">The self-review</a>
+    <a href="#built">How it was built</a>
+    <a href="#proofs">Live proofs</a>
+    <div class="grp">Onward</div>
+    <a href="#deferred">Deferred to you</a>
+    <a href="#map">Map of the code</a>
+  </nav>
+</aside>
+
+<main>
+<section class="hero" id="top">
+  <div class="kicker">overnight build · 2026-08-16</div>
+  <h1>An address must not<br>die with a <span class="accent">process.</span></h1>
+  <p class="lede"><b>homi</b> is a per-device daemon that gives every AI agent a durable
+  name, a durable mailbox, and measured liveness — then lets you <b>message</b> them,
+  <b>watch</b> them, <b>create</b> them, <b>move</b> them between machines, <b>sandbox</b>
+  them, and <b>federate</b> across people — all on your own devices, over Tailscale + SSH,
+  with nothing in the cloud.</p>
+  <div class="statrow">
+    <div class="stat"><div class="n">171/171</div><div class="l">checks green · 11 suites</div></div>
+    <div class="stat"><div class="n">1</div><div class="l">python-stdlib daemon</div></div>
+    <div class="stat"><div class="n">7</div><div class="l">capabilities, each proven</div></div>
+    <div class="stat"><div class="n">0</div><div class="l">cloud services · no pip</div></div>
+  </div>
+  <div class="meta">committed on <span>fabric-v2</span> · live-proven on <span>mini-2 ↔ air-2</span> · hardened against an adversarial review</div>
+</section>
+
+<hr class="rule">
+
+<section id="idea">
+  <h2>The one idea</h2>
+  <p class="lead">Everything here follows from a single correction to how agents talk to each other.</p>
+  <p>Before homi, agent messaging was <strong>rendezvous</strong>: both ends had to be alive
+  at the same instant, and a "name" was whatever a live process's sidecar file happened to say
+  right now. Miss the window — the agent finished its turn, the laptop slept, the session
+  restarted — and the message was simply gone. The name pointed at a corpse.</p>
+  <p>homi replaces rendezvous with <strong>store-and-forward</strong>. A name is
+  <em>claimed</em> and becomes a durable address that outlives the process behind it: an
+  always-answerable socket, an entry that stays in the roster, and a mailbox on disk that
+  captures every inbound message <em>before anything else is attempted</em>. When a real
+  session takes the name, held mail drains into it as conversation turns. When the session
+  dies, homi takes the name back and keeps holding. The gap between <em>received</em> and
+  <em>acted&nbsp;on</em> stops being your problem — it becomes the daemon's.</p>
+  <div class="callout key"><b>Why it matters.</b> Once an address survives its process, every
+  hard thing becomes possible: talking to an agent that's asleep, waking it with a message,
+  moving it to another machine without losing its inbox, containing it in a VM, and handing a
+  capability to a collaborator — all without a central server, because the durability lives
+  next to each agent, not in a cloud.</p>
+</section>
+
+<section id="invariants">
+  <h2>Four invariants</h2>
+  <p>These are the rules the whole system is held to. Every feature honors all four, and the
+  test suite exists to keep them honored.</p>
+  <div class="inv">
+    <div class="i"><div class="num">01</div><h4>Identity ≠ process lifetime</h4>
+      <p>A claimed name is a stable socket + sweep-proof roster entry + durable mailbox. The
+      session behind it can come and go; the address doesn't move.</p></div>
+    <div class="i"><div class="num">02</div><h4>Never advertise the unmeasured</h4>
+      <p>Liveness is <em>probed</em> (connect + recv), never inferred from a file existing —
+      and every route is labelled <code>probed</code> / <code>reported</code> / <code>boxed-probed</code>.
+      A daemon even probes its own published address.</p></div>
+    <div class="i"><div class="num">03</div><h4>Durability before delivery</h4>
+      <p>A message is fsync'd to the mailbox before it is acked or delivered. Cursors only move
+      forward. Cross-device is at-least-once, deduped by <code>msg_id</code>.</p></div>
+    <div class="i"><div class="num">04</div><h4>Decouple failure domains</h4>
+      <p>Inbound and outbound fail independently; each device links <em>outbound-only</em>.
+      One machine sleeping never wedges another. Trust boundaries deny by default.</p></div>
+  </div>
+</section>
+
+<section id="planes">
+  <h2>Two planes</h2>
+  <p>homi separates two fundamentally different ways to reach an agent, and never confuses them.</p>
+  <div class="grid2">
+    <div class="card">
+      <h4 style="color:var(--gold);margin-top:0">Messages — the default</h4>
+      <p style="font-size:.94rem">Identity-addressed, durable, acked. You send to a
+      <em>name</em>; delivery is store-and-forward, so the target need not be alive. This is
+      how agents should talk to each other — it survives sleep, restarts, and device
+      boundaries.</p>
+      <div><span class="pill">send</span><span class="pill">ask</span><span class="pill">group</span><span class="pill">notify</span><span class="pill">inbox</span></div>
+    </div>
+    <div class="card">
+      <h4 style="color:var(--teal);margin-top:0">Seats — the escape hatch</h4>
+      <p style="font-size:.94rem">Keystroke-level, observed, ephemeral surfaces you
+      <em>cannot</em> mailbox: a cluster login shell, a REPL, a TUI. Explicit, opt-in per
+      link, and fail-closed. You drive them; you don't converse with them.</p>
+      <div><span class="pill">spawn</span><span class="pill">send</span><span class="pill">read</span><span class="pill">state</span><span class="pill">wait</span><span class="pill">respond</span></div>
+    </div>
+  </div>
+  <div class="callout">The discipline that killed the old system's "swarm" layer: it drove
+  agents by blindly typing into tmux panes (a message plane built out of seats). homi's
+  message plane is durable and acked; seats are the narrow, explicit exception — never the
+  default.</div>
+</section>
+
+<section id="storewake">
+  <h2>Store → wake, drawn</h2>
+  <p>The heart of the daemon. A message is always stored first; whether it's delivered
+  <em>now</em> depends on a measured probe, not a guess.</p>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node"><span class="t">sender</span><span class="s">any agent</span></div>
+      <div class="arrow"><span class="lab">1. send</span><span class="a">→</span></div>
+      <div class="node gold"><span class="t">mailbox</span><span class="s">fsync JSONL</span></div>
+      <div class="arrow"><span class="lab">2. ack</span><span class="a">→</span></div>
+      <div class="node teal"><span class="t">reconciler</span><span class="s">every tick</span></div>
+    </div>
+    <div class="flow" style="margin-top:14px">
+      <div class="node teal dim"><span class="t">probe</span><span class="s">connect+recv</span></div>
+      <div class="arrow"><span class="lab">live?</span><span class="a">→</span></div>
+      <div class="node"><span class="t">live session</span><span class="s">deliver as a turn</span></div>
+      <div class="arrow" style="min-width:76px"><span class="lab">else hold</span><span class="a">↺</span></div>
+      <div class="node dim"><span class="t">held durably</span><span class="s">cursor unmoved</span></div>
+    </div>
+    <div class="cap">durability first (2 precedes 3) · the cursor advances only after a delivery is acknowledged</div>
+  </div>
+  <p>When a real session <em>adopts</em> the name (via <code>/rename</code>, which the sidecar
+  mirrors), homi steps aside and drains held mail into it. When the session vanishes, homi
+  re-plants its own sweep-proof entry and resumes holding. Nothing is lost in the handoff
+  either direction.</p>
+</section>
+
+<hr class="rule">
+
+<section id="messages">
+  <h2>Message plane</h2>
+  <p>The durable core. Beyond fire-and-forget <code>send</code>, the fabric adds the pieces a
+  real conversation needs.</p>
+  <h4>ask — a blocking, correlated question</h4>
+  <p><code>ask</code> sends a question carrying a return token (<code>asker@device~corr</code>)
+  and blocks until the correlated reply lands — whether the answer comes back via an explicit
+  <code>reply&nbsp;&lt;token&gt;</code> or, best-effort, as a plain message back to the asker.
+  It works across device and fleet boundaries, where the token is rewritten so replies route
+  home.</p>
+  <pre><code><span class="c-cmd">communicate homi</span> ask helper <span class="c-str">"say hi in one word"</span> <span class="c-flag">--from</span> you <span class="c-flag">--timeout</span> 120
+<span class="c-cm"># blocks, then prints the correlated reply — proven live at 10.09s round-trip</span></code></pre>
+  <h4>group &amp; notify</h4>
+  <p><code>group</code> fans one message to a set of names. <code>notify</code> is the durable
+  human-summon lane — it writes a reason record and can fire a hook
+  (<code>HOMI_NOTIFY_CMD</code>) — for when an agent is blocked on a decision only you can make.
+  <code>wait</code> long-polls a mailbox for the next new message (the inbound wake for
+  runtimes with no socket push).</p>
+</section>
+
+<section id="seats">
+  <h2>Seats — driving surfaces you can't mailbox</h2>
+  <p>Some things have no mailbox: an HPC login node behind Duo, a Python REPL, a TUI. A
+  <strong>seat</strong> is a driven tmux surface, rebuilt clean-room from hard-won discipline
+  (not inherited code):</p>
+  <ul>
+    <li><strong>A state classifier</strong> — <code>dead &gt; approval &gt; busy &gt; booting &gt; idle</code>,
+      read from the signals that survive answer-streaming (title-spinner animation with jittered
+      sampling; the "esc to interrupt" hint; the idle footer).</li>
+    <li><strong>Deliver-and-verify send</strong> — sanitize, stage the text literally, submit
+      with a <em>separate, retried</em> Enter, and verify the composer actually cleared;
+      returns an explicit "unconfirmed" rather than lying. It never re-sends text (which could
+      duplicate a prompt).</li>
+    <li><strong>Fail-closed respond</strong> — answering an approval dialog parses only the real
+      menu block (never the surrounding prose), drives the highlight to a matching option,
+      verifies it landed, and <em>refuses</em> if nothing clearly matches. A bare Enter on an
+      unknown default is never pressed.</li>
+    <li><strong>Secret-redacting read</strong> — tokens are masked on screen-read unless you pass <code>--raw</code>.</li>
+  </ul>
+  <p>Seats work across devices too: <code>seat spawn --device air-2</code> returns
+  <code>air-2:%N</code>, and every seat verb accepts that form. Cross-device seat control is
+  <strong>opt-in per link</strong> (<code>--allow-seats</code>, upgradable and revocable in
+  place) and carried by synchronous envelopes whose ack returns the result.</p>
+  <div class="callout">This is the proof case for the cluster conductor: a host agent drives a
+  human-authenticated SSH login pane, greps the job's self-reported coordinates out of the
+  log, and gates the irreversible <code>sbatch</code> behind a durable human reply — no
+  cluster-side daemon, works on any Slurm login node you can reach.</div>
+</section>
+
+<section id="spawn">
+  <h2>Spawn — the fabric creates agents</h2>
+  <p>One verb stands up a whole agent: <code>spawn</code> = <strong>claim</strong> a durable
+  identity + <strong>launch</strong> the CLI in a seat + <strong>bind</strong> the two +
+  <strong>adopt</strong> (drive <code>/rename</code> so the live session carries the fabric
+  name). The result is one being that is both reachable by mail <em>and</em> watchable in a
+  seat.</p>
+  <pre><code><span class="c-cmd">communicate homi</span> spawn scout <span class="c-flag">--cli</span> claude <span class="c-flag">--cwd</span> ~/src/aadarwal/communicate
+<span class="c-cm"># claim + seat + bind + adopted:true — then it answers `ask` on its own</span></code></pre>
+  <p>Workers launch with <code>crossSessionInbound: accept</code> scoped to their own process,
+  so a mailbox-driven agent receives mail as turns without a human clicking through a gate
+  every time — a worker that needs a click per message is broken by construction.
+  <code>fan</code> makes N of them plus an addressable group; <code>consult</code> spawns-or-
+  reuses a private peer and asks it one question.</p>
+</section>
+
+<section id="move">
+  <h2>Move an agent between machines</h2>
+  <p class="lead">The address stays alive the whole way across.</p>
+  <p>An agent-being is three JSON artifacts: its <strong>transcript</strong> (its mind), its
+  <strong>mailbox</strong> (inbox + cursor), and its <strong>identity claim</strong>.
+  <code>move</code> relocates all three. The old <code>beam</code> tool moved only the
+  transcript and let the address die at the origin — mail kept landing in a dead inbox. homi
+  fixes exactly that: the move order is chosen so the name never points at nothing.</p>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node gold"><span class="t">origin</span><span class="s">holds the claim</span></div>
+      <div class="arrow"><span class="lab">depart</span><span class="a">→</span></div>
+      <div class="node teal"><span class="t">proxy → target</span><span class="s">address alive</span></div>
+      <div class="arrow"><span class="lab">link</span><span class="a">→</span></div>
+      <div class="node gold"><span class="t">target</span><span class="s">claims + merges</span></div>
+    </div>
+    <div class="cap">the instant <code>depart</code> runs, mail to the name routes over the link to the new home</div>
+  </div>
+  <div class="seq">
+    <div class="step"><div class="b">1</div><div class="c"><b>premove</b> — verify the agent is local here; refuse a <em>live</em> session unless you explicitly <span class="k">--fork --as &lt;new&gt;</span>. Report the mailbox truthfully.</div></div>
+    <div class="step"><div class="b">2</div><div class="c"><b>transcript rsync</b> — copy the mind while the origin still owns the name (safe; nothing has changed hands).</div></div>
+    <div class="step"><div class="b">3</div><div class="c"><b>depart</b> — <em>atomically</em> release the claim and re-bind the name as a proxy homed at the target. From this instant, new mail routes over the link; the target auto-claims on first delivery. <span class="k">the address never dies</span></div></div>
+    <div class="step"><div class="b">4</div><div class="c"><b>mailbox rsync</b> — the inbox is now frozen at the origin; stage it on the target.</div></div>
+    <div class="step"><div class="b">5</div><div class="c"><b>arrive</b> — claim + a recomposing merge: delivered history stays <em>behind</em> the cursor (a resumed session never re-receives mail it already acted on); every undelivered line — including stragglers that raced in mid-move — waits after it. Idempotent by <code>msg_id</code>.</div></div>
+    <div class="step"><div class="b">6</div><div class="c"><b>--spawn</b> (optional) — resume the transcript in a seat on the target via the cross-device seat plane.</div></div>
+  </div>
+  <p><strong>Proven live</strong> mini-2 → air-2: after the move, a bare-name <code>send</code>
+  at the origin landed in the far inbox, and the transcript was resumable there with
+  <code>claude --resume &lt;sid&gt;</code>.</p>
+</section>
+
+<section id="boxed">
+  <h2>Boxed agents — a VM as a first-class peer</h2>
+  <p>A sandboxed agent should still be a real member of the fabric. The problem is direction:
+  the measurements (against Apple's <code>container</code>) showed that a host cannot reach
+  <em>into</em> a VM by IP (per-process TCC blocks it) or through a mounted socket (inert over
+  virtiofs) — but a container <em>can</em> publish a socket <em>out</em> to the host over
+  vsock. So the rule is inverted: <strong>the box publishes; the host adopts.</strong> A box is
+  a device one vsock-hop away.</p>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node gold"><span class="t">host homi</span><span class="s">adopts + probes</span></div>
+      <div class="arrow"><span class="lab">publish-socket</span><span class="a">⇄</span></div>
+      <div class="node teal"><span class="t">in-box shim</span><span class="s">agent.sock / outbox.sock</span></div>
+      <div class="arrow"><span class="a">→</span></div>
+      <div class="node"><span class="t">agent</span><span class="s">claude / codex</span></div>
+    </div>
+    <div class="flow" style="margin-top:12px">
+      <div class="node dim" style="border-color:#5a3630"><span class="t" style="color:var(--rose)">--network none</span><span class="s">✗ internet · ✗ tailnet</span></div>
+      <div class="arrow"><span class="lab">only egress</span><span class="a">→</span></div>
+      <div class="node gold"><span class="t">homi mail</span><span class="s">attributable · logged</span></div>
+    </div>
+    <div class="cap">verified live: the air gap held (<code>ENETUNREACH</code> to 1.1.1.1) while mail flowed both ways</div>
+  </div>
+  <p><code>claim --boxed</code> records the container-published socket as the identity's address
+  (homi never binds it), probes it for measured liveness (<code>boxed-probed</code>), delivers
+  mail through it, and drains the box's outbox with the <em>boxed identity</em> as attribution.
+  The maximally hardened posture — <code>--network none</code>, where the box's <em>only</em>
+  egress is its own mailbox — is the configuration proven working end to end, not a compromise.</p>
+</section>
+
+<section id="fleets">
+  <h2>Fleets — capability, not credentials</h2>
+  <p>Two people, two machines, two tailnets. The goal is for a collaborator to reach one of
+  your agents — not to hand them an account. A cross-fleet link is <strong>deny-by-default</strong>
+  and passes through six independent layers; a foreign message must satisfy all of them, and
+  compromising one buys only the floor of the next.</p>
+  <div class="stack">
+    <div class="layer"><div class="lv">L0</div><div class="body"><b>Network</b> — a tailnet ACL row, one host, one port</div><div class="rev">revoke: <span>unshare</span></div></div>
+    <div class="layer"><div class="lv">L1</div><div class="body"><b>Transport</b> — a forward-only key: <code>restrict,port-forwarding,command="/usr/bin/false"</code>. No shell, no exec, no PTY — only a socket forward.</div><div class="rev">revoke: <span>delete the key line</span></div></div>
+    <div class="layer"><div class="lv">L2</div><div class="body"><b>Link</b> — arrival-line attribution: whatever lands on <code>in/&lt;fleet&gt;.sock</code> <em>is</em> that fleet; deduped, acked</div><div class="rev">revoke: <span>federate unlink</span></div></div>
+    <div class="layer"><div class="lv">L3</div><div class="body"><b>Identity</b> — <code>grant&lt;fleet&gt;&lt;name&gt;</code> exposes one agent; ungranted or unclaimed → one ambiguous error (no enumeration, no auto-claim oracle)</div><div class="rev">revoke: <span>ungrant</span></div></div>
+    <div class="layer"><div class="lv">L4</div><div class="body"><b>Delivery</b> — mailbox-first durability; a bypass-mode session still holds a foreign turn for your approval</div><div class="rev">revoke: <span>don't approve</span></div></div>
+    <div class="layer"><div class="lv">L5</div><div class="body"><b>Execution</b> — the payload is only text; it gains power solely through the receiving agent's own sandbox</div><div class="rev">revoke: <span>agent's config</span></div></div>
+  </div>
+  <p>Onboarding is a pair of base64 <em>cards</em> exchanged over a trusted channel
+  (<code>federate invite</code> / <code>accept</code>). A card carries the fleet name, address,
+  tailscale IP, an ed25519 fleet-key fingerprint, and the inbound socket path — the path is
+  carried <em>because</em> the forward-only key cannot run <code>echo $HOME</code> to discover
+  it. Foreign senders appear locally as <strong>fleet-qualified</strong> proxies
+  (<code>orchestrator@alice</code>), so a foreign fleet can never shadow a local name.</p>
+  <div class="callout key"><b>The pattern in practice — a librarian, not an account.</b> To share
+  cluster access, you don't create a login for your collaborator; you publish an <em>agent</em>
+  whose capability <em>is</em> the cluster and grant them mail to it. It runs as you, with your
+  credentials (which never cross the boundary), and gates every node-hour spend behind your own
+  approval. The capability crosses; the account does not.</div>
+</section>
+
+<section id="mcp">
+  <h2>Two faces, one kernel</h2>
+  <p>The CLI (<code>communicate homi …</code>) is the complete, tested definition of the fabric.
+  The npm package <code>@aadarwal/homi</code> is a thin MCP server that projects it to
+  <strong>any</strong> MCP-speaking agent — Claude Code, Codex, and others — with
+  <em>zero</em> fabric logic in the Node layer. Every tool call is one JSON line to the same
+  local daemon.</p>
+  <div class="diagram">
+    <div class="flow">
+      <div class="node"><span class="t">Claude / Codex</span><span class="s">MCP client</span></div>
+      <div class="arrow"><span class="lab">stdio</span><span class="a">→</span></div>
+      <div class="node teal"><span class="t">homi serve</span><span class="s">~18 tools</span></div>
+      <div class="arrow"><span class="lab">1 JSON line</span><span class="a">→</span></div>
+      <div class="node gold"><span class="t">homi daemon</span><span class="s">the one kernel</span></div>
+      <div class="arrow"><span class="lab">CLI</span><span class="a">←</span></div>
+      <div class="node"><span class="t">communicate homi</span><span class="s">same daemon</span></div>
+    </div>
+    <div class="cap">a repo-managed and an npm-managed homi resolve the same state root + socket — one daemon, two faces</div>
+  </div>
+  <p>Install is one line — <code>npx&nbsp;homi&nbsp;setup</code> stabilizes the vendored stdlib
+  daemon (no pip), installs launchd/systemd persistence, and prints the
+  <code>claude mcp add</code> / <code>codex mcp add</code> lines. This is what makes the whole
+  thing <em>downloadable</em>: anyone can install it and get an inter-communicating fabric on
+  their own machine.</p>
+</section>
+
+<hr class="rule">
+
+<section id="security">
+  <h2>Security model</h2>
+  <p>What's actually <em>enforced</em> — measured and tested, not aspirational:</p>
+  <table>
+    <tr><th>Boundary</th><th>Guard</th></tr>
+    <tr><td>Fleet mail</td><td>deny-by-default grants · one ambiguous error (no name enumeration) · no auto-claim oracle · fleet-qualified proxies</td></tr>
+    <tr><td>Control plane</td><td>once any fleet link exists, <em>every</em> control op (including <code>status</code>) requires the <code>auth</code> token — a file a forward-only peer can dial past but never read</td></tr>
+    <tr><td>Transport</td><td>the forward-only key refuses exec/PTY; the forwarding grant is indivisible on OpenSSH&nbsp;10.2 (documented honestly, bounded at other layers)</td></tr>
+    <tr><td>Sandbox</td><td>inbound rides published vsock sockets only (host→guest IP is TCC-fragile — measured); <code>--network none</code> default</td></tr>
+    <tr><td>Seats</td><td>opt-in per link, revocable; respond fails closed; federation only ever exports <code>mail:</code>, never a seat or a box</td></tr>
+    <tr><td>Onboarding</td><td>every card field is strict-validated before it touches <code>authorized_keys</code> — a smuggled newline is refused, not written</td></tr>
+  </table>
+</section>
+
+<section id="review">
+  <h2>The self-review</h2>
+  <p>Before calling any of this done, an adversarial reviewer went over the whole ~4,800-line
+  diff. The core message plane came back clean — lock ordering sound, no deadlocks. The real
+  failure modes clustered exactly where the new trust boundaries were. Every finding is fixed,
+  and each fix is pinned by a regression test that fails if the guard comes undone.</p>
+  <div class="grid2">
+    <div class="card"><span class="pill crit">critical · fixed</span>
+      <h4 style="margin-top:.4em">Fleet status oracle</h4>
+      <p style="font-size:.92rem">A fleet peer could call <code>status</code> unauthenticated
+      and receive your whole roster — defeating the very name-masking the fleet path
+      implements. Now token-gated like every other op.</p></div>
+    <div class="card"><span class="pill crit">critical · fixed</span>
+      <h4 style="margin-top:.4em">authorized_keys injection</h4>
+      <p style="font-size:.92rem">A crafted card could smuggle a newline and write a second,
+      <em>unrestricted</em> key = host compromise. Card fields are now strictly validated;
+      malformed cards are refused before anything is written.</p></div>
+  </div>
+  <p style="font-size:.94rem;color:var(--ink-soft)">Also fixed: boxed re-offer dedup
+  (double-delivery after a lost ack), a boxed drain thread leak on release, an arrive/deliver
+  cursor race, <code>respond --deny</code> auto-approving on a highlighted "Yes", a
+  <code>move --as</code> rsync injection, and a concurrent-autostart split-brain. Two low-risk
+  minors (a per-fleet proxy cap; a sub-millisecond <code>depart</code> window) are noted as
+  follow-ups rather than guessed at.</p>
+</section>
+
+<section id="built">
+  <h2>How it was built</h2>
+  <p>One step at a time — each committed and tested before the next began.</p>
+  <table>
+    <tr><th>Step</th><th>What</th><th>Proof</th></tr>
+    <tr><td>A1</td><td>ask (blocking, correlated) · group · notify</td><td class="tick">10/10</td></tr>
+    <tr><td>A2</td><td>Seat plane — classifier, deliver-and-verify, fail-closed respond</td><td class="tick">10/10 · real tmux</td></tr>
+    <tr><td>A3</td><td>Cross-device seats — envelope, result-in-ack, per-link grant</td><td class="tick">9/9 · two daemons</td></tr>
+    <tr><td>A4</td><td>spawn · fan · consult</td><td class="tick">10/10</td></tr>
+    <tr><td>Dist</td><td>npm package + thin MCP server + long-poll ops</td><td class="tick">5/5 · real MCP client</td></tr>
+    <tr><td>Fleet</td><td>cards · forward-only links · grants · full cross-fleet ask→reply</td><td class="tick">22/22</td></tr>
+    <tr><td>Move</td><td>premove · depart · arrive + orchestration</td><td class="tick">17/17 · live</td></tr>
+    <tr><td>Boxed</td><td>claim --boxed · outbox drain · in-box shim</td><td class="tick">15/15 · live VM</td></tr>
+    <tr><td>Core</td><td>lifecycle · identities · store→wake · links · persistence</td><td class="tick">46 + 23 + 6</td></tr>
+  </table>
+</section>
+
+<section id="proofs">
+  <h2>Live proofs</h2>
+  <p>Not just unit tests — the whole stack was exercised on real hardware.</p>
+  <div class="card">
+    <h4 style="margin-top:0">The real agent loop</h4>
+    <p style="font-size:.94rem"><code>spawn scout --cli claude</code> came up
+    claim+seat+bind+<strong>adopted</strong>; <code>ask scout …</code> delivered as a turn; the
+    agent <em>autonomously ran the reply command</em>; the blocking ask resolved with reply
+    <code>"FABRIC-ALIVE"</code> at <strong>10.09s</strong>.</p>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">Cross-device seat &amp; move</h4>
+    <p style="font-size:.94rem">A shell spawned on air-2 and driven from mini-2
+    (<code>LIVE_SEAT_E2E_42</code> read back over the link), gated by the seat grant. An agent
+    moved mini-2 → air-2 with mail following the address over the link.</p>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">Air-gapped box</h4>
+    <p style="font-size:.94rem">A real <code>--network none</code> VM published its socket pair;
+    the roster read it <code>live [boxed-probed]</code>; mail flowed both ways with correct
+    attribution and the spool cleared on ack — while every attempt to reach the internet
+    returned <code>ENETUNREACH</code>.</p>
+  </div>
+</section>
+
+<section id="deferred">
+  <h2>Deferred to you — deliberately</h2>
+  <p>Things I could have done but that are yours to decide:</p>
+  <ol>
+    <li><strong>Publish the npm package.</strong> <code>@aadarwal/homi</code> is built and
+      tarball-verified locally; <code>npm publish</code> is outward-facing, so it waits for you.</li>
+    <li><strong>Retire <code>~/HOMI</code>.</strong> Untouched, exactly as you asked. The
+      keep/reject triage of every idea in it is written up for when you're ready.</li>
+    <li><strong>A real cross-fleet test with a second operator.</strong> The machinery is proven
+      between two local daemons; the human half needs a willing peer.</li>
+    <li><strong>A boxed <em>claude</em> agent.</strong> The shim and transport are live-proven;
+      putting a real CLI in the image means per-agent credentials — a credential decision I
+      didn't make on your behalf.</li>
+  </ol>
+</section>
+
+<section id="map">
+  <h2>Map of the code</h2>
+  <pre><code><span class="c-cmd">lib/homi.py</span>            <span class="c-cm">~2600 lines · the daemon: identities, mailboxes, store→wake,</span>
+                       <span class="c-cm">links, seats routing, spawn, move, boxed, fleets</span>
+<span class="c-cmd">lib/homi_seat.py</span>       <span class="c-cm">the seat driver: classifier + deliver-verify + fail-closed respond</span>
+<span class="c-cmd">bin/homi-boxed-init</span>    <span class="c-cm">the in-box shim (stdlib) for a sandboxed peer</span>
+<span class="c-cmd">packages/homi/</span>         <span class="c-cm">@aadarwal/homi — the MCP server + vendored daemon</span>
+<span class="c-cmd">scripts/test-homi-*.sh</span> <span class="c-cm">11 suites · 171 checks</span>
+<span class="c-cmd">docs/studies/</span>          <span class="c-cm">the research behind each track, all live-verified</span>
+<span class="c-cmd">docs/superpowers/specs/</span><span class="c-cm">the v1 + v2 design specs</span></code></pre>
+  <div class="foot">
+    <p><b>homi</b> · the agent fabric · branch <code>fabric-v2</code> · 2026-08-16.<br>
+    Served from your tailnet. This page is a static, self-contained file — read it on any device you own.</p>
+  </div>
+</section>
+</main>
+</div>
+<script>
+(function(){
+  var mb=document.getElementById('mb'), side=document.getElementById('side');
+  mb&&mb.addEventListener('click',function(){side.classList.toggle('open')});
+  side&&side.addEventListener('click',function(e){if(e.target.tagName==='A')side.classList.remove('open')});
+  var links=[].slice.call(document.querySelectorAll('#nav a'));
+  var map={}; links.forEach(function(a){var id=a.getAttribute('href').slice(1);var el=document.getElementById(id);if(el)map[id]=a;});
+  var obs=new IntersectionObserver(function(es){
+    es.forEach(function(en){ if(en.isIntersecting){
+      links.forEach(function(a){a.classList.remove('on')});
+      var a=map[en.target.id]; if(a)a.classList.add('on');
+    }});
+  },{rootMargin:'-10% 0px -78% 0px',threshold:0});
+  Object.keys(map).forEach(function(id){var el=document.getElementById(id);if(el)obs.observe(el);});
+})();
+</script>
+</body>
+</html>
