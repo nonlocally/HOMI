@@ -36,7 +36,10 @@ const TOOLS: Tool[] = [
     schema: {},
     run: async () => {
       const st = await call({ op: "status" });
-      return { device: st?.self?.device, identities: Object.keys(st?.identities || {}) };
+      return { device: st?.self?.device,
+               user: st?.self?.user?.handle ?? null,
+               version: st?.self?.version ?? null,
+               identities: Object.keys(st?.identities || {}) };
     },
   },
   {

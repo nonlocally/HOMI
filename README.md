@@ -247,11 +247,61 @@ communicate homi move worker mini-1                         # relocate the agent
 communicate homi status --json        # routes, measured liveness, queues
 ```
 
-Tests (171 checks, all green): `test-homi-core.sh` 46 · `test-homi-ask.sh` 10 ·
-`test-homi-link.sh` 23 · `test-homi-seat.sh` 10 · `test-homi-seat-link.sh` 9 ·
-`test-homi-spawn.sh` 10 · `test-homi-mcp.sh` 5 · `test-homi-fleet.sh` 17 ·
-`test-homi-move.sh` 17 · `test-homi-boxed.sh` 14 (+ `test-homi-persist.sh` 6,
-manual/launchd).
+### v3 — the user layer: @handles
+
+The fabric modelled agents, devices, and fleets — but not the **person**: the
+fleet name was an unpersisted echo of `$USER` computed inside the daemon, and
+nothing said who owns an agent. v3 completes `fleet` into a claimed identity.
+
+- **`homi init` — the claim ceremony.** Claim a handle once (`@aadarwal`);
+  it lands in `user.json` (the only writer is this ceremony — a missing file
+  is loud degraded mode, never a silently regenerated identity) and is
+  re-derived into every card, status, agents listing, and MCP whoami.
+  Precedence: `HOMI_FLEET` env (test hook) > `user.json` > OS username.
+  `npx` first-run prompts for it interactively.
+- **No passwords — possession of a key is the login.** Your ed25519 key's
+  fingerprint is the identity; the handle is the human name bound to it by a
+  signature. `homi user` shows who this fabric belongs to.
+- **`homi pair <user@host>` — your own second device, one-sided.** Probes ssh
+  (prints the exact `ssh-copy-id` fix), stages/upgrades the far kernel from
+  this install's own files, reads BOTH device names from the daemons (never
+  typed — a mistyped petname queues mail forever), links both directions,
+  syncs the handle, and reports a **measured** round trip each way. The new
+  `ping` envelope kind is stateless; `homi link <dev> --check` measures any
+  link on demand.
+- **`homi connect` — another person, by handle, on signed cards.**
+  `connect --invite` prints one signed code (card v2: `ssh-keygen -Y` over
+  canonical bytes). The acceptor runs `homi connect @you --code '…'`:
+  signature verified, the typed handle cross-checked against the card, the
+  fingerprint **recomputed from the card's key** (its claimed fingerprint
+  string is refused on mismatch), one out-of-band confirm — then the
+  forward-only key line and a deny-by-default fleet link whose petname IS the
+  peer's handle, so both sides' socket names agree by construction. First
+  contact honestly reports "transport pending" and prints the counter-code
+  that closes the loop. Reach their agents as `<agent>@<handle>` once they
+  `grant` you; a re-key of a bound handle is always refused, never silent.
+- **Grants harden with it**: the outbound return-path auto-grant is now TTL'd
+  (`HOMI_AUTOGRANT_TTL`, default 7 days, refreshed per send) instead of
+  permanent; grants pin the key fingerprint they were made to; foreign proxy
+  minting is capped per user (`HOMI_PROXY_CAP`). Trust verbs (`init`, `pair`,
+  `connect`, `grant`, `federate`, `link`) remain human-only CLI — never MCP.
+
+```sh
+communicate homi init --handle aadarwal        # claim yourself, once
+communicate homi pair aadarwal@aadarshs-mac-air-2   # enroll YOUR laptop (measured)
+communicate homi connect --invite              # hand the code to a collaborator
+communicate homi connect @peer --code 'homi1…' # accept theirs (verified, pinned)
+communicate homi grant peer gds-agent          # share exactly one agent
+communicate homi ask librarian@peer "REQUEST fdtd sweep…"   # cross-user ask
+```
+
+Tests (315 checks, all green): `test-homi-core.sh` 49 · `test-homi-ask.sh` 10 ·
+`test-homi-link.sh` 24 · `test-homi-seat.sh` 12 · `test-homi-seat-link.sh` 9 ·
+`test-homi-spawn.sh` 18 · `test-homi-mcp.sh` 10 · `test-homi-fleet.sh` 22 ·
+`test-homi-move.sh` 21 · `test-homi-workspace.sh` 18 · `test-homi-card.sh` 6 ·
+`test-homi-user.sh` 33 · `test-homi-pair.sh` 23 · `test-homi-connect.sh` 28 ·
+`test-homi-npx.sh` 15 · unit 9 · plist-unit 5 (+ `test-homi-boxed.sh` 14 and
+`test-homi-persist.sh` 6, container/launchd).
 
 ## Safety model
 
