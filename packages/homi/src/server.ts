@@ -95,8 +95,12 @@ const TOOLS: Tool[] = [
     name: "claim",
     description:
       "Claim a durable identity on this device: a stable socket, a sweep-proof roster entry, and a mailbox that survives the process behind it.",
-    schema: { name: z.string() },
-    run: (a) => call({ op: "claim", name: a.name }),
+    schema: {
+      name: z.string(),
+      cwd: z.string().optional().describe("the directory this identity works in — recorded with its git ref"),
+      worktree: z.boolean().optional().describe("create a dedicated git worktree + branch for this agent"),
+    },
+    run: (a) => call({ op: "claim", name: a.name, cwd: a.cwd, worktree: !!a.worktree }, { timeoutMs: 90_000 }),
   },
   {
     name: "release",
@@ -165,6 +169,7 @@ const TOOLS: Tool[] = [
       cli: z.enum(["claude", "codex"]).optional(),
       cmd: z.string().optional().describe("raw command, if not using cli"),
       cwd: z.string().optional(),
+      worktree: z.boolean().optional().describe("create a dedicated git worktree + branch for this agent"),
     },
     run: (a) => {
       let cmd = a.cmd || (a.cli === "codex" ? (process.env.HOMI_CODEX_CMD || "codex") : (process.env.HOMI_CLAUDE_CMD || "claude"));
@@ -173,7 +178,9 @@ const TOOLS: Tool[] = [
       // held-message dialog — scoped to this agent, never the user's settings.
       if (adopt && !cmd.includes("crossSessionInbound"))
         cmd += " --settings '" + JSON.stringify({ crossSessionInbound: "accept" }) + "'";
-      return call({ op: "spawn", name: a.name, cmd, cwd: a.cwd, adopt }, { timeoutMs: 60_000 });
+      return call({ op: "spawn", name: a.name, cmd, cwd: a.cwd, adopt,
+                    cli: a.cli, worktree: !!a.worktree },
+                  { timeoutMs: 90_000 });
     },
   },
   {
@@ -244,10 +251,13 @@ const TOOLS: Tool[] = [
       fork: z.boolean().optional().describe("copy instead of move (origin keeps its claim)"),
       spawn: z.boolean().optional().describe("resume it in a seat on arrival"),
       dry_run: z.boolean().optional(),
+      allow_missing_workspace: z.boolean().optional().describe(
+        "override the default refusal when the target device has no workspace at the recorded path — proceeds anyway, with the agent arriving with a memory of a repo that is not there"),
     },
     run: (a) =>
       call({ op: "move", name: a.name, device: a.device, as: a.as,
-             fork: !!a.fork, spawn: !!a.spawn, dry_run: !!a.dry_run },
+             fork: !!a.fork, spawn: !!a.spawn, dry_run: !!a.dry_run,
+             allow_missing_workspace: !!a.allow_missing_workspace },
            { timeoutMs: 180_000 }),
   },
   {
@@ -276,6 +286,24 @@ const TOOLS: Tool[] = [
       const st = await call({ op: "status" });
       return { device: st?.self?.device, links: st?.links || {} };
     },
+  },
+  {
+    name: "describe",
+    description:
+      "Set your own card: what you are and what peers should ask you for. Other agents read cards to choose whom to message, so be specific and honest. Derived cards are a first guess — replace yours the first time you know better.",
+    schema: {
+      name: z.string().describe("the identity to describe (usually your own)"),
+      what: z.string().optional(),
+      ask_me_for: z.string().optional(),
+    },
+    run: (a) => call({ op: "describe", name: a.name, what: a.what, ask_me_for: a.ask_me_for }),
+  },
+  {
+    name: "restart",
+    description:
+      "Bring a spawned agent back using its supervision record (the command, cli and cwd captured at spawn). Use when a seat died or the agent is wedged; it does not lose the mailbox.",
+    schema: { name: z.string() },
+    run: (a) => call({ op: "restart", name: a.name }, { timeoutMs: 60_000 }),
   },
 ];
 
@@ -306,6 +334,19 @@ consult asks another model one question. move relocates an agent (transcript + m
 
 WHEN YOU ARE BLOCKED on a decision only the human can make, call notify with a real
 reason — do not stall silently.
+
+YOUR IDENTITY HAS FOUR PARTS, and you can fill two of them in:
+• workspace — the directory and git ref you work on. Set it when you are created
+  (spawn/claim take cwd); the fabric records the commit so you can be restarted
+  or relocated honestly.
+• card — one line saying what you ARE and what to ask you for. It is derived from
+  your workspace when you are created; if it is wrong or empty, fix it with
+  describe. This is how other agents find you: they read cards to decide whom to
+  message before they know how. A good card is specific ("proof automation over
+  the PhysLean corpus; ask me for tactic suggestions and proof state"), not
+  generic ("a helpful assistant").
+The other two — place (where you run) and surface (your terminal, if any) — are
+measured for you; never assert them.
 
 Not exposed here on purpose: federation, grants, and linking are human trust decisions
 made on the CLI, never by an agent.`;

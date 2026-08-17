@@ -35,6 +35,17 @@ if (instr && /DURABLE IDENTITY/.test(instr) && /ESCAPE HATCH/.test(instr))
   ok("server sends orientation instructions on connect");
 else bad("no/short instructions: " + String(instr).slice(0, 80));
 
+// The card is agent-authored, so the orientation must teach it.
+if (instr && /describe/.test(instr) && /workspace/i.test(instr))
+  ok("instructions teach the card and the workspace");
+else bad("instructions omit card/workspace guidance");
+
+// The new verbs must be reachable.
+const names2 = (await client.listTools()).tools.map((t) => t.name);
+if (names2.includes("describe") && names2.includes("restart"))
+  ok("describe + restart are exposed as tools");
+else bad("missing describe/restart: " + names2.join(","));
+
 // 2. claim + send via MCP tools -> mail lands in the daemon's store.
 await client.callTool({ name: "claim", arguments: { name: "mcpdemo" } });
 const sent = await client.callTool({
@@ -55,6 +66,26 @@ const ag = await client.callTool({ name: "agents_list", arguments: {} });
 const ares = JSON.parse(ag.content[0].text);
 if ((ares.agents || []).some((a) => a.name === "mcpdemo")) ok("agents_list shows the claimed identity");
 else bad("agents_list missing mcpdemo");
+
+// 5. describe (MCP) authors the card for real: what/ask_me_for land, derived flips false.
+await client.callTool({
+  name: "describe",
+  arguments: { name: "mcpdemo", what: "an MCP smoke-test fixture", ask_me_for: "nothing, I am a test" },
+});
+const ag2 = await client.callTool({ name: "agents_list", arguments: {} });
+const ares2 = JSON.parse(ag2.content[0].text);
+const described = (ares2.agents || []).find((a) => a.name === "mcpdemo");
+const card = described && described.card;
+if (card && card.what === "an MCP smoke-test fixture" && card.ask_me_for === "nothing, I am a test" && card.derived === false)
+  ok("describe tool authors the card and clears derived");
+else bad("describe tool did not update the card: " + JSON.stringify(card));
+
+// 6. restart on an identity with no supervision record fails CLEANLY (ok:false), not a thrown/isError.
+const rs = await client.callTool({ name: "restart", arguments: { name: "mcpdemo" } });
+const rres = JSON.parse(rs.content[0].text);
+if (rs.isError !== true && rres.ok === false && /supervision/.test(rres.err || ""))
+  ok("restart tool fails cleanly with no supervision record");
+else bad("restart tool: " + JSON.stringify(rs));
 
 await client.close();
 console.log(`\npass=${pass} fail=${fail}`);
