@@ -48,6 +48,17 @@ c=json.load(open(sys.argv[1]))["bare"]["card"]
 assert c is not None and "what" in c, c
 PY
 
+echo "== a boxed claim with a workspace derives a card too (mirrors the regular branch)"
+BOXPROJ="$T/boxything"; mkdir -p "$BOXPROJ"
+printf '# BoxedThing\n\nA boxed agent workspace.\n' > "$BOXPROJ/AGENTS.md"
+"$COMM" homi claim boxything --boxed --cwd "$BOXPROJ" >/dev/null 2>&1
+python3 - "$ID" <<'PY' && ok "boxed claim derives a card (present, non-empty, derived:true)" || bad "boxed card derivation"
+import json,sys
+c=json.load(open(sys.argv[1]))["boxything"]["card"]
+assert c and c["derived"] is True, c
+assert c["what"] and "BoxedThing" in c["what"], c
+PY
+
 echo "== the roster shows the card"
 "$COMM" homi agents --json 2>/dev/null | python3 -c '
 import json,sys
