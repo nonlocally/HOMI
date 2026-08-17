@@ -60,6 +60,13 @@ for f in "$B_SESS"/*.json; do
   grep -q '"name":"tester"' "$f" 2>/dev/null && grep -q '"version":"communicate-homi"' "$f" 2>/dev/null && { tside="$f"; break; }
 done
 if [ -n "$tside" ]; then ok "B planted proxy sidecar"; else bad "B planted proxy sidecar"; fi
+if python3 - "$B_STATE/homi/identities.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+p = d["tester"]["place"]
+assert p == {"kind": "remote", "device": "alpha"}, p
+PY
+then ok "proxy place is remote, not fabricated local"; else bad "proxy place honesty"; fi
 
 echo "== reply routing (proxy -> link -> auto-claimed mailbox)"
 python3 "$HERE/lib/cc_peer.py" send --to "$B_SOCKS/homi-tester.sock" --text "reply back" \

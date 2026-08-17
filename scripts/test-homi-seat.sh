@@ -77,6 +77,27 @@ sleep 0.5
 st="$("$COMM" homi seat state "$SEAT" 2>/dev/null)"
 if [ "$st" = "dead" ]; then ok "killed seat reads dead"; else bad "dead detection (got $st)"; fi
 
+echo "== the surface is measured, never asserted"
+"$COMM" homi claim surf >/dev/null 2>&1
+S2="$("$COMM" homi seat spawn 'bash --norc --noprofile' 2>/dev/null)"
+"$COMM" homi seat bind "$S2" surf >/dev/null 2>&1
+sleep 1
+"$COMM" homi agents --json 2>/dev/null | python3 -c '
+import json,sys
+a={x["name"]:x for x in json.load(sys.stdin)["agents"]}
+s=a["surf"]["surface"]
+assert s and s["driver"]=="tmux" and s["state"] in ("idle","busy","booting"), s
+' && ok "a live seat reports a measured surface" || bad "surface measurement"
+
+"$COMM" homi seat kill "$S2" >/dev/null 2>&1
+sleep 1
+"$COMM" homi agents --json 2>/dev/null | python3 -c '
+import json,sys
+a={x["name"]:x for x in json.load(sys.stdin)["agents"]}
+s=a["surf"]["surface"]
+assert s["state"]=="dead", s
+' && ok "a dead seat reports dead, not a stale handle" || bad "dead surface honesty"
+
 "$COMM" homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

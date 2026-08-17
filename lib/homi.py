@@ -761,6 +761,19 @@ class Homi:
             self._seat = homi_seat.SeatDriver(log=self.log)
         return self._seat
 
+    def _measure_surface(self, seat):
+        """The roster's surface field: a live tmux measurement, or None -- never
+        a stored handle echoed back as fact. Guarded so a missing tmux (or any
+        other measurement failure) degrades status, never breaks it."""
+        if not seat:
+            return None
+        try:
+            return self._seat_drv().measure(seat)
+        except Exception as e:
+            self.log("surface measure failed:", seat, e)
+            return {"driver": "tmux", "handle": seat, "state": "unknown",
+                    "measured_at": time.time()}
+
     def _seat_target_device(self, sub, req):
         """A seat may be addressed <device>:<seat> (or spawned with args.device).
         Returns (device_or_None, rewritten_req) with the device stripped."""
@@ -1005,19 +1018,26 @@ class Homi:
         st = self.build_status()
         # build_status()'s derived roster view doesn't carry "card" (it wasn't
         # a routing/liveness fact); pull it straight from self.identities in
-        # one short-held snapshot rather than growing that view.
+        # one short-held snapshot rather than growing that view. "surface" is
+        # measured fresh from that same snapshot's seat -- NOT read off build_
+        # status()'s own idents entry -- so this stays correct even if that
+        # view's shape changes again later; the measurement (a tmux shellout)
+        # happens below, outside the lock, same as everything else here.
         with self.mu:
-            cards = {n: e.get("card") for n, e in self.identities.items()}
+            extra = {n: {"card": e.get("card"), "seat": e.get("seat")}
+                     for n, e in self.identities.items()}
         agents = []
         for n, e in sorted((st.get("identities") or {}).items()):
             route = e.get("route") or {}
+            ex = extra.get(n) or {}
             agents.append({
                 "name": n, "kind": e.get("kind", "local"),
                 "home": e.get("home"),
                 "state": route.get("state"), "provenance": route.get("provenance"),
                 "undelivered": (e.get("inbox") or {}).get("undelivered", 0),
                 "seat": e.get("seat"),
-                "card": cards.get(n),
+                "surface": self._measure_surface(ex.get("seat")),
+                "card": ex.get("card"),
             })
         return {"ok": True, "device": st["self"]["device"], "agents": agents}
 
@@ -1601,6 +1621,13 @@ class Homi:
                 return None
             ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
                    "kind": "proxy", "home": device}
+            # Shaped like every other identity -- blank axes, then the one axis
+            # a proxy actually knows at birth: it is BY DEFINITION remote, home
+            # at `device`. Without this, _persist_identities's fallback (no
+            # "place" key here) derives place:{"kind":"local"} for an identity
+            # that is never local -- the same class of lie as an unmeasured seat.
+            ent.update(self._blank_axes())
+            ent["place"] = {"kind": "remote", "device": device}
             with self.mu:
                 self.identities[name] = ent
             self._plant(name)
@@ -2257,6 +2284,7 @@ class Homi:
                               "provenance": "boxed-probed", "session": None},
                     "inbox": {"count": count, "undelivered": max(0, count - cur)},
                     "seat": seat,
+                    "surface": self._measure_surface(seat),
                 }
                 continue
             cands = smap.get(n) or []
@@ -2283,6 +2311,7 @@ class Homi:
                                       if sess else None)},
                 "inbox": {"count": count, "undelivered": max(0, count - cur)},
                 "seat": seat,
+                "surface": self._measure_surface(seat),
             }
         with self.mu:
             linkents = {d: dict(e) for d, e in self.links.items()}

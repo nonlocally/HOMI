@@ -178,6 +178,21 @@ class SeatDriver:
         return ("Welcome to" in head or "· resume" in self._title(seat)
                 or "Choose" in head and "resume" in head.lower())
 
+    # -- surface: the seat, measured (never asserted) --------------------------
+    def measure(self, seat):
+        """The surface axis, measured. Never assert a handle you have not just
+        checked -- after a reboot the tmux server is gone and every stored pane
+        id is a lie."""
+        if not seat:
+            return None
+        try:
+            st = self.state(seat)
+        except SeatError as e:
+            st = "dead"
+            self.log("measure failed for", seat, e)
+        return {"driver": "tmux", "handle": seat, "state": st,
+                "measured_at": time.time()}
+
     # -- send discipline -------------------------------------------------------
     def send(self, seat, text):
         if not self._pane_exists(seat):
