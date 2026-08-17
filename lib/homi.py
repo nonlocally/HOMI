@@ -38,6 +38,7 @@ Env: COMM_STATE, HOMI_SOCK_DIR, HOMI_SESSIONS_DIR, HOMI_SELF, HOMI_TICK, HOMI_PR
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import stat
@@ -2189,11 +2190,23 @@ class Homi:
 
     def _recv_envelope(self, device, env):
         kind = env.get("kind")
-        if env.get("v") != 1 or kind not in ("m", "r", "seat"):
+        if env.get("v") != 1 or kind not in ("m", "r", "seat", "ping"):
             return {"ok": False, "err": "bad envelope"}
         mid = env.get("msg_id") or ""
         if not mid:
             return {"ok": False, "err": "bad envelope"}
+        if kind == "ping":
+            # The measured handshake (link-check / pair). Stateless by design:
+            # no dedup entry, no claim, no mailbox — the ack IS the measurement,
+            # and it names this side from the wire, so device names are read
+            # from daemons, never typed. Answered before the grant logic: a
+            # peer holding the transport can already probe the socket at
+            # connect level, so the pong reveals no name it couldn't infer.
+            with self.mu:
+                u = self.user
+            return {"ok": True, "ack": mid, "pong": True,
+                    "device": self.device, "version": HOMI_VERSION,
+                    "user": (u or {}).get("handle")}
         if kind == "seat":
             # A seat op driven from a linked device. Opt-in per link: the far
             # device may drive our seats only if this link was granted
@@ -2295,6 +2308,34 @@ class Homi:
         if ent.get("sock"):
             return ent["sock"]
         return self._ensure_ssh(device)
+
+    def _do_link_check(self, device):
+        """Prove a link works, with a number: one synchronous ping envelope,
+        wall-clock measured. An old far daemon rejects the ping kind — that is
+        still a MEASURED transport (the refusal travelled the wire), reported
+        honestly as legacy_peer instead of failure."""
+        with self.mu:
+            known = device in self.links
+        if not known:
+            return {"ok": False, "err": "device not linked: %s" % device}
+        env = {"v": 1, "kind": "ping", "msg_id": os.urandom(8).hex(),
+               "ts": time.time()}
+        t0 = time.time()
+        try:
+            endpoint = self._link_endpoint(device)
+            resp = self._send_envelope_result(endpoint, env, timeout=10.0)
+        except Exception as e:
+            return {"ok": False, "err": "transport: %s" % e}
+        rtt = int((time.time() - t0) * 1000)
+        if resp.get("ok") and resp.get("pong"):
+            return {"ok": True, "device": device, "rtt_ms": rtt,
+                    "far_device": resp.get("device"),
+                    "far_version": resp.get("version"),
+                    "far_user": resp.get("user")}
+        if not resp.get("ok"):
+            return {"ok": True, "device": device, "rtt_ms": rtt,
+                    "transport": "up", "legacy_peer": True}
+        return {"ok": False, "err": "unexpected ack: %r" % resp}
 
     def _send_envelope_result(self, endpoint, env, timeout=10.0):
         """Send an envelope and return the FULL ack dict (for synchronous
@@ -2582,6 +2623,8 @@ class Homi:
                                     req.get("text", ""),
                                     float(req.get("timeout") or 120),
                                     adopt=bool(req.get("adopt")))
+        if op == "link-check":
+            return self._do_link_check(req.get("device", ""))
         if op == "link":
             return self._do_link(req.get("device", ""), addr=req.get("addr"),
                                  sock=req.get("sock"),
@@ -2902,6 +2945,348 @@ def _authkeys_remove(peer_fleet):
     with open(p, "w") as f:
         f.writelines(kept)
     return "removed"
+
+
+def _pair_ssh(addr, cmd, timeout=25):
+    """One far-host command over batch ssh (never prompts). Returns (rc, out)."""
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                            addr, cmd], capture_output=True, text=True,
+                           timeout=timeout)
+        return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return 255, "ssh: %s" % e
+
+
+def _cli_pair(args):
+    """homi pair <user@host> — enroll another of YOUR devices, one-sided.
+
+    The step order kills the recorded onboarding pains in order of pain:
+    reachability is probed (never assumed), the far kernel is staged/upgraded
+    from THIS install's own files (pair is also the fleet's upgrade vehicle —
+    a KeepAlive'd daemon never restarts itself), device names are read from
+    the daemons (never typed — a mistyped petname queues mail forever), links
+    are created on BOTH sides, the handle is synced, and the result is a
+    measured round trip in each direction: an honest pass/fail, not
+    "linked, hope".
+
+    Test hook: HOMI_PAIR_FAR_HOME isolates every far-side path under one
+    directory and switches transport to direct sockets (same host), so the
+    whole orchestration runs against ssh localhost without touching a real
+    HOME or launchd.
+    """
+    pos = [a for a in args if not a.startswith("--")]
+    flagvals = set()
+    for f in ("--name", "--addr-me"):
+        if f in args and args.index(f) + 1 < len(args):
+            flagvals.add(args[args.index(f) + 1])
+    pos = [a for a in pos if a not in flagvals]
+    if not pos:
+        sys.stderr.write("usage: communicate homi pair <user@host> [--name FARDEV] "
+                         "[--addr-me user@host] [--no-install] [--no-persist] "
+                         "[--force-handle] [--dry-run]\n")
+        return 1
+    addr = pos[0]
+
+    def flagval(flag):
+        if flag in args and args.index(flag) + 1 < len(args):
+            return args[args.index(flag) + 1]
+        return None
+
+    name_override = flagval("--name")
+    addr_me = flagval("--addr-me")
+    dry = "--dry-run" in args
+    no_install = "--no-install" in args
+    no_persist = "--no-persist" in args
+    force_handle = "--force-handle" in args
+    far_home = os.environ.get("HOMI_PAIR_FAR_HOME")
+
+    if dry:
+        print("pair %s — the plan (nothing will be run):" % addr)
+        print("  [1/7] ssh reachability      ssh -o BatchMode=yes %s true" % addr)
+        print("  [2/7] far daemon            probe `communicate homi` / the staged "
+              "kernel; stage v%s and start/upgrade if needed" % HOMI_VERSION)
+        print("  [3/7] device names          read from BOTH daemons (never typed)")
+        print("  [4/7] link here -> there    link <far-device> --addr %s" % addr)
+        print("  [5/7] link there -> here    far side links back, or the exact fix is printed")
+        print("  [6/7] user sync             far daemon claims THIS user's handle")
+        print("  [7/7] round trips           link-check both directions, wall-clock measured")
+        return 0
+
+    fail = 0
+
+    # Far-side layout + env (the test hook redirects everything under one dir).
+    farenv = ""
+    far_state = None
+    if far_home:
+        far_state = "%s/state" % far_home
+        farenv = ("COMM_STATE=%s HOMI_SOCK_DIR=%s/socks HOMI_SESSIONS_DIR=%s/sess "
+                  "HOMI_SELF=%s HOMI_TICK=1 "
+                  % (shlex.quote(far_state), shlex.quote(far_home),
+                     shlex.quote(far_home), shlex.quote(name_override or "fardev")))
+        far_daemon_dir = "%s/daemon" % far_home
+    else:
+        far_daemon_dir = "~/.local/share/homi/daemon/%s" % HOMI_VERSION
+    far_daemon = far_daemon_dir + "/homi.py"
+
+    far_prefix = [None]  # "communicate" | "kernel"
+
+    def far_cli(verb_args, timeout=25):
+        if far_prefix[0] == "communicate":
+            return _pair_ssh(addr, "%scommunicate homi %s" % (farenv, verb_args),
+                             timeout)
+        return _pair_ssh(addr, "%spython3 %s call %s"
+                         % (farenv, far_daemon, verb_args), timeout)
+
+    def far_probe():
+        rc, out = _pair_ssh(addr, "%scommunicate homi status --json" % farenv)
+        if rc == 0 and out.lstrip().startswith("{"):
+            far_prefix[0] = "communicate"
+            return out
+        rc, out = _pair_ssh(addr, "%spython3 %s call status --json"
+                            % (farenv, far_daemon))
+        if rc == 0 and out.lstrip().startswith("{"):
+            far_prefix[0] = "kernel"
+            return out
+        return None
+
+    def far_start_nohup():
+        # Fallback/test start (no persistence): state dirs + a detached daemon.
+        st = far_state or "~/.local/state/communicate"
+        _pair_ssh(addr, "%smkdir -p %s/homi %s" % (
+            farenv, st, ("%s/sess %s/socks" % (shlex.quote(far_home),
+                                               shlex.quote(far_home)))
+            if far_home else ""))
+        _pair_ssh(addr, "%snohup python3 %s daemon >> %s/homi/daemon.log 2>&1 "
+                  "& sleep 0.3" % (farenv, far_daemon, st))
+
+    print("pair: enrolling %s as YOUR device" % addr)
+
+    # [1/7] reachability — measured, never assumed.
+    t0 = time.time()
+    rc, _out = _pair_ssh(addr, "true")
+    if rc != 0:
+        print("  [1/7] ssh reachability      FAILED (batch auth refused or host down)")
+        print("        fix: ssh-copy-id %s   — then re-run pair." % addr)
+        return 1
+    print("  [1/7] ssh reachability      ok (batch auth, %.1f s)" % (time.time() - t0))
+
+    # [2/7] far daemon: probe, stage, start, upgrade.
+    here_dir = os.path.dirname(os.path.abspath(__file__))
+    kernel_files = [os.path.join(here_dir, f) for f in
+                    ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py")]
+
+    def stage_kernel():
+        _pair_ssh(addr, "mkdir -p %s" % far_daemon_dir)
+        r = subprocess.run(["scp", "-q", "-o", "BatchMode=yes"] + kernel_files
+                           + ["%s:%s/" % (addr, far_daemon_dir)],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0
+
+    far_status_raw = far_probe()
+    if far_status_raw is None:
+        if no_install:
+            print("  [2/7] far daemon            ABSENT (--no-install given)")
+            print("        fix: run `npx @aadarwal/homi setup` (or clone the repo) on %s" % addr)
+            return 1
+        if not stage_kernel():
+            print("  [2/7] far daemon            FAILED to stage the kernel (scp)")
+            return 1
+        if not far_home:
+            _pair_ssh(addr, "ln -sfn ~/.local/share/homi/daemon/%s "
+                      "~/.local/share/homi/daemon/current" % HOMI_VERSION)
+        if no_persist or far_home:
+            far_start_nohup()
+        else:
+            rc, uname = _pair_ssh(addr, "uname")
+            if "Darwin" in uname:
+                # The same unit the fixed installer writes: PATH baked,
+                # COMM_STATE one level above the far state root.
+                plist = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                    '<plist version="1.0"><dict>\n'
+                    '  <key>Label</key><string>com.communicate.homi</string>\n'
+                    '  <key>ProgramArguments</key><array>\n'
+                    '    <string>/usr/bin/env</string><string>python3</string>'
+                    '<string>HOMEDIR/.local/share/homi/daemon/current/homi.py</string>'
+                    '<string>daemon</string>\n'
+                    '  </array>\n'
+                    '  <key>EnvironmentVariables</key><dict>\n'
+                    '    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>\n'
+                    '  </dict>\n'
+                    '  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n'
+                    '</dict></plist>\n')
+                _pair_ssh(addr, "mkdir -p ~/Library/LaunchAgents && "
+                          "printf %s > ~/Library/LaunchAgents/com.communicate.homi.plist"
+                          " && sed -i '' \"s|HOMEDIR|$HOME|\" "
+                          "~/Library/LaunchAgents/com.communicate.homi.plist && "
+                          "launchctl bootout gui/$(id -u) "
+                          "~/Library/LaunchAgents/com.communicate.homi.plist "
+                          ">/dev/null 2>&1; launchctl bootstrap gui/$(id -u) "
+                          "~/Library/LaunchAgents/com.communicate.homi.plist"
+                          % shlex.quote(plist), timeout=30)
+            else:
+                unit = ("[Unit]\nDescription=homi\n[Service]\n"
+                        "ExecStart=/usr/bin/env python3 %%h/.local/share/homi/"
+                        "daemon/current/homi.py daemon\nRestart=always\n"
+                        "[Install]\nWantedBy=default.target\n")
+                _pair_ssh(addr, "mkdir -p ~/.config/systemd/user && printf %s > "
+                          "~/.config/systemd/user/homi.service && "
+                          "systemctl --user daemon-reload && "
+                          "systemctl --user enable --now homi.service"
+                          % shlex.quote(unit), timeout=30)
+            far_start_nohup()  # belt-and-braces: measured status decides below
+        for _ in range(20):
+            far_status_raw = far_probe()
+            if far_status_raw:
+                break
+            time.sleep(0.5)
+        if far_status_raw is None:
+            print("  [2/7] far daemon            FAILED to start — check %s/homi/daemon.log on %s"
+                  % (far_state or "~/.local/state/communicate", addr))
+            return 1
+        print("  [2/7] far daemon            staged v%s and started" % HOMI_VERSION)
+    else:
+        try:
+            far_ver = (json.loads(far_status_raw).get("self") or {}).get("version")
+        except ValueError:
+            far_ver = None
+        if far_ver != HOMI_VERSION:
+            stage_kernel()
+            if not far_home:
+                _pair_ssh(addr, "ln -sfn ~/.local/share/homi/daemon/%s "
+                          "~/.local/share/homi/daemon/current" % HOMI_VERSION)
+            far_cli("stop")
+            time.sleep(1.5)
+            far_status_raw = far_probe()
+            if far_status_raw is None:
+                far_start_nohup()
+                for _ in range(10):
+                    far_status_raw = far_probe()
+                    if far_status_raw:
+                        break
+                    time.sleep(0.5)
+            if far_status_raw is None:
+                print("  [2/7] far daemon            upgrade FAILED — daemon did not come back")
+                return 1
+            print("  [2/7] far daemon            %s (stale) -> pushed kernel v%s, restarted"
+                  % (far_ver or "unversioned", HOMI_VERSION))
+        else:
+            print("  [2/7] far daemon            v%s (current)" % far_ver)
+
+    # [3/7] device names — from the daemons, never typed.
+    me = _call({"op": "user"})
+    mydev = me.get("device")
+    try:
+        fardev = (json.loads(far_status_raw).get("self") or {}).get("device")
+    except ValueError:
+        fardev = None
+    if not mydev or not fardev:
+        print("  [3/7] device names          FAILED to read (here: %s, there: %s)"
+              % (mydev, fardev))
+        return 1
+    if name_override and name_override != fardev and not far_home:
+        print("  [3/7] device names          note: --name %s ignored — the far daemon "
+              "calls itself %s (the wire wins)" % (name_override, fardev))
+    print("  [3/7] device names          here: %s   there: %s" % (mydev, fardev))
+    if mydev == fardev:
+        print("        FAILED: both daemons claim the same device name — set HOMI_SELF "
+              "on one and retry")
+        return 1
+
+    # [4/7] link here -> there (idempotent: an existing link with the same
+    # transport is kept).
+    links = _read_json(os.path.join(state_root(), "links.json"), {})
+    prior = links.get(fardev) or {}
+    if far_home:
+        transport = {"sock": "%s/homi/in/%s.sock" % (far_state, mydev)}
+        kept = prior.get("sock") == transport["sock"]
+    else:
+        transport = {"addr": addr}
+        kept = prior.get("addr") == addr
+    if kept:
+        print("  [4/7] link here -> there    kept (existed, transport unchanged)")
+    else:
+        r = _call(dict({"op": "link", "device": fardev}, **transport))
+        if not r.get("ok"):
+            print("  [4/7] link here -> there    FAILED: %s" % r.get("err"))
+            return 1
+        print("  [4/7] link here -> there    created (%s)"
+              % (transport.get("addr") or transport.get("sock")))
+
+    # [5/7] link there -> here.
+    my_addr = addr_me or ("%s@%s" % (getpass_user(), "localhost" if far_home else mydev))
+    if far_home:
+        back = "--sock %s" % shlex.quote(os.path.join(state_root(), "in",
+                                                      "%s.sock" % fardev))
+        rc = 0
+    else:
+        rc, _o = _pair_ssh(addr, "ssh -o BatchMode=yes -o ConnectTimeout=8 %s true"
+                           % shlex.quote(my_addr), timeout=20)
+        back = "--addr %s" % shlex.quote(my_addr)
+    if rc != 0:
+        print("  [5/7] reverse ssh there -> here  FAILED — that device cannot dial %s"
+              % my_addr)
+        print("        mail there->here will queue until you run, ON %s:" % addr)
+        print("          ssh-copy-id %s" % my_addr)
+        print("        everything else continues; re-run pair afterwards to finish.")
+        fail = 1
+    else:
+        rc2, out2 = far_cli("link %s %s" % (shlex.quote(mydev), back))
+        if rc2 == 0:
+            print("  [5/7] link there -> here    created (%s)" % my_addr)
+        else:
+            print("  [5/7] link there -> here    FAILED: %s" % out2)
+            fail = 1
+
+    # [6/7] user sync — the far device joins THIS person.
+    handle = (me.get("user") or {}).get("handle")
+    if not handle:
+        print("  [6/7] user sync             skipped (no local handle — claim one: "
+              "communicate homi init)")
+    else:
+        rc3, out3 = far_cli("init --handle %s%s"
+                            % (shlex.quote(handle),
+                               " --force" if force_handle else ""))
+        if rc3 == 0:
+            print("  [6/7] user sync             @%s written to the far user.json" % handle)
+        elif "already claimed" in out3:
+            print("  [6/7] user sync             REFUSED — far device is %s" % out3.strip())
+            print("        re-run with --force-handle to overwrite it.")
+            fail = 1
+        else:
+            print("  [6/7] user sync             FAILED: %s" % out3.strip())
+            fail = 1
+
+    # [7/7] round trips — the measured verdict.
+    fwd = _call({"op": "link-check", "device": fardev}, timeout=20)
+    if fwd.get("ok") and fwd.get("rtt_ms") is not None and not fwd.get("legacy_peer"):
+        fwd_line = "here->there %d ms" % fwd["rtt_ms"]
+    elif fwd.get("ok"):
+        fwd_line = "here->there transport up (legacy far kernel)"
+    else:
+        fwd_line = "here->there FAILED (%s)" % fwd.get("err")
+        fail = 1
+    rc4, out4 = far_cli("link %s --check --json" % shlex.quote(mydev))
+    rev_line = "there->here unverified"
+    if rc4 == 0:
+        try:
+            rev = json.loads(out4[out4.index("{"):])
+            if rev.get("ok") and rev.get("rtt_ms") is not None:
+                rev_line = "there->here %d ms" % rev["rtt_ms"]
+            elif rev.get("ok"):
+                rev_line = "there->here transport up"
+            else:
+                rev_line = "there->here FAILED (%s)" % rev.get("err")
+        except ValueError:
+            pass
+    print("  [7/7] round trip MEASURED   %s    %s" % (fwd_line, rev_line))
+
+    if not fail:
+        print("paired. Address its agents as <name>@%s; seats/move work once granted." % fardev)
+    return fail
 
 
 def _cli_federate(args):
@@ -3912,12 +4297,30 @@ def cli_call(argv):
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
+    if op == "pair":
+        return _cli_pair(args)
     if op == "federate":
         return _cli_federate(args)
     if op in ("link", "unlink"):
         if not args:
-            sys.stderr.write("usage: communicate homi %s <device> [--addr user@host] [--sock path]\n" % op)
+            sys.stderr.write("usage: communicate homi %s <device> [--addr user@host] [--sock path] [--check]\n" % op)
             return 1
+        if op == "link" and "--check" in args:
+            r = _call({"op": "link-check", "device": args[0]}, timeout=20)
+            if "--json" in args:
+                print(json.dumps(r, indent=1))
+            elif r.get("ok") and r.get("legacy_peer"):
+                print("link %s: transport up, %d ms — far daemon predates the "
+                      "measured handshake (upgrade it: homi pair)"
+                      % (args[0], r.get("rtt_ms", -1)))
+            elif r.get("ok"):
+                who = (", @%s" % r["far_user"]) if r.get("far_user") else ""
+                print("link %s: round trip %d ms (far: %s, v%s%s)"
+                      % (args[0], r.get("rtt_ms", -1), r.get("far_device"),
+                         r.get("far_version"), who))
+            else:
+                sys.stderr.write((r.get("err") or "link check failed") + "\n")
+            return 0 if r.get("ok") else 1
         req = {"op": op, "device": args[0]}
         if "--sock" in args:
             try:
