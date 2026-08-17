@@ -98,6 +98,52 @@ sleep 0.5
 new="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sup1"]["seat"])' "$ID")"
 [ -n "$new" ] && [ "$new" != "$old" ] && ok "restart produced a new live seat ($old -> $new)" || bad "restart ($old -> $new)"
 
+echo "== restart never kills a pane that is no longer this identity's"
+# tmux restarts pane ids at %0 when the tmux server does, so a STORED pane id
+# is not a fact — after a reboot the id on an identity can name a live pane
+# that now belongs to somebody else. Same shape here, deterministically: bind
+# k1's seat onto k2's live pane, then restart k1.
+# (`tmux display -t <dead pane>` exits 0 with EMPTY output, so liveness is the
+#  id coming back, never the exit status.)
+pane_alive(){ [ "$(tmux -L "$TMUXSOCK" display -p -t "$1" '#{pane_id}' 2>/dev/null)" = "$1" ]; }
+"$COMM" homi spawn k1 -- bash --norc --noprofile >/dev/null 2>&1
+k2out="$("$COMM" homi spawn k2 -- bash --norc --noprofile 2>/dev/null)"
+k2seat="${k2out##*-> }"
+"$COMM" homi seat bind "$k2seat" k1 >/dev/null 2>&1
+"$COMM" homi restart k1 >/dev/null 2>&1
+if pane_alive "$k2seat"; then
+  ok "restart left the other identity's live pane alone ($k2seat)"
+else bad "restart killed $k2seat — a pane bound to another identity"; fi
+python3 - "$ID" "$k2seat" <<'PY' && ok "k2 still holds its own seat" || bad "k2 lost its seat"
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["k2"]["seat"]==sys.argv[2], d["k2"]
+assert d["k1"]["seat"]!=sys.argv[2], d["k1"]
+PY
+
+echo "== restart retires the old seat only after the new one is bound"
+r2out="$("$COMM" homi spawn r2 -- bash --norc --noprofile 2>/dev/null)"
+r2old="${r2out##*-> }"
+"$COMM" homi restart r2 >/dev/null 2>&1
+r2new="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["r2"]["seat"])' "$ID")"
+if [ "$r2new" != "$r2old" ] && pane_alive "$r2new" && ! pane_alive "$r2old"; then
+  ok "the live old seat was retired once the new one existed ($r2old -> $r2new)"
+else bad "restart seat handover ($r2old -> $r2new)"; fi
+# The failed-respawn rollback lives in scripts/test-homi-restart-unit.py: tmux
+# cannot be made to fail a new-window on demand (it silently falls back to a
+# default cwd when the recorded one is gone).
+
+echo "== a successful restart refreshes spawned_at"
+"$COMM" homi spawn r1 -- bash --norc --noprofile >/dev/null 2>&1
+t0="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["r1"]["supervision"]["spawned_at"])' "$ID")"
+sleep 1.1
+"$COMM" homi restart r1 >/dev/null 2>&1
+python3 - "$ID" "$t0" <<'PY' && ok "spawned_at moved forward on restart" || bad "spawned_at is stale after restart"
+import json,sys
+t=json.load(open(sys.argv[1]))["r1"]["supervision"]["spawned_at"]
+assert t > float(sys.argv[2]), (t, sys.argv[2])
+PY
+
 "$COMM" homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

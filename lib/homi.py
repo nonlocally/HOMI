@@ -933,18 +933,47 @@ class Homi:
         ws = ent.get("workspace") or {}
         cwd = sup.get("cwd") or ws.get("path")
         old = ent.get("seat")
-        if old:
-            try:
-                self._do_seat("kill", {"seat": old})
-            except Exception as e:
-                self.log("restart: could not kill old seat", old, e)
+        # 1. MEASURE the old seat before deciding anything about it. A stored
+        #    pane id is not a fact: tmux restarts ids at %0 when its server
+        #    does, so after a reboot this id can name a live pane belonging to
+        #    somebody else. Kill only a seat we can still see is ours, and
+        #    never on "dead" (nothing there) or "unknown" (we could not look).
+        surf = self._measure_surface(old) if old else None
+        killable = bool(surf and surf.get("handle") == old
+                        and surf.get("state") not in ("dead", "unknown"))
+        if killable:
+            with self.mu:
+                others = [n for n, e in self.identities.items()
+                          if n != name and e.get("seat") == old]
+            if others:
+                killable = False
+                self.log("restart: seat", old, "is bound to", ",".join(others),
+                         "-- refusing to kill another identity's surface")
+        # 2. Spawn the replacement FIRST. Kill-before-spawn had no rollback: a
+        #    respawn that failed (the recorded cwd gone, tmux down) left the
+        #    agent with no surface at all AND ok:false. A failed restart must
+        #    never be worse than no restart.
         sp = self._do_seat("spawn", {"cmd": sup["cmd"], "cwd": cwd, "name": name})
         if not sp.get("ok"):
-            return {"ok": False, "err": "seat spawn: %s" % sp.get("err")}
+            return {"ok": False, "err": "seat spawn: %s" % sp.get("err"),
+                    "name": name, "seat": old, "kept_seat": bool(old)}
+        # 3. Bind the new seat, then retire the old one.
         self._do_seat_bind(sp["seat"], name)
+        killed = False
+        if killable:
+            try:
+                self._do_seat("kill", {"seat": old})
+                killed = True
+            except Exception as e:
+                self.log("restart: could not kill old seat", old, e)
+        with self.mu:
+            e = self.identities.get(name)
+            if e and isinstance(e.get("supervision"), dict):
+                e["supervision"]["spawned_at"] = time.time()
+        self._persist_identities()
         self.log("restarted", name, "on seat", sp["seat"])
         return {"ok": True, "name": name, "seat": sp["seat"],
-                "previous": old, "cmd": sup["cmd"]}
+                "previous": old, "previous_killed": killed, "cmd": sup["cmd"]}
 
     def _do_fan(self, n, cmd, prefix, cwd=None, adopt=False):
         if n < 1 or n > 32:
