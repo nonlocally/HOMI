@@ -83,7 +83,7 @@ cd /Users/aadarwal/src/aadarwal/communicate
 git ls-files registry/
 grep -n 'device:\|operator:\|<their-org>' registry/<their-agent>.md
 ```
-Expected: 6 tracked files; the the collaborator card discloses `<collaborator-host>`, `<collaborator-handle>`, `<their-org>/<their-repo>`.
+Expected: 6 tracked files; the collaborator card discloses `<collaborator-host>`, `<collaborator-handle>`, `<their-org>/<their-repo>`.
 
 - [ ] **Step 2: Delete the entries and the lying join**
 

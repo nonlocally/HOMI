@@ -107,7 +107,7 @@ the far inbox; the transcript resumed-able by `claude --resume <sid>` there.
   never shadow a local name); return-path auto-grant only for names YOU
   message outward; `control.token` gates the control socket once any fleet
   link exists (a forward-only peer can dial sockets but can't read files).
-- The forward-only key line (recovered from the collaborator collaboration, verified
+- The forward-only key line (recovered from the collaboration, verified
   against a throwaway sshd): `restrict,port-forwarding,command="/usr/bin/false"`
   — refuses exec/PTY; carries socket forwards; the grant is indivisible on
   OpenSSH 10.2 (documented honestly, bounded at other layers).
