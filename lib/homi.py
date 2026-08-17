@@ -124,6 +124,39 @@ def getpass_user():
         return "user"
 
 
+# The daemon's code version, surfaced in status so a stale running daemon is
+# detectable (a git pull or npm upgrade never restarts a KeepAlive'd daemon —
+# without this field nothing can even say the code on disk moved on).
+HOMI_VERSION = "2026.08.17"
+
+# A handle names the PERSON (the operator/user); every device and agent hangs
+# under it, and other fleets reach local agents as <agent>@<handle>. Handles
+# share the fleet-petname suffix namespace, so they keep the conservative
+# grammar (no dots/underscores — those stay legal in agent/device names).
+_HANDLE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
+
+
+def load_user(root):
+    """Read user.json — the persisted person record (the fleet.json the
+    crossfleet design specified and never built). Returns the dict, or None.
+    NEVER creates or repairs the file: the claim ceremony (homi init) is the
+    only writer. A missing/invalid record means degraded mode (cards carry
+    user: null, trust verbs refuse), not a silently regenerated identity —
+    lazy regeneration here is how one human quietly becomes two."""
+    p = os.path.join(root, "user.json")
+    try:
+        with open(p) as f:
+            u = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(u, dict):
+        return None
+    handle = u.get("handle") or ""
+    if not _HANDLE_RE.match(handle) or handle in Homi._RESERVED:
+        return None
+    return u
+
+
 def _tailscale_ip():
     try:
         out = subprocess.run(["tailscale", "ip", "-4"],
@@ -204,6 +237,9 @@ class Homi:
         # link exists). Both loaded/created in run().
         self.grants = {}
         self.control_token = ""
+        # The person this fabric belongs to (user.json) — None until the claim
+        # ceremony runs. Loaded in run(); user-set is the only writer.
+        self.user = None
         self.claim_mu = threading.RLock()   # serializes claim/proxy/release/rebind
         self.deliver_mu = {}                # name -> Lock (one drain per name)
         self.stop_ev = threading.Event()
@@ -1070,7 +1106,9 @@ class Homi:
                 "surface": e.get("surface"),
                 "card": cards.get(n),
             })
-        return {"ok": True, "device": st["self"]["device"], "agents": agents}
+        return {"ok": True, "device": st["self"]["device"],
+                "user": (st["self"].get("user") or {}).get("handle"),
+                "agents": agents}
 
     # -- move: relocate an agent-being to another device -------------------------
     #
@@ -1763,6 +1801,59 @@ class Homi:
         with self.mu:
             return any(e.get("kind") == "fleet" for e in self.links.values())
 
+    # -- the user (the person; fleet == user) -------------------------------------
+
+    def fleet_name(self):
+        """The operator's name on the wire, one precedence everywhere:
+        HOMI_FLEET env (the test hook) > user.json handle > OS username.
+        Every card/status call re-derives this — the handle is asserted by the
+        work itself, never copied around (the registry law)."""
+        env = os.environ.get("HOMI_FLEET")
+        if env:
+            return env
+        with self.mu:
+            u = self.user
+        if u and u.get("handle"):
+            return u["handle"]
+        return getpass_user()
+
+    def _do_user(self):
+        env = os.environ.get("HOMI_FLEET")
+        with self.mu:
+            u = dict(self.user) if self.user else None
+        source = "env" if env else ("user.json" if u else "default")
+        return {"ok": True, "user": u, "source": source,
+                "effective": self.fleet_name(),
+                "device": self.device, "version": HOMI_VERSION}
+
+    def _do_user_set(self, handle, display=None, force=False, via="cli"):
+        """The claim ceremony's write. The ONLY writer of user.json — a missing
+        record is degraded mode, never a trigger to regenerate one."""
+        if not _HANDLE_RE.match(handle or "") or handle in self._RESERVED:
+            return {"ok": False,
+                    "err": "invalid handle (want %s, not reserved)" % _HANDLE_RE.pattern}
+        with self.mu:
+            prev = dict(self.user) if self.user else None
+        if prev and prev.get("handle") != handle and not force:
+            return {"ok": False, "err": "already claimed as @%s "
+                    "(re-run with --force to change it)" % prev.get("handle")}
+        u = {"v": 1, "handle": handle,
+             # Same handle again = a touch-up (keep the claim time); a new
+             # handle is a new claim.
+             "created_at": (prev.get("created_at") if prev
+                            and prev.get("handle") == handle else time.time()),
+             "claimed_via": via}
+        if display:
+            u["display"] = display
+        elif prev and prev.get("handle") == handle and prev.get("display"):
+            u["display"] = prev["display"]
+        _atomic_write(os.path.join(self.root, "user.json"),
+                      json.dumps(u, indent=1))
+        with self.mu:
+            self.user = u
+        self.log("user: claimed @%s (via %s)" % (handle, via))
+        return {"ok": True, "user": u, "changed": prev != u}
+
     def _load_grants(self):
         gdir = self.path("grants")
         try:
@@ -1816,7 +1907,7 @@ class Homi:
         if not os.path.exists(priv):
             subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q",
                             "-f", priv, "-C", "homi/%s@%s" %
-                            (os.environ.get("HOMI_FLEET", getpass_user()), self.device)],
+                            (self.fleet_name(), self.device)],
                            check=True, capture_output=True)
         pub = ""
         try:
@@ -1843,7 +1934,8 @@ class Homi:
             return {"ok": False, "err": "fleet key: %s" % e}
         return {"ok": True, "card": {
             "v": 1, "kind": "homi-card",
-            "fleet": os.environ.get("HOMI_FLEET", getpass_user()),
+            "fleet": self.fleet_name(),
+            "user": (self.user or {}).get("handle"),
             "device": self.device,
             "addr": addr,
             "tailscale_ip": _tailscale_ip(),
@@ -2411,8 +2503,13 @@ class Homi:
                         "queue": q, "dead": dead, "last_ok": lst.get("last_ok"),
                         "last_err": lst.get("last_err"),
                         "in_sock": self.link_in_sock(d)}
+        with self.mu:
+            u = self.user
         return {"ok": True,
                 "self": {"device": self.device, "pid": self.pid,
+                         "user": ({"handle": u.get("handle"),
+                                   "display": u.get("display")} if u else None),
+                         "version": HOMI_VERSION,
                          "state_root": self.root, "sock_dir": self.sockdir,
                          "socks": socks},
                 "identities": idents,
@@ -2519,6 +2616,13 @@ class Homi:
             return {"ok": True, "grants": {f: sorted(s) for f, s in self.grants.items()}}
         if op == "card":
             return self._do_card()
+        if op == "user":
+            return self._do_user()
+        if op == "user-set":
+            return self._do_user_set(req.get("handle", ""),
+                                     display=req.get("display"),
+                                     force=bool(req.get("force")),
+                                     via=req.get("via") or "cli")
         if op == "unlink":
             return self._do_unlink(req.get("device", ""))
         if op == "stop":
@@ -2705,6 +2809,11 @@ class Homi:
         signal.signal(signal.SIGINT, self._on_signal)
         self.log("homi starting: device=%s pid=%d root=%s sockdir=%s"
                  % (self.device, self.pid, self.root, self.sockdir))
+        self.user = load_user(self.root)
+        if self.user:
+            self.log("user: @%s" % self.user.get("handle"))
+        else:
+            self.log("user: unclaimed (run `communicate homi init` to claim a handle)")
         self.control_token = self._ensure_control_token()
         self._load_grants()
         threading.Thread(target=self.control_server, daemon=True).start()
@@ -3270,7 +3379,10 @@ def _call(req, timeout=10.0):
 
 def _human_status(st):
     self_ = st.get("self", {})
-    out = ["homi @ %s (pid %s)" % (self_.get("device"), self_.get("pid"))]
+    u = self_.get("user") or {}
+    who = ("@%s, " % u["handle"]) if u.get("handle") else "unclaimed, "
+    out = ["homi @ %s (%sv%s, pid %s)" % (self_.get("device"), who,
+                                          self_.get("version"), self_.get("pid"))]
     for label, s in sorted((self_.get("socks") or {}).items()):
         out.append("  %-28s %-5s [%s]" % (label, s.get("state"), s.get("provenance")))
     idents = st.get("identities") or {}
@@ -3733,6 +3845,70 @@ def cli_call(argv):
         if r.get("ok"):
             print(json.dumps(r["card"], indent=1) if "--json" in args
                   else _encode_card(r["card"]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "user":
+        r = _call({"op": "user"})
+        if not r.get("ok"):
+            sys.stderr.write((r.get("err") or "failed") + "\n")
+            return 1
+        if "--json" in args:
+            print(json.dumps(r, indent=1))
+            return 0
+        u = r.get("user")
+        if u:
+            disp = (" (%s)" % u["display"]) if u.get("display") else ""
+            print("@%s%s — device %s, daemon v%s [source: %s]"
+                  % (u.get("handle"), disp, r.get("device"),
+                     r.get("version"), r.get("source")))
+        else:
+            print("unclaimed — no user on this fabric yet; the wire falls back "
+                  "to %r [%s]. Claim a handle: communicate homi init"
+                  % (r.get("effective"), r.get("source")))
+        return 0
+    if op == "init":
+        handle = display = None
+        force = "--force" in args
+        try:
+            if "--handle" in args:
+                handle = args[args.index("--handle") + 1]
+            if "--display" in args:
+                display = args[args.index("--display") + 1]
+        except IndexError:
+            sys.stderr.write("--handle/--display need a value\n")
+            return 1
+        if not handle and sys.stdin.isatty():
+            cur = _call({"op": "user"})
+            if (cur.get("user") or {}).get("handle") and not force:
+                print("already claimed as @%s (re-run with --force to change)"
+                      % cur["user"]["handle"])
+                return 0
+            print("Your handle names YOU — every device and agent here hangs "
+                  "under it,\nand other people reach your agents as "
+                  "<agent>@<handle>.\nLowercase letters, digits, hyphen; max "
+                  "32. This claim is local — no server involved.\nIf you "
+                  "already claimed a handle on another device, type the SAME "
+                  "one.")
+            try:
+                handle = input("  handle> ").strip().lstrip("@")
+                if display is None:
+                    display = input("  display name (optional)> ").strip() or None
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 1
+        if not handle:
+            sys.stderr.write("usage: communicate homi init --handle H "
+                             "[--display NAME] [--force]\n")
+            return 1
+        r = _call({"op": "user-set", "handle": handle.lstrip("@"),
+                   "display": display, "force": force, "via": "cli"})
+        if r.get("ok"):
+            u = r.get("user") or {}
+            print("claimed @%s%s — user.json written; the handle now rides "
+                  "every card and status"
+                  % (u.get("handle"), (" (%s)" % u["display"])
+                     if u.get("display") else ""))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1

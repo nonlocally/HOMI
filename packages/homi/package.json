@@ -20,6 +20,7 @@
   "scripts": {
     "vendor": "node scripts/vendor.mjs",
     "build": "node scripts/vendor.mjs && tsc",
+    "test": "node test/plist-unit.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {
