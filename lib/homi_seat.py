@@ -62,7 +62,14 @@ _SECRETS = [
 
 
 class SeatError(Exception):
-    pass
+    """tmux answered, and the answer was an error about this seat."""
+
+
+class SeatUnavailable(SeatError):
+    """We could not ASK tmux at all — it timed out, or is not there. This is
+    the absence of a measurement, not a measurement of absence: a caller may
+    report "unknown", never "dead". (Subclasses SeatError so every existing
+    handler still catches it.)"""
 
 
 class SeatDriver:
@@ -83,7 +90,9 @@ class SeatDriver:
             r = subprocess.run(self._base + list(args), capture_output=True,
                                text=True, timeout=timeout)
         except (subprocess.TimeoutExpired, OSError) as e:
-            raise SeatError("tmux failed: %s" % e)
+            # Distinguishable on purpose: nothing here says anything about the
+            # SEAT, only about our ability to reach tmux.
+            raise SeatUnavailable("tmux did not answer: %s" % e)
         if check and r.returncode != 0:
             raise SeatError((r.stderr or "tmux error").strip())
         return r
@@ -187,6 +196,13 @@ class SeatDriver:
             return None
         try:
             st = self.state(seat)
+        except SeatUnavailable as e:
+            # tmux timed out or is not installed. We learned NOTHING about the
+            # seat -- publishing "dead" here would advertise what we never
+            # measured, and would make callers act on it (restart kills a seat
+            # it believes is gone).
+            st = "unknown"
+            self.log("measure could not reach tmux for", seat, e)
         except SeatError as e:
             st = "dead"
             self.log("measure failed for", seat, e)

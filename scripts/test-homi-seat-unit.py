@@ -3,6 +3,7 @@
 and the menu-block parser — no tmux needed, pure logic against captured screens."""
 import sys
 import os
+import subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import homi_seat
 
@@ -84,6 +85,51 @@ if not r.get("ok"):
     ok("deny fails closed when no deny option exists")
 else:
     bad("deny did not fail closed: %s" % r)
+
+
+# -- measure(): "I could not ask" is not "it is dead" ------------------------
+# A tmux that does not answer within the timeout used to surface as a MEASURED
+# state:"dead" — the surface axis asserting the seat is gone on no evidence.
+
+
+class Gone(homi_seat.SeatDriver):
+    """tmux answers, and its answer is that the pane does not exist."""
+
+    def _pane_exists(self, seat):
+        return False
+
+
+def measure_when_run_raises(exc, seat="%7"):
+    """Measure through the REAL _tmux with subprocess.run raising `exc` — the
+    conversion from OS failure to seat state is the thing under test."""
+    real = homi_seat.subprocess.run
+
+    def boom(*a, **k):
+        raise exc
+    homi_seat.subprocess.run = boom
+    try:
+        return homi_seat.SeatDriver().measure(seat)
+    finally:
+        homi_seat.subprocess.run = real
+
+
+m = measure_when_run_raises(subprocess.TimeoutExpired(cmd="tmux", timeout=10))
+if m and m["state"] == "unknown" and m["handle"] == "%7":
+    ok("a tmux timeout measures as unknown, never as dead")
+else:
+    bad("tmux timeout measured as %s" % (m,))
+
+m = measure_when_run_raises(OSError(2, "No such file or directory: 'tmux'"))
+if m and m["state"] == "unknown":
+    ok("an unreachable tmux measures as unknown")
+else:
+    bad("missing tmux measured as %s" % (m,))
+
+m = Gone().measure("%7")
+if m and m["state"] == "dead":
+    ok("a pane tmux says is gone still measures as dead")
+else:
+    bad("dead pane measured as %s" % (m,))
 
 print("\npass=%d fail=%d" % (pass_[0], fail_[0]))
 sys.exit(1 if fail_[0] else 0)
