@@ -239,6 +239,11 @@ class Homi:
         self.grants = {}       # fleet -> set of names (HUMAN grants, permanent)
         self.grant_auto = {}   # fleet -> {name: expiry} (return paths, TTL'd)
         self.grant_fp = {}     # fleet -> key fingerprint pinned at first grant
+        # One lock for all three grant maps: sends auto-grant on the control
+        # thread while link threads check _is_granted — an unlocked rebind of
+        # grant_auto measurably lost return paths (21/400 under concurrency).
+        # Order: grants_mu OUTER, self.mu inner (only _pin_grant_fp nests).
+        self.grants_mu = threading.Lock()
         self.control_token = ""
         # The person this fabric belongs to (user.json) — None until the claim
         # ceremony runs. Loaded in run(); user-set is the only writer.
@@ -355,8 +360,9 @@ class Homi:
         if len(path.encode()) > 100:
             raise OSError(
                 "socket path too long (%d bytes; sun_path caps at ~104): %s — "
-                "shorten the name, or set HOMI_SOCK_DIR=/tmp/homi-%d"
-                % (len(path.encode()), path, os.getuid()))
+                "shorten the name, or move its parent (HOMI_SOCK_DIR for "
+                "identity sockets, COMM_STATE for the state root; e.g. "
+                "/tmp/homi-%d)" % (len(path.encode()), path, os.getuid()))
         if os.path.exists(path):
             os.unlink(path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1305,7 +1311,7 @@ class Homi:
                 return {"ok": False, "err": "device not linked: %s" % dev}
             if (link_ent.get("kind") == "fleet"
                     and self._NAME_RE.match(from_name or "")
-                    and from_name not in self.grants.get(dev, set())):
+                    and not self._human_granted(dev, from_name)):
                 # Sending to a fleet opens YOUR return path: a TTL'd auto-grant
                 # for the sender identity to THAT fleet only, refreshed on each
                 # send, so their reply can land. Mail has a return address;
@@ -1754,7 +1760,10 @@ class Homi:
                 # M-3: a granted peer varying `from` mints a socket + sidecar +
                 # thread per name — cap it per fleet. Mail still lands with its
                 # attribution string; only the proxy ARTIFACTS stop being minted.
-                cap = int(os.environ.get("HOMI_PROXY_CAP") or 32)
+                try:
+                    cap = int(os.environ.get("HOMI_PROXY_CAP") or 32)
+                except ValueError:
+                    cap = 32
                 with self.mu:
                     n = sum(1 for k, e in self.identities.items()
                             if e.get("kind") == "proxy"
@@ -1903,25 +1912,27 @@ class Homi:
         except OSError:
             return
         now = time.time()
-        for f in files:
-            if f.endswith(".json"):
-                fleet = f[:-5]
-                data = _read_json(os.path.join(gdir, f), {})
-                self.grants[fleet] = set(data.get("granted") or [])
-                self.grant_auto[fleet] = {n: t for n, t
-                                          in (data.get("auto") or {}).items()
-                                          if isinstance(t, (int, float)) and t > now}
-                if data.get("fp"):
-                    self.grant_fp[fleet] = data["fp"]
+        with self.grants_mu:
+            for f in files:
+                if f.endswith(".json"):
+                    fleet = f[:-5]
+                    data = _read_json(os.path.join(gdir, f), {})
+                    self.grants[fleet] = set(data.get("granted") or [])
+                    self.grant_auto[fleet] = {
+                        n: t for n, t in (data.get("auto") or {}).items()
+                        if isinstance(t, (int, float)) and t > now}
+                    if data.get("fp"):
+                        self.grant_fp[fleet] = data["fp"]
 
     def _persist_grant(self, fleet):
+        """Caller MUST hold grants_mu (plain Lock, not reentrant)."""
         os.makedirs(self.path("grants"), exist_ok=True)
         now = time.time()
         auto = {n: t for n, t in self.grant_auto.get(fleet, {}).items() if t > now}
         self.grant_auto[fleet] = auto
         data = {"granted": sorted(self.grants.get(fleet, set()))}
         if auto:
-            data["auto"] = auto
+            data["auto"] = dict(auto)
         if self.grant_fp.get(fleet):
             data["fp"] = self.grant_fp[fleet]
         _atomic_write(self.path("grants", fleet + ".json"),
@@ -1930,7 +1941,7 @@ class Homi:
     def _pin_grant_fp(self, fleet):
         """First grant to a fleet pins the key it was made to. A petname later
         re-bound to a DIFFERENT key must not inherit the grants — the grant was
-        to a person (a key), not to a string."""
+        to a person (a key), not to a string. Caller holds grants_mu."""
         if fleet in self.grant_fp:
             return
         with self.mu:
@@ -1943,36 +1954,54 @@ class Homi:
             return {"ok": False, "err": "invalid fleet name"}
         if name and not self._NAME_RE.match(name):
             return {"ok": False, "err": "invalid identity name"}
-        self.grants.setdefault(fleet, set())
-        if name:
-            self.grants[fleet].add(name)
-        self._pin_grant_fp(fleet)
-        self._persist_grant(fleet)
-        return {"ok": True, "fleet": fleet, "granted": sorted(self.grants[fleet])}
+        with self.grants_mu:
+            self.grants.setdefault(fleet, set())
+            if name:
+                self.grants[fleet].add(name)
+            self._pin_grant_fp(fleet)
+            self._persist_grant(fleet)
+            granted = sorted(self.grants[fleet])
+        return {"ok": True, "fleet": fleet, "granted": granted}
 
     def _auto_grant(self, fleet, name):
         """The return path for an outbound send: TTL'd, refreshed per send,
         never a permanent human grant — one prompt-injected message must not
-        durably open an agent's mailbox to a foreign operator."""
-        ttl = float(os.environ.get("HOMI_AUTOGRANT_TTL") or 604800)
-        fresh = name not in self.grant_auto.get(fleet, {})
-        self.grant_auto.setdefault(fleet, {})[name] = time.time() + ttl
-        self._pin_grant_fp(fleet)
-        self._persist_grant(fleet)
+        durably open an agent's mailbox to a foreign operator. Persist only
+        when the expiry moved materially (>TTL/10), not one fsync per send."""
+        try:
+            ttl = float(os.environ.get("HOMI_AUTOGRANT_TTL") or 604800)
+        except ValueError:
+            ttl = 604800.0
+        with self.grants_mu:
+            old = self.grant_auto.get(fleet, {}).get(name)
+            self.grant_auto.setdefault(fleet, {})[name] = time.time() + ttl
+            if old is None or (time.time() + ttl - old) > ttl / 10.0:
+                self._pin_grant_fp(fleet)
+                self._persist_grant(fleet)
+            fresh = old is None
         if fresh:
             self.log("auto-granted return path:", name, "to fleet", fleet,
                      "(ttl %ds)" % int(ttl))
 
     def _do_revoke_grant(self, fleet, name):
-        self.grants.setdefault(fleet, set()).discard(name)
-        self.grant_auto.get(fleet, {}).pop(name, None)
-        self._persist_grant(fleet)
-        return {"ok": True, "fleet": fleet, "granted": sorted(self.grants[fleet])}
+        if not self._DEV_RE.match(fleet or ""):
+            return {"ok": False, "err": "invalid fleet name"}
+        with self.grants_mu:
+            self.grants.setdefault(fleet, set()).discard(name)
+            self.grant_auto.get(fleet, {}).pop(name, None)
+            self._persist_grant(fleet)
+            granted = sorted(self.grants[fleet])
+        return {"ok": True, "fleet": fleet, "granted": granted}
 
     def _is_granted(self, fleet, name):
-        if name in self.grants.get(fleet, set()):
-            return True
-        return self.grant_auto.get(fleet, {}).get(name, 0) > time.time()
+        with self.grants_mu:
+            if name in self.grants.get(fleet, set()):
+                return True
+            return self.grant_auto.get(fleet, {}).get(name, 0) > time.time()
+
+    def _human_granted(self, fleet, name):
+        with self.grants_mu:
+            return name in self.grants.get(fleet, set())
 
     def _link_fleet(self, device):
         """If the arrival link `device` is a fleet (cross-operator) link, return
@@ -2028,7 +2057,8 @@ class Homi:
             "tailscale_ip": _tailscale_ip(),
             "pubkey": pub,
             "fingerprint": fp,
-            "identity_file": self.path("keys", "fleet_ed25519"),
+            # (identity_file deliberately NOT here: the private key's absolute
+            # path — username included — is local business; no peer reads it.)
             # A peer's mail to us arrives on in/<their-fleet>.sock; we tell them
             # the directory so their invite carries the exact bind path.
             "inbound_dir": self.path("in"),
@@ -2255,14 +2285,20 @@ class Homi:
         data = _read_json(self.path("links.json"), {})
         for device, e in sorted(data.items()):
             e = e or {}
-            r = self._do_link(device, addr=e.get("addr"), sock=e.get("sock"),
-                              allow_seats=e.get("allow_seats", False),
-                              fleet=(e.get("kind") == "fleet"),
-                              remote_in=e.get("remote_in"),
-                              identity_file=e.get("identity_file"),
-                              key_fp=e.get("key_fp"),
-                              handle=e.get("handle"),
-                              card_v=e.get("card_v"))
+            try:
+                r = self._do_link(device, addr=e.get("addr"), sock=e.get("sock"),
+                                  allow_seats=e.get("allow_seats", False),
+                                  fleet=(e.get("kind") == "fleet"),
+                                  remote_in=e.get("remote_in"),
+                                  identity_file=e.get("identity_file"),
+                                  key_fp=e.get("key_fp"),
+                                  handle=e.get("handle"),
+                                  card_v=e.get("card_v"))
+            except OSError as e2:
+                # One bad link (e.g. an over-long socket path) must not take
+                # the whole restore — and the daemon — down with it.
+                self.log("re-link failed:", device, e2)
+                continue
             if not r.get("ok"):
                 self.log("re-link failed:", device, r.get("err"))
 
@@ -2309,11 +2345,14 @@ class Homi:
             return {"ok": False, "err": "bad envelope"}
         if kind == "ping":
             # The measured handshake (link-check / pair). Stateless by design:
-            # no dedup entry, no claim, no mailbox — the ack IS the measurement,
-            # and it names this side from the wire, so device names are read
-            # from daemons, never typed. Answered before the grant logic: a
-            # peer holding the transport can already probe the socket at
-            # connect level, so the pong reveals no name it couldn't infer.
+            # no dedup entry, no claim, no mailbox — the ack IS the measurement.
+            # Same-operator DEVICE links get the full pong (device names are
+            # read from daemons, never typed). A FLEET peer gets a bare pong:
+            # an ungranted foreign operator must not be able to poll device,
+            # version, and current handle forever — the same non-enumeration
+            # posture that token-gates `status`.
+            if self._link_fleet(device):
+                return {"ok": True, "ack": mid, "pong": True}
             with self.mu:
                 u = self.user
             return {"ok": True, "ack": mid, "pong": True,
@@ -2349,12 +2388,14 @@ class Homi:
         fleet = self._link_fleet(device)
         if fleet:
             # The grant fp pin: grants were made to a KEY, not to a petname
-            # string. A link re-bound to a different key answers with the same
-            # ambiguous error as no grant at all.
-            pin = self.grant_fp.get(fleet)
+            # string. A link re-bound to a different key — or stripped of its
+            # key while a pin exists — answers the same ambiguous error as no
+            # grant at all (fail closed).
+            with self.grants_mu:
+                pin = self.grant_fp.get(fleet)
             with self.mu:
                 lfp = (self.links.get(fleet) or {}).get("key_fp")
-            if pin and lfp and pin != lfp:
+            if pin and lfp != pin:
                 return {"ok": False, "err": "unknown or ungranted"}
         if fleet and not self._is_granted(fleet, to):
             # One deliberately-ambiguous error: never reveal which names exist.
@@ -2441,15 +2482,21 @@ class Homi:
             return {"ok": False, "err": "device not linked: %s" % device}
         env = {"v": 1, "kind": "ping", "msg_id": os.urandom(8).hex(),
                "ts": time.time()}
-        t0 = time.time()
         try:
             endpoint = self._link_endpoint(device)
+        except Exception as e:
+            return {"ok": False, "err": "transport: %s" % e}
+        # Clock starts AFTER the endpoint exists: _ensure_ssh can poll a cold
+        # tunnel up for seconds, and that is setup cost, not round-trip time.
+        t0 = time.time()
+        try:
             resp = self._send_envelope_result(endpoint, env, timeout=10.0)
         except Exception as e:
             return {"ok": False, "err": "transport: %s" % e}
         rtt = int((time.time() - t0) * 1000)
         if resp.get("ok") and resp.get("pong"):
             return {"ok": True, "device": device, "rtt_ms": rtt,
+                    "transport": "up",
                     "far_device": resp.get("device"),
                     "far_version": resp.get("version"),
                     "far_user": resp.get("user")}
@@ -2779,7 +2826,9 @@ class Homi:
         if op == "revoke-grant":
             return self._do_revoke_grant(req.get("fleet", ""), req.get("name", ""))
         if op == "grants":
-            return {"ok": True, "grants": {f: sorted(s) for f, s in self.grants.items()}}
+            with self.grants_mu:
+                snap = {f: sorted(s) for f, s in self.grants.items()}
+            return {"ok": True, "grants": snap}
         if op == "card":
             return self._do_card(signed=bool(req.get("signed")))
         if op == "user":
@@ -3164,11 +3213,15 @@ def _cli_pair(args):
             flagvals.add(args[args.index(f) + 1])
     pos = [a for a in pos if a not in flagvals]
     if not pos:
-        sys.stderr.write("usage: communicate homi pair <user@host> [--name FARDEV] "
+        sys.stderr.write("usage: communicate homi pair <user@host> "
                          "[--addr-me user@host] [--no-install] [--no-persist] "
                          "[--force-handle] [--dry-run]\n")
         return 1
     addr = pos[0]
+    if addr.startswith("-"):
+        # A leading dash would be consumed by ssh as an option (-oProxyCommand=…).
+        sys.stderr.write("bad address %r\n" % addr)
+        return 1
 
     def flagval(flag):
         if flag in args and args.index(flag) + 1 < len(args):
@@ -3331,11 +3384,23 @@ def _cli_pair(args):
             return 1
         print("  [2/7] far daemon            staged v%s and started" % HOMI_VERSION)
     else:
-        try:
-            far_ver = (json.loads(far_status_raw).get("self") or {}).get("version")
-        except ValueError:
-            far_ver = None
-        if far_ver != HOMI_VERSION:
+        def _far_version():
+            try:
+                return (json.loads(far_status_raw).get("self") or {}).get("version")
+            except (ValueError, AttributeError):
+                return None
+        far_ver = _far_version()
+        if far_ver != HOMI_VERSION and far_prefix[0] == "communicate":
+            # A repo-managed install runs $COMM_HOME/lib/homi.py — the staged
+            # kernel under ~/.local/share is a path it never reads, so pushing
+            # files would be theater. Say exactly what updates it.
+            print("  [2/7] far daemon            %s (stale) — a REPO install; "
+                  "staging cannot upgrade it" % (far_ver or "unversioned"))
+            print("        fix, on %s:  git -C <communicate checkout> pull && "
+                  "communicate homi stop   (KeepAlive respawns the new kernel)"
+                  % addr)
+            fail = 1
+        elif far_ver != HOMI_VERSION:
             stage_kernel()
             if not far_home:
                 _pair_ssh(addr, "ln -sfn ~/.local/share/homi/daemon/%s "
@@ -3353,10 +3418,28 @@ def _cli_pair(args):
             if far_status_raw is None:
                 print("  [2/7] far daemon            upgrade FAILED — daemon did not come back")
                 return 1
-            print("  [2/7] far daemon            %s (stale) -> pushed kernel v%s, restarted"
-                  % (far_ver or "unversioned", HOMI_VERSION))
+            # MEASURED: re-read the version — a respawn through an old unit
+            # can bring the old kernel straight back.
+            new_ver = _far_version()
+            if new_ver == HOMI_VERSION:
+                print("  [2/7] far daemon            %s (stale) -> pushed kernel "
+                      "v%s, restarted, VERIFIED" % (far_ver or "unversioned",
+                                                    HOMI_VERSION))
+            else:
+                print("  [2/7] far daemon            upgrade did NOT take "
+                      "(still %s) — its unit points at another kernel"
+                      % (new_ver or "unversioned"))
+                fail = 1
         else:
             print("  [2/7] far daemon            v%s (current)" % far_ver)
+    # One truth for step 7: is the far kernel current ENOUGH to be asked for a
+    # measured check (an old cli_call silently treats `link --check` as a
+    # plain re-link — a mutation, not a measurement).
+    try:
+        far_current = ((json.loads(far_status_raw).get("self") or {})
+                       .get("version") == HOMI_VERSION)
+    except (ValueError, AttributeError, TypeError):
+        far_current = False
 
     # [3/7] device names — from the daemons, never typed.
     me = _call({"op": "user"})
@@ -3442,32 +3525,50 @@ def _cli_pair(args):
             print("  [6/7] user sync             FAILED: %s" % out3.strip())
             fail = 1
 
-    # [7/7] round trips — the measured verdict.
+    # [7/7] round trips — the verdict. The word MEASURED prints only when BOTH
+    # legs carry a number; anything less is named for what it is and fails.
     fwd = _call({"op": "link-check", "device": fardev}, timeout=20)
-    if fwd.get("ok") and fwd.get("rtt_ms") is not None and not fwd.get("legacy_peer"):
-        fwd_line = "here->there %d ms" % fwd["rtt_ms"]
-    elif fwd.get("ok"):
-        fwd_line = "here->there transport up (legacy far kernel)"
+    fwd_ms = fwd.get("rtt_ms") if fwd.get("ok") else None
+    if fwd.get("ok") and fwd_ms is not None and not fwd.get("legacy_peer"):
+        fwd_line = "here->there %d ms" % fwd_ms
+    elif fwd.get("ok") and fwd.get("legacy_peer"):
+        fwd_line = ("here->there transport up (%d ms) — far kernel too old "
+                    "to pong" % fwd_ms)
+        fwd_ms = None
+        fail = 1
     else:
         fwd_line = "here->there FAILED (%s)" % fwd.get("err")
         fail = 1
-    rc4, out4 = far_cli("link %s --check --json" % shlex.quote(mydev))
-    rev_line = "there->here unverified"
-    if rc4 == 0:
-        try:
-            rev = json.loads(out4[out4.index("{"):])
-            if rev.get("ok") and rev.get("rtt_ms") is not None:
-                rev_line = "there->here %d ms" % rev["rtt_ms"]
-            elif rev.get("ok"):
-                rev_line = "there->here transport up"
-            else:
-                rev_line = "there->here FAILED (%s)" % rev.get("err")
-        except ValueError:
-            pass
-    print("  [7/7] round trip MEASURED   %s    %s" % (fwd_line, rev_line))
+    rev_ms = None
+    if not far_current:
+        # An old far cli_call silently treats `link --check` as a plain
+        # re-link (a mutation). Never ask it; never pretend.
+        rev_line = "there->here UNVERIFIED (far kernel too old to measure)"
+        fail = 1
+    else:
+        rc4, out4 = far_cli("link %s --check --json" % shlex.quote(mydev))
+        rev_line = "there->here UNVERIFIED"
+        if rc4 == 0:
+            try:
+                rev = json.loads(out4[out4.index("{"):])
+                if (rev.get("ok") and rev.get("rtt_ms") is not None
+                        and not rev.get("legacy_peer")):
+                    rev_ms = rev["rtt_ms"]
+                    rev_line = "there->here %d ms" % rev_ms
+                elif not rev.get("ok"):
+                    rev_line = "there->here FAILED (%s)" % rev.get("err")
+            except ValueError:
+                pass
+        if rev_ms is None:
+            fail = 1
+    header = ("round trip MEASURED " if (fwd_ms is not None and rev_ms is not None)
+              else "round trip          ")
+    print("  [7/7] %s %s    %s" % (header, fwd_line, rev_line))
 
     if not fail:
         print("paired. Address its agents as <name>@%s; seats/move work once granted." % fardev)
+    else:
+        print("pair INCOMPLETE — fix the lines above and re-run (pair is idempotent).")
     return fail
 
 
@@ -3491,7 +3592,7 @@ def _cli_connect(args):
     if not args:
         sys.stderr.write("usage: communicate homi connect --invite\n"
                          "       communicate homi connect @<handle> --code '<homi1....>' "
-                         "[--yes] [--allow-unsigned] [--no-authkey] [--direct]\n"
+                         "[--yes] [--allow-unsigned] [--no-authkey]\n"
                          "       communicate homi connect @<handle> --check\n")
         return 1
     if args[0] == "--invite":
@@ -3525,14 +3626,18 @@ def _cli_connect(args):
         blob = blob[len("homi1."):]
     try:
         card = _decode_card(blob)
+        if not isinstance(card, dict) or card.get("kind") != "homi-card":
+            raise ValueError("not a homi-card")
+        v = int(card.get("v") or 1)
     except Exception as e:
+        # A malformed code is a refusal, never a traceback.
         sys.stderr.write("bad code: %s\n" % e)
         return 1
-    if card.get("kind") != "homi-card":
-        sys.stderr.write("not a homi-card\n")
+    if "--direct" in rest and os.environ.get("HOMI_CONNECT_DIRECT") != "1":
+        # Test hook only: it dials the card's inbound_dir as a LOCAL path.
+        sys.stderr.write("--direct is the same-host test hook; set "
+                         "HOMI_CONNECT_DIRECT=1 if you really mean it\n")
         return 1
-
-    v = int(card.get("v") or 1)
     if v >= 2:
         okv, fp, err = _verify_card_v2(card)
         if not okv:
@@ -3628,7 +3733,7 @@ def _cli_connect(args):
     remote_in = os.path.join(idir, my_name + ".sock")
     req = {"op": "link", "device": handle, "fleet": True,
            "remote_in": remote_in,
-           "identity_file": mine["card"].get("identity_file"),
+           "identity_file": os.path.join(state_root(), "keys", "fleet_ed25519"),
            "key_fp": fp, "handle": handle, "card_v": v}
     if "--direct" in rest:
         req["sock"] = remote_in
@@ -3641,21 +3746,32 @@ def _cli_connect(args):
     print("• fleet link '%s' %s — petname is their handle; grants: deny-by-default"
           % (handle, "re-verified" if already else "created"))
 
+    def counter_code():
+        mineS = _call({"op": "card", "signed": True})
+        if mineS.get("ok"):
+            print("\nClose the loop — send THIS back to @%s:\n" % handle)
+            print("  homi1.%s\n" % _encode_card(mineS["card"]))
+            print("They run:  communicate homi connect @%s --code '<it>'" % my_name)
+
     chk = _call({"op": "link-check", "device": handle}, timeout=20)
     if chk.get("ok") and chk.get("rtt_ms") is not None and not chk.get("legacy_peer"):
         print("• transport MEASURED: their daemon answered in %d ms (round trip)"
               % chk["rtt_ms"])
         print("\nConnected. Share an agent when ready:  "
               "communicate homi grant %s <agent-name>" % handle)
+    elif chk.get("ok") and chk.get("legacy_peer"):
+        # The transport was MEASURED up; only the far kernel is old. Say what
+        # was measured — never report known state as unknown.
+        print("• transport MEASURED up (%d ms) — their kernel predates the "
+              "signed handshake; have them update homi." % chk.get("rtt_ms", -1))
+        counter_code()
+        print("\nShare an agent when ready:  communicate homi grant %s <agent-name>"
+              % handle)
     else:
         print("• transport pending — expected on first contact: their side "
               "hasn't linked back yet.\n  Mail you send will queue durably and "
               "deliver the moment they connect back.")
-        mineS = _call({"op": "card", "signed": True})
-        if mineS.get("ok"):
-            print("\nClose the loop — send THIS back to @%s:\n" % handle)
-            print("  homi1.%s\n" % _encode_card(mineS["card"]))
-            print("They run:  communicate homi connect @%s --code '<it>'" % my_name)
+        counter_code()
         print("\nShare an agent when ready:  communicate homi grant %s <agent-name>"
               % handle)
     return 0
@@ -3701,8 +3817,19 @@ def _cli_federate(args):
             sys.stderr.write("cannot read own card: %s\n" % mine.get("err"))
             return 1
         my_fleet = mine["card"]["fleet"]
+        # The fingerprint shown and stored is RECOMPUTED from the key this
+        # accept is about to install — never the card's own claim (a forged
+        # card can carry a victim's real fingerprint over an attacker's key).
+        real_fp = _card_fp(peer.get("pubkey"))
+        if not real_fp:
+            sys.stderr.write("refusing card: cannot fingerprint its key\n")
+            return 1
+        if peer.get("fingerprint") and peer["fingerprint"] != real_fp:
+            sys.stderr.write("refusing card: its claimed fingerprint does not "
+                             "match its key (tampering?)\n")
+            return 1
         sys.stderr.write("peer fleet=%s device=%s fingerprint=%s\n"
-                         % (peer.get("fleet"), peer.get("device"), peer.get("fingerprint")))
+                         % (peer.get("fleet"), peer.get("device"), real_fp))
         if not re.match(r"^[a-z0-9][a-z0-9._-]{0,63}$", peer_fleet):
             sys.stderr.write("bad peer-fleet name\n")
             return 1
@@ -3725,8 +3852,8 @@ def _cli_federate(args):
         remote_in = os.path.join(idir, my_fleet + ".sock")
         req = {"op": "link", "device": peer_fleet, "fleet": True,
                "addr": peer.get("addr"), "remote_in": remote_in,
-               "identity_file": mine["card"].get("identity_file"),
-               "key_fp": peer.get("fingerprint")}
+               "identity_file": os.path.join(state_root(), "keys", "fleet_ed25519"),
+               "key_fp": real_fp}
         r = _call(req)
         if r.get("ok"):
             print("federated with %s (fleet link). Grant identities with: "
@@ -4687,11 +4814,16 @@ def cli_call(argv):
                 print("link %s: transport up, %d ms — far daemon predates the "
                       "measured handshake (upgrade it: homi pair)"
                       % (args[0], r.get("rtt_ms", -1)))
-            elif r.get("ok"):
+            elif r.get("ok") and r.get("far_device"):
                 who = (", @%s" % r["far_user"]) if r.get("far_user") else ""
                 print("link %s: round trip %d ms (far: %s, v%s%s)"
                       % (args[0], r.get("rtt_ms", -1), r.get("far_device"),
                          r.get("far_version"), who))
+            elif r.get("ok"):
+                # A fleet peer answers a bare pong (no roster oracle for
+                # foreign operators) — the measurement is the whole story.
+                print("link %s: round trip %d ms (transport up)"
+                      % (args[0], r.get("rtt_ms", -1)))
             else:
                 sys.stderr.write((r.get("err") or "link check failed") + "\n")
             return 0 if r.get("ok") else 1

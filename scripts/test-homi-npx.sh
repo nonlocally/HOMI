@@ -24,8 +24,10 @@ cleanup() { "$COMM" homi stop >/dev/null 2>&1 || true; rm -rf "$T"; }
 trap cleanup EXIT
 
 echo "== build the package (vendored kernel = this checkout)"
-( cd "$PKG" && npm run build >/dev/null 2>&1 )
-if [ -f "$PKG/dist/cli.js" ]; then ok "dist/cli.js built"; else bad "dist/cli.js built"; exit 1; fi
+rm -f "$PKG/dist/cli.js"   # a stale dist must never masquerade as a build
+if ( cd "$PKG" && npm run build >/dev/null 2>&1 ) && [ -f "$PKG/dist/cli.js" ]; then
+  ok "dist/cli.js built (build exit 0)"
+else bad "dist/cli.js built"; exit 1; fi
 
 echo "== plist unit (P1/P2 pins)"
 if ( cd "$PKG" && node test/plist-unit.mjs >/dev/null 2>&1 ); then

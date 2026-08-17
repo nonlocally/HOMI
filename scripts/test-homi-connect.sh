@@ -10,6 +10,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMM="$HERE/bin/communicate"
 T="$(mktemp -d /tmp/homi-conn.XXXXXX)"
 mkdir -p "$T/a-sess" "$T/b-sess" "$T/ahome" "$T/bhome"
+export HOMI_CONNECT_DIRECT=1   # --direct (the same-host transport) is env-gated
 acomm(){ COMM_STATE="$T/a" HOMI_SOCK_DIR="$T/as" HOMI_SESSIONS_DIR="$T/a-sess" \
          HOMI_SELF=alice-dev HOMI_TICK=1 HOME="$T/ahome" "$COMM" "$@"; }
 bcomm(){ COMM_STATE="$T/b" HOMI_SOCK_DIR="$T/bs" HOMI_SESSIONS_DIR="$T/b-sess" \
@@ -109,7 +110,7 @@ else bad "device-link collision (got: $out)"; fi
 acomm homi unlink bob >/dev/null 2>&1
 out="$(acomm homi connect @bob --code "$BOBCODE" --yes --direct 2>&1)"
 if [ $? -eq 0 ]; then ok "counter-code accepted on alice (loop closed)"; else bad "loop close (got: $out)"; fi
-if printf '%s' "$out" | grep -qi "round trip\|ms"; then
+if printf '%s' "$out" | grep -q "round trip"; then
   ok "loop-closing side measures the transport"
 else bad "loop-closing side measures (got: $out)"; fi
 
@@ -177,9 +178,9 @@ else bad "auto-grant shape (got: $g)"; fi
 
 echo "== qualified names are first-class in wait (P19)"
 r="$(bcomm homi wait 'orchestrator@alice' --timeout 1 --json 2>/dev/null)"
-if printf '%s' "$r" | grep -q "invalid name"; then
-  bad "wait on a fleet-qualified proxy still rejected"
-else ok "wait on a fleet-qualified proxy is legal (timed out honestly)"; fi
+if [ "$(printf '%s' "$r" | jget err)" = "timeout" ]; then
+  ok "wait on a fleet-qualified proxy is legal (honest timeout, not a rejection)"
+else bad "wait on a fleet-qualified proxy (got: $r)"; fi
 
 echo "== per-user proxy cap (M-3)"
 bcomm homi stop >/dev/null 2>&1; sleep 0.5
@@ -208,7 +209,8 @@ bdead1="$(ls "$T/b/homi/out/alice/dead" 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$bdead1" -gt "$bdead0" ]; then
   ok "expired return path refused (reply dead-lettered on sender)"
 else bad "expired return path refused (dead $bdead0 -> $bdead1)"; fi
-if ! acomm homi inbox shortlived 2>/dev/null | grep -q "too late"; then
+slbox="$(acomm homi inbox shortlived 2>/dev/null)"
+if ! printf '%s' "$slbox" | grep -q "too late"; then
   ok "nothing landed after expiry"
 else bad "mail leaked through an expired auto-grant"; fi
 
@@ -234,9 +236,20 @@ adead0="$(ls "$T/a/homi/out/bob/dead" 2>/dev/null | wc -l | tr -d ' ')"
 acomm homi send librarian@bob "post-rekey" --from orchestrator >/dev/null 2>&1
 sleep 3
 adead1="$(ls "$T/a/homi/out/bob/dead" 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$adead1" -gt "$adead0" ] && ! bcomm homi inbox librarian 2>/dev/null | grep -q "post-rekey"; then
+libbox="$(bcomm homi inbox librarian 2>/dev/null)"
+if [ "$adead1" -gt "$adead0" ] && ! printf '%s' "$libbox" | grep -q "post-rekey"; then
   ok "grants pinned to the ORIGINAL key: swapped-key link refused"
 else bad "grant fp pin (dead $adead0 -> $adead1)"; fi
+
+echo "== links restore-tuple guard: the persisted link record's key set is pinned"
+lkeys="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(",".join(sorted(d["alice"].keys())))' "$T/b/homi/links.json" 2>/dev/null)"
+lgolden="addr,allow_seats,card_v,created_at,handle,identity_file,key_fp,kind,remote_home,remote_in,sock"
+if [ "$lkeys" = "$lgolden" ]; then
+  ok "link record keys unchanged ($lkeys)"
+else bad "link record keys unchanged (got: $lkeys, want: $lgolden)"; fi
 
 echo "== sun_path guard: a too-long socket path fails loud, daemon stays up"
 LONG="$T/cs-long-$(python3 -c 'print("x"*60)')"

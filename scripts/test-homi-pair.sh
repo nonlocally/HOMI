@@ -132,7 +132,7 @@ echo "== pair refuses without reachability (measured, exact fix printed)"
 out="$(acomm homi pair fake@nowhere.invalid 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then ok "pair against unreachable host fails"; else bad "pair against unreachable host fails"; fi
-if printf '%s' "$out" | grep -q "ssh-copy-id\|ssh "; then
+if printf '%s' "$out" | grep -q "ssh-copy-id"; then
   ok "failure prints the exact fix"
 else bad "failure prints the exact fix (got: $out)"; fi
 
