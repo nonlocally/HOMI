@@ -880,7 +880,12 @@ class Homi:
         r = self._do_claim(name, cwd=cwd, worktree=worktree)
         if not r.get("ok"):
             return {"ok": False, "err": "claim %s: %s" % (name, r.get("err"))}
-        sp = self._do_seat("spawn", {"cmd": cmd, "cwd": cwd, "name": name})
+        # The agent goes where its RECORDED workspace is. With --worktree the
+        # claim just made <repo>-worktrees/<name> and recorded it; spawning the
+        # seat at the original `cwd` instead would put every fanned agent in the
+        # one shared checkout while each held a private branch it never touched.
+        work_cwd = (r.get("workspace") or {}).get("path") or cwd
+        sp = self._do_seat("spawn", {"cmd": cmd, "cwd": work_cwd, "name": name})
         if not sp.get("ok"):
             return {"ok": False, "err": "seat spawn: %s" % sp.get("err")}
         seat = sp["seat"]
@@ -906,7 +911,7 @@ class Homi:
         with self.mu:
             if name in self.identities:
                 self.identities[name]["supervision"] = {
-                    "cmd": cmd, "cli": cli, "cwd": cwd,
+                    "cmd": cmd, "cli": cli, "cwd": work_cwd,
                     "spawned_at": time.time()}
         self._persist_identities()
         self.log("spawned", name, "in seat", seat, "adopted" if adopted else "")
@@ -1397,6 +1402,7 @@ class Homi:
                 self._persist_identities()
                 self.log("claimed BOXED identity:", name, "-> published", sock)
                 return {"ok": True, "boxed": True,
+                        "workspace": self._workspace_of(name),
                         "publish_in": sock,
                         "publish_out": self.path("boxes", name, "outbox.sock")}
             srv = self.bind_unix(sock)
@@ -1419,7 +1425,16 @@ class Homi:
                         self.identities[name]["card"] = card
             self._persist_identities()
         self.log("claimed identity:", name, "->", sock)
-        return {"ok": True}
+        # Return the workspace we actually RECORDED (not the one we computed):
+        # callers that place the agent in the world — _do_spawn above all — must
+        # put it where the record says it lives, or the record is a lie.
+        return {"ok": True, "workspace": self._workspace_of(name)}
+
+    def _workspace_of(self, name):
+        with self.mu:
+            ent = self.identities.get(name) or {}
+            ws = ent.get("workspace")
+        return dict(ws) if isinstance(ws, dict) else None
 
     def _box_drain_loop(self, name):
         """Hold a persistent connection to a boxed agent's OUTBOX socket (the
@@ -3373,10 +3388,13 @@ def cli_call(argv):
         n = 1
         timeout = 120.0
         want_json = "--json" in args
+        worktree = False
         rest = []
         i = 0
         while i < len(args):
             a = args[i]
+            if a == "--worktree":
+                worktree = True; i += 1; continue
             if a == "--cli" and i + 1 < len(args):
                 cli = args[i + 1]; i += 2; continue
             if a == "--cwd" and i + 1 < len(args):
@@ -3413,10 +3431,10 @@ def cli_call(argv):
         if op == "spawn":
             if not rest:
                 sys.stderr.write("usage: communicate homi spawn <name> --cli claude|codex "
-                                 "[--cwd DIR] [--json]\n")
+                                 "[--cwd DIR] [--worktree] [--json]\n")
                 return 1
             req = {"op": "spawn", "name": rest[0], "cmd": cmd, "cwd": cwd,
-                   "adopt": adopt, "cli": cli}
+                   "adopt": adopt, "cli": cli, "worktree": worktree}
             r = _call(req, timeout=60)
             print(json.dumps(r) if want_json
                   else (("%s -> %s" % (r.get("name"), r.get("seat")))

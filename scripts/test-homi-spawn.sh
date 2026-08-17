@@ -66,6 +66,30 @@ assert s["cwd"], s
 assert d["workspace"] is not None, d
 PY
 
+echo "== spawn --worktree puts the AGENT in the worktree, not the shared repo"
+# The defect this covers: _do_claim made <repo>-worktrees/<name> and recorded it
+# as the workspace, but the seat was spawned with the ORIGINAL cwd — so four
+# fanned agents each got a private branch while all four edited one checkout.
+# The only honest check is the pane's OWN cwd, asked of tmux.
+WTREPO="$T/wtrepo"; mkdir -p "$WTREPO"
+( cd "$WTREPO" && git init -q . && git config user.email t@t && git config user.name t \
+  && echo hi > f.txt && git add f.txt && git -c commit.gpgsign=false commit -qm first ) >/dev/null 2>&1
+wtout="$("$COMM" homi spawn wt1 --cwd "$WTREPO" --worktree -- bash --norc --noprofile 2>/dev/null)"
+wtseat="${wtout##*-> }"
+sleep 0.5
+recorded="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["wt1"]["workspace"]["path"])' "$ID" 2>/dev/null)"
+actual="$(tmux -L "$TMUXSOCK" display -p -t "$wtseat" '#{pane_current_path}' 2>/dev/null)"
+if [ -n "$recorded" ] && [ "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$actual")" \
+     = "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$recorded")" ]; then
+  ok "spawned pane cwd == recorded workspace ($actual)"
+else bad "pane cwd ($actual) != recorded workspace ($recorded)"; fi
+python3 - "$ID" <<'PY' && ok "supervision.cwd is the worktree (restart lands there too)" || bad "supervision.cwd is not the worktree"
+import json,sys,os
+d=json.load(open(sys.argv[1]))["wt1"]
+assert os.path.realpath(d["supervision"]["cwd"])==os.path.realpath(d["workspace"]["path"]), d
+assert d["workspace"]["worktree"] is True, d
+PY
+
 echo "== restart brings the agent back on a new seat"
 old="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sup1"]["seat"])' "$ID")"
 "$COMM" homi seat kill "$old" >/dev/null 2>&1
