@@ -242,7 +242,10 @@ async function setup(args: string[]) {
 
   console.log("\nhomi is set up. MCP line for any other client:\n");
   console.log(`  claude mcp add homi -- node ${abs} serve`);
-  console.log(`\nNext: claim identities (communicate homi claim <name>) or spawn agents (communicate homi spawn).`);
+  console.log("\nNext steps:");
+  console.log("  agents on this device:    communicate homi claim <name>  /  spawn <name> --cli claude");
+  console.log("  another of YOUR devices:  communicate homi pair <user@host>   (run from here)");
+  console.log("  another PERSON:           communicate homi connect --invite   (hand them the code)");
   if (failed) process.exit(1);
 }
 

@@ -116,11 +116,16 @@ if "$COMM" homi init --handle tester2 --display "Renamed" >/dev/null 2>&1; then
 else bad "same handle, new display needs no --force"; fi
 
 echo "== section 6: validation"
-for h in "Tester" "has_underscore" "-leading" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "pm" "homi"; do
+for h in "Tester" "has_underscore" "-leading" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "pm" "self" "all" "homi"; do
   if "$COMM" homi init --handle "$h" --force >/dev/null 2>&1; then
     bad "invalid handle accepted: $h"
   else ok "invalid handle refused: $h"; fi
 done
+H32="$(python3 -c 'print("a"*32)')"
+if "$COMM" homi init --handle "$H32" --force >/dev/null 2>&1; then
+  ok "a 32-char handle (the max) is legal"
+else bad "a 32-char handle (the max) is legal"; fi
+"$COMM" homi init --handle tester2 --force >/dev/null 2>&1
 if [ "$(cat "$HOMIS/user.json" | jget handle)" = "tester2" ]; then
   ok "invalid claims never touched user.json"
 else bad "invalid claims never touched user.json"; fi

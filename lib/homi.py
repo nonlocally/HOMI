@@ -1868,27 +1868,31 @@ class Homi:
         """The claim ceremony's write. The ONLY writer of user.json — a missing
         record is degraded mode, never a trigger to regenerate one."""
         if not _HANDLE_RE.match(handle or "") or handle in self._RESERVED:
-            return {"ok": False,
-                    "err": "invalid handle (want %s, not reserved)" % _HANDLE_RE.pattern}
-        with self.mu:
-            prev = dict(self.user) if self.user else None
-        if prev and prev.get("handle") != handle and not force:
-            return {"ok": False, "err": "already claimed as @%s "
-                    "(re-run with --force to change it)" % prev.get("handle")}
-        u = {"v": 1, "handle": handle,
-             # Same handle again = a touch-up (keep the claim time); a new
-             # handle is a new claim.
-             "created_at": (prev.get("created_at") if prev
-                            and prev.get("handle") == handle else time.time()),
-             "claimed_via": via}
-        if display:
-            u["display"] = display
-        elif prev and prev.get("handle") == handle and prev.get("display"):
-            u["display"] = prev["display"]
-        _atomic_write(os.path.join(self.root, "user.json"),
-                      json.dumps(u, indent=1))
-        with self.mu:
-            self.user = u
+            return {"ok": False, "err": "invalid handle (lowercase letters, "
+                    "digits, hyphen; max 32; not a reserved name)"}
+        # claim_mu makes check-decide-write atomic: two concurrent user-set
+        # calls must not both pass the force gate and silently last-write-win
+        # (same shape as identity claims, same lock).
+        with self.claim_mu:
+            with self.mu:
+                prev = dict(self.user) if self.user else None
+            if prev and prev.get("handle") != handle and not force:
+                return {"ok": False, "err": "already claimed as @%s "
+                        "(re-run with --force to change it)" % prev.get("handle")}
+            u = {"v": 1, "handle": handle,
+                 # Same handle again = a touch-up (keep the claim time); a new
+                 # handle is a new claim.
+                 "created_at": (prev.get("created_at") if prev
+                                and prev.get("handle") == handle else time.time()),
+                 "claimed_via": via}
+            if display:
+                u["display"] = display
+            elif prev and prev.get("handle") == handle and prev.get("display"):
+                u["display"] = prev["display"]
+            _atomic_write(os.path.join(self.root, "user.json"),
+                          json.dumps(u, indent=1))
+            with self.mu:
+                self.user = u
         self.log("user: claimed @%s (via %s)" % (handle, via))
         return {"ok": True, "user": u, "changed": prev != u}
 
