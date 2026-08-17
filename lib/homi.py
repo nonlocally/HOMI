@@ -1019,25 +1019,23 @@ class Homi:
         # build_status()'s derived roster view doesn't carry "card" (it wasn't
         # a routing/liveness fact); pull it straight from self.identities in
         # one short-held snapshot rather than growing that view. "surface" is
-        # measured fresh from that same snapshot's seat -- NOT read off build_
-        # status()'s own idents entry -- so this stays correct even if that
-        # view's shape changes again later; the measurement (a tmux shellout)
-        # happens below, outside the lock, same as everything else here.
+        # DIFFERENT: build_status() (called just above, into `st`) already
+        # measures it once per identity, so read it straight off `e` -- do not
+        # re-measure. That also keeps "seat" and its "surface" reporting the
+        # same moment (both come from `e`), with no second tmux round-trip.
         with self.mu:
-            extra = {n: {"card": e.get("card"), "seat": e.get("seat")}
-                     for n, e in self.identities.items()}
+            cards = {n: e.get("card") for n, e in self.identities.items()}
         agents = []
         for n, e in sorted((st.get("identities") or {}).items()):
             route = e.get("route") or {}
-            ex = extra.get(n) or {}
             agents.append({
                 "name": n, "kind": e.get("kind", "local"),
                 "home": e.get("home"),
                 "state": route.get("state"), "provenance": route.get("provenance"),
                 "undelivered": (e.get("inbox") or {}).get("undelivered", 0),
                 "seat": e.get("seat"),
-                "surface": self._measure_surface(ex.get("seat")),
-                "card": ex.get("card"),
+                "surface": e.get("surface"),
+                "card": cards.get(n),
             })
         return {"ok": True, "device": st["self"]["device"], "agents": agents}
 
