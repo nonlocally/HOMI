@@ -1040,7 +1040,8 @@ class Homi:
                             if sess else None),
                 "mailbox": self.inbox_path(name),
                 "cursor_path": self.cursor_path(name),
-                "lines": lines, "cursor": cur, "seat": ent.get("seat")}
+                "lines": lines, "cursor": cur, "seat": ent.get("seat"),
+                "workspace": ent.get("workspace")}
 
     def _do_depart(self, name, device):
         """Atomically release the local claim and rebind the name as a proxy
@@ -2309,7 +2310,9 @@ class Homi:
                              addr=req.get("addr"), as_name=req.get("as"),
                              spawn=bool(req.get("spawn")),
                              fork=bool(req.get("fork")),
-                             dry=bool(req.get("dry_run")))
+                             dry=bool(req.get("dry_run")),
+                             allow_missing_workspace=bool(
+                                 req.get("allow_missing_workspace")))
         if op == "premove":
             return self._do_premove(req.get("name", ""))
         if op == "depart":
@@ -2767,12 +2770,12 @@ def _shq(s):
 
 def _cli_move(args):
     """communicate homi move <name> <device> [--addr user@host] [--as NEW]
-         [--spawn] [--fork] [--dry-run]
+         [--spawn] [--fork] [--dry-run] [--allow-missing-workspace]
     Relocate an agent-being: transcript (rsync) + mailbox (staged merge) +
     identity (depart->proxy at origin, arrive->claim at target). The address
     survives: after the move, mail to <name> routes over the link."""
     name = dev = addr = as_name = None
-    spawn = fork = dry = False
+    spawn = fork = dry = allow_missing_ws = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -2786,6 +2789,8 @@ def _cli_move(args):
             fork = True; i += 1; continue
         if a == "--dry-run":
             dry = True; i += 1; continue
+        if a == "--allow-missing-workspace":
+            allow_missing_ws = True; i += 1; continue
         if name is None:
             name = a
         elif dev is None:
@@ -2793,10 +2798,12 @@ def _cli_move(args):
         i += 1
     if not name or not dev:
         sys.stderr.write("usage: communicate homi move <name> <device> "
-                         "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run]\n")
+                         "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run] "
+                         "[--allow-missing-workspace]\n")
         return 1
     r = _move_run(_call, name, dev, addr=addr, as_name=as_name,
-                  spawn=spawn, fork=fork, dry=dry)
+                  spawn=spawn, fork=fork, dry=dry,
+                  allow_missing_workspace=allow_missing_ws)
     for ln in r.get("lines") or []:
         print(ln)
     if not r.get("ok"):
@@ -2806,7 +2813,7 @@ def _cli_move(args):
 
 
 def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
-              fork=False, dry=False):
+              fork=False, dry=False, allow_missing_workspace=False):
     """The move orchestration, shared by BOTH faces: the CLI passes the socket
     client as `caller`, the daemon passes its own op dispatch. One
     implementation, so `homi move` and the MCP `move` tool can never drift.
@@ -2837,6 +2844,13 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
     sid = os.path.basename(transcript)[:-6] if transcript else None
     lproj = _last_cwd(transcript) if transcript else None
 
+    # The workspace is the material the agent works on -- pulled out here (before
+    # the target probe) so the dry-run report can show what a real move would
+    # check, not just what it will move.
+    ws = pre.get("workspace") or {}
+    ws_path = ws.get("path")
+    ws_note = None
+
     # Resolve the ssh address: explicit --addr, or the link's stored addr.
     if not addr:
         st = caller({"op": "status"})
@@ -2847,6 +2861,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
     if dry:
         report.append("agent     : %s%s" % (name, " (LIVE - fork)" if pre.get("live") else ""))
         report.append("transcript: %s" % (transcript or "(none - mailbox-only identity)"))
+        report.append("workspace : %s" % (ws_path or "(none recorded)"))
         report.append("mailbox   : %s lines, cursor %s" % (pre.get("lines"), pre.get("cursor")))
         report.append("target    : %s via %s" % (dev, addr))
         report.append("mode      : %s" % ("fork -> %s" % as_name if fork else "move (depart+arrive)"))
@@ -2871,6 +2886,33 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         return {"ok": False, "err": ("target %s lacks communicate on PATH — install it there first" % dev), "lines": report}
     if not rstate:
         rstate = rhome + "/.local/state/communicate/homi"
+
+    # The workspace is the material the agent works on. Moving the mind without
+    # the world produces an agent with a complete memory of a repository that
+    # does not exist on the target -- so check, and refuse by default.
+    if ws_path:
+        wpath = ws_path
+        home = os.path.expanduser("~")
+        if wpath.startswith(home) and rhome != home:
+            wpath = rhome + wpath[len(home):]
+        # WSCHECK is a shell comment, not a command: over real ssh a bare bareword
+        # would execute and spray "command not found" on stderr for no reason.
+        rc, wout, _ = _ssh_run(addr, "# WSCHECK\nif [ -d %s ]; then "
+                                     "printf 'WS:present\\n'; else printf 'WS:missing\\n'; fi"
+                               % _shq(wpath))
+        present = "WS:present" in (wout or "")
+        if not present and not allow_missing_workspace:
+            return {"ok": False, "lines": report,
+                    "err": ("target %s has no workspace at %s -- the agent would "
+                            "arrive with a memory of a repo that is not there. "
+                            "Clone/checkout it there first, or pass "
+                            "--allow-missing-workspace." % (dev, wpath))}
+        if not present:
+            ws_note = ("workspace : MISSING on %s (%s) -- proceeding by request"
+                       % (dev, wpath))
+        else:
+            ws_note = "workspace : %s%s" % (
+                wpath, (" @ %s" % ws["ref"][:8]) if ws.get("ref") else "")
 
     target_name = as_name or name
     ssh_e = "ssh -o BatchMode=yes -o ConnectTimeout=8"
@@ -2934,6 +2976,8 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
           (" as %s" % as_name) if as_name else ""))
     if transcript:
         report.append("  transcript: %s:%s/" % (dev, rdir))
+    if ws_note:
+        report.append("  " + ws_note)
     report.append("  mailbox   : +%s delivered, +%s undelivered (deduped)"
           % (merged.get("merged_delivered"), merged.get("merged_undelivered")))
     if not fork:
