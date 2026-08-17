@@ -1636,8 +1636,11 @@ class Homi:
                 continue
             with self.mu:
                 if name in self.identities:
-                    for k in ("seat", "aliases", "workspace", "place",
-                              "surface", "card", "supervision"):
+                    # claimed_at first: _do_claim above stamped a fresh
+                    # time.time(), so without restoring it every daemon restart
+                    # reset the age of every address to zero.
+                    for k in ("claimed_at", "seat", "aliases", "workspace",
+                              "place", "surface", "card", "supervision"):
                         if e.get(k) is not None:
                             self.identities[name][k] = e[k]
         self._persist_identities()
