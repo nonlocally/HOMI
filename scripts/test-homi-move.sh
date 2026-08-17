@@ -123,6 +123,83 @@ acomm homi claim stayer >/dev/null 2>&1
 D2="$(acomm homi depart stayer nowhere 2>/dev/null)"
 [ "$(printf '%s' "$D2" | jget ok)" = "False" ] && ok "depart to unlinked device refused" || bad "depart gate"
 
+echo "== move refuses when the target has no matching workspace"
+python3 - <<'PYEOF' && ok "move refuses a missing target workspace" || bad "move workspace gate"
+import sys; sys.path.insert(0, "lib")
+import homi
+homi._find_transcript = lambda name: None
+# target reports the workspace path does NOT exist (exit 1 from the probe)
+def fake_ssh(target, script, timeout=30):
+    if "WSCHECK" in script:
+        return (0, "WS:missing", "")
+    return (0, "H:/home/u\nC:/usr/bin/communicate\nS:/home/u/.st", "")
+homi._ssh_run = fake_ssh
+def caller(req):
+    op = req.get("op")
+    if op == "premove":
+        return {"ok": True, "live": False, "mailbox": "/nonexistent",
+                "lines": 0, "cursor": 0,
+                "workspace": {"path": "/src/proj", "ref": "abc", "branch": "main",
+                              "worktree": False}}
+    if op == "status":
+        return {"ok": True, "links": {"dev": {"addr": "u@dev"}}}
+    return {"ok": True}
+r = homi._move_run(caller, "agent1", "dev", addr="u@dev")
+assert r.get("ok") is False, r
+assert "workspace" in (r.get("err") or "").lower(), r
+PYEOF
+
+echo "== a failed probe is reported as a failed probe, not a missing workspace"
+python3 - <<'PYEOF' && ok "an ssh failure during WSCHECK says 'could not probe'" || bad "WSCHECK rc ignored"
+import sys; sys.path.insert(0, "lib")
+import homi
+homi._find_transcript = lambda name: None
+# The workspace probe itself fails (link flapped, host key changed, ssh died).
+# Saying "target has no workspace at /src/proj" here would send the operator
+# off to clone a repo that is very likely already sitting there.
+def fake_ssh(target, script, timeout=30):
+    if "WSCHECK" in script:
+        return (255, "", "ssh: connect to host dev port 22: Connection refused")
+    return (0, "H:/home/u\nC:/usr/bin/communicate\nS:/home/u/.st", "")
+homi._ssh_run = fake_ssh
+def caller(req):
+    op = req.get("op")
+    if op == "premove":
+        return {"ok": True, "live": False, "mailbox": "/nonexistent",
+                "lines": 0, "cursor": 0,
+                "workspace": {"path": "/src/proj", "ref": "abc", "branch": "main",
+                              "worktree": False}}
+    if op == "status":
+        return {"ok": True, "links": {"dev": {"addr": "u@dev"}}}
+    return {"ok": True}
+r = homi._move_run(caller, "agent1", "dev", addr="u@dev")
+err = (r.get("err") or "").lower()
+assert r.get("ok") is False, r
+assert "probe" in err, r
+assert "has no workspace" not in err, r
+PYEOF
+
+echo "== --allow-missing-workspace proceeds with an explicit warning"
+python3 - <<'PYEOF' && ok "--allow-missing-workspace proceeds and warns" || bad "workspace override"
+import sys; sys.path.insert(0, "lib")
+import homi
+homi._find_transcript = lambda name: None
+homi._ssh_run = lambda t, s, timeout=30: (0, "WS:missing", "") if "WSCHECK" in s \
+    else (0, "H:/home/u\nC:/usr/bin/communicate\nS:/home/u/.st", "")
+def caller(req):
+    op = req.get("op")
+    if op == "premove":
+        return {"ok": True, "live": False, "mailbox": "/nonexistent", "lines": 0,
+                "cursor": 0, "workspace": {"path": "/src/proj", "ref": "abc",
+                                           "branch": "main", "worktree": False}}
+    if op == "status":
+        return {"ok": True, "links": {"dev": {"addr": "u@dev"}}}
+    return {"ok": True}
+r = homi._move_run(caller, "agent1", "dev", addr="u@dev", allow_missing_workspace=True)
+assert r.get("ok"), r
+assert any("workspace" in l.lower() for l in r.get("lines") or []), r
+PYEOF
+
 acomm homi stop >/dev/null 2>&1; bcomm homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

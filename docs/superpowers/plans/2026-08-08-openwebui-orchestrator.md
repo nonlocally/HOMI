@@ -158,7 +158,7 @@ ratios). Long solves are submitted, not awaited — you get a task id.
 ## What to ask me for
 - "Set up and submit an FDTD for <device/geometry>, report the task id."
 - Cost estimates before running; result post-processing for finished tasks.
-- NOTE: check peer-agent's library FIRST for
+- NOTE: check <their-agent>'s library FIRST for
   stored fields/surrogates before paying for a fresh solve.
 ```
 

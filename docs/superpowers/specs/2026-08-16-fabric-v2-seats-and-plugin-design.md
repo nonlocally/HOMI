@@ -58,7 +58,7 @@ route, and the roster shows both — `communicate → mail: live · seat: mini-2
    run against an existing link it **upgrades in place** (same mechanism as
    re-linking with a new addr); `--revoke-seats` downgrades. A seat envelope
    arriving on an ungranted link gets a negative ack and dead-letters on the
-   sender. Deny-all-then-grant-one, the peer-key philosophy applied to seats.
+   sender. Deny-all-then-grant-one, the collaborator-key philosophy applied to seats.
 
 5. **Borrow the ideas, never the code.** The studies in `docs/studies/` are the
    *behavioral spec*: the state classifier (title-spinner animation at jittered

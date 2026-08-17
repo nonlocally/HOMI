@@ -1,4 +1,4 @@
-# Study: the aadarwal ↔ peer-handle collaboration — recovered decisions (evidence base for the agent-fabric design)
+# Study: the aadarwal ↔ <collaborator-handle> collaboration — recovered decisions (evidence base for the agent-fabric design)
 
 Date: 2026-08-15 · Method: subagent investigation of local QPG-MIT repos + GitHub PR/issue
 history across repos.
@@ -24,25 +24,25 @@ Caveats: **`QPG-MIT/HOMI-engine` no longer exists on GitHub** ("Could not resolv
 local clone is the only surviving copy. `/Users/aadarwal/HOMI-engine` (home dir) is a
 *different thing* — a worktree of QPG-MIT/HOMI, not the Go repo.
 
-**Where the collaboration with peer actually happened: `aadarwal/communicate`** — peer has 2
+**Where the collaboration actually happened: `aadarwal/communicate`** — the collaborator has 2
 commits here, authored PR #2 and issues #7/#8; the cross-fleet bridge negotiation is issues
 #4/#6/#7/#8. Plus one issue in `QPG-MIT/PixCell-running` (#87).
 
 ## 2. Catalog of the exchanges
 
-**communicate#2 (peer-handle, merged)** — *Add agent-registry.* One markdown file per agent,
+**communicate#2 (<collaborator-handle>, merged)** — *Add agent-registry.* One markdown file per agent,
 named after the wire peer name, YAML frontmatter (`name/kind/model/device/operator/updated/
 reach/availability`) + prose for skills. The decision: *the router maps name→socket, the
 registry maps name→capability* — know *whom* before *how*. Covenant: "an entry describes
 what the agent can do **now**, not aspirationally."
 
-**communicate#3 (aadarwal, merged)** — *`communicate directory`.* Adopts peer's schema
+**communicate#3 (aadarwal, merged)** — *`communicate directory`.* Adopts the collaborator's schema
 unchanged; adds the live-join command. aadarwal declined to add routing fields to the schema
 without asking — schema authorship stayed with the proposer.
 
 **communicate#4 (aadarwal, closed — the load-bearing thread).** The wall: peer sockets are
-owned by the **Unix user** running the agent, 0700. aadarwal can ssh to peer-device only as
-`aadarwal`; peer's agent runs as `peer-user`. "Same host, reachable over the tailnet, but a
+owned by the **Unix user** running the agent, 0700. aadarwal can ssh to that host only as
+`aadarwal`; the collaborator's agent runs as `<their-user>`. "Same host, reachable over the tailnet, but a
 different OS user = a wall I can't (and shouldn't) climb from my side… **one side has to
 bridge toward the other, run by the user that owns the socket.**" Second wall: different
 *tailnets* — 100.x doesn't route across. Resolution: the restricted key (§3). Result: first
@@ -54,7 +54,7 @@ pid); `uds:` addressing works regardless.
 fields delivered with full provenance (`tidy3d 2.9.1 on-prem @ Engaging, Slurm 19988227,
 input_sha256 6747acc719, 12 s wall`).
 
-**communicate#7 (peer-handle, open)** — *Bridge down.* An outage report with an evidence
+**communicate#7 (<collaborator-handle>, open)** — *Bridge down.* An outage report with an evidence
 table (socket down / tunnel down / GitHub up), each row a measurement (`lsof -U` on a socket
 inode created 8 h earlier; staged data "never been pulled"). Design property, not bug: "we
 just can't initiate, since **the restricted key is inbound-only by design**." aadarwal's
@@ -62,9 +62,9 @@ reply concedes fault (a Mac restart killed tunnel + `/tmp/cc-bridge/` + session 
 once) and **declines to widen the grant**: "our key is forward-only (`command=/usr/bin/false`)
 by design — so we cannot `rm` it ourselves, and **we're not asking you to widen the grant**"
 — asking instead for one sshd line that grants no authority (§3). Also confesses:
-`communicate directory` reported peer's agent LIVE throughout (file-existence liveness).
+`communicate directory` reported the collaborator's agent LIVE throughout (file-existence liveness).
 
-**communicate#8 (peer-handle, open)** — *Replace the hand-rolled bridge with
+**communicate#8 (<collaborator-handle>, open)** — *Replace the hand-rolled bridge with
 herdr/firstmate.* The `-L`/`-R` pair "worked exactly once… and has been down since, because
 it depends on a long-lived tunnel from your side plus a live listener on mine. Neither
 survives a laptop sleeping, a network change, or an ssh-agent wedging, and **there is no
@@ -77,12 +77,12 @@ leaves an auditable trail."
 
 **communicate#9 (aadarwal, open)** — *Switchboard* (see the communicate study, §5).
 
-**PixCell-running#87 (peer-handle, open)** — *GPU account for @aadarwal.* The
-device-permission grant: "Username: `aadarwal` (uid 1008; groups: franka-users, video,
-render; **no sudo**)… your **GitHub SSH keys are already installed** (all 8 from
+**PixCell-running#87 (<collaborator-handle>, open)** — *GPU account for @aadarwal.* The
+device-permission grant: "Username: `aadarwal` (uid ####; groups: <lab groups>;
+**no sudo**)… your **GitHub SSH keys are already installed** (all 8 from
 github.com/aadarwal.keys)." Password in GCP Secrets Manager, "will not be posted here."
 Then eight comments of adversarial network debugging: aadarwal proved TCP dropped on every
-port while two other shared Mac Studios accepted :22; peer proved the host firewall clean
+port while two other shared Mac Studios accepted :22; the collaborator proved the host firewall clean
 (ufw 22/tcp ALLOW; ts-input ACCEPT) and the box owned `.13`; aadarwal proved via
 `tailscale whois` that the *share record* presented `.12` for the same node ID. Neither host
 could fix it — only the tailnet admin console regenerating the share.
@@ -90,14 +90,15 @@ could fix it — only the tailnet admin console regenerating the share.
 ## 3. The recovered SSH permission scheme
 
 **A forced-command, forward-only SSH key** — authorizes *port forwarding and nothing else*.
-The exact line installed in `~peer-user/.ssh/authorized_keys` on `peer-device`
-(communicate#4, 2026-08-09T02:47:16Z):
+The SHAPE of the line installed in `~<their-user>/.ssh/authorized_keys` on
+`<collaborator-host>` (communicate#4, 2026-08-09T02:47:16Z) — the options are the
+finding; the key material and its comment are redacted:
 
 ```
-restrict,port-forwarding,command="/usr/bin/false" ssh-ed25519 AAAA…4ssU aadarwal@aadarshs-mac-air-2
+restrict,port-forwarding,command="/usr/bin/false" ssh-ed25519 <public-key> <operator>@<operator-device>
 ```
 
-peer's gloss, verbatim: "Forward-only: unix-socket/TCP forwarding works, but **no shell, no
+The collaborator's gloss, verbatim: "Forward-only: unix-socket/TCP forwarding works, but **no shell, no
 exec, no pty** (any command runs `/usr/bin/false`). That means `communicate ls` /
 `communicate claude bridge` — which exec remote commands — will **not** work over this grant
 by design. Raw forwards do everything the bridge needs."
@@ -107,9 +108,9 @@ capability; `command="/usr/bin/false"` guarantees any exec request runs the forc
 and exits nonzero. **Deny-all-then-grant-one**, not allow-all-then-restrict.
 
 Lived consequences: the only usable invocation was the raw double forward
-(`ssh -N -L /tmp/cc-bridge/peer-agent.sock:/tmp/cc-socks/32813.sock
+(`ssh -N -L /tmp/cc-bridge/<their-agent>.sock:/tmp/cc-socks/32813.sock
 -R /tmp/cc-socks/agent-2-aadarwal.sock:/tmp/cc-socks/67034.sock
-peer-user@peer-device.mit.edu`); the key is inbound-only (peer's side can never
+<their-user>@<collaborator-host>`); the key is inbound-only (the collaborator's side can never
 initiate, #7); and it **cannot clean up after itself** — a dead tunnel leaves a socket file
 the key can't `rm`, forcing path rotation until one bound. The fix (proposed in #7):
 **`StreamLocalBindUnlink yes` in sshd_config** — "It grants no new authority — still
@@ -121,7 +122,7 @@ Complementary layers:
   design: we cannot enumerate them and do not pretend to" (SWITCHBOARD.md). Matrix encoding:
   `=` same host+user, `~` granted (negotiated, not self-serve), `x` no path.
 - **Tailnet ACL as the network grant** (#87):
-  `{"action":"accept","src":["autogroup:shared"],"dst":["peer-device:22"]}` — and the
+  `{"action":"accept","src":["autogroup:shared"],"dst":["<collaborator-node>:22"]}` — and the
   discovery that **Tailscale SSH does not apply to shared-in external users**, so real
   authorized_keys entries are still required.
 - **Client-side key hygiene** (`~/.ssh/config`): per-host `IdentityFile` + `IdentitiesOnly
@@ -132,7 +133,7 @@ Complementary layers:
 ## 4. Cluster control (MIT Engaging)
 
 **(a) Indirect, via the peer agent — what actually ran.** aadarwal's fleet never touched
-Engaging. It messaged `peer-agent`; *that* agent dispatched Slurm
+Engaging. It messaged `<their-agent>`; *that* agent dispatched Slurm
 on its own credentials. Registry-declared capability: "FDTD orchestration — Tidy3D cloud
 submits, MIT Engaging Slurm dispatch (`engaging-sim` reuse-ladder…). Policy: 2D pre-flight →
 short 3D validation → full 3D runs." Delivered: "a real FDTD grating campaign: 25 serial

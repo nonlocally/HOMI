@@ -14,7 +14,7 @@ communicate bus and dispatches work to codex specialists. Design:
 | Orchestrator model | Open WebUI model id `orchestrator` | base qwen3:14b + `orchestrator.md` prompt + tool `agent_dispatch` |
 | Dispatch tool | Open WebUI tool id `agent_dispatch` | source: `openwebui/dispatch_tool.py` |
 | Specialists | `~/agents/tidy3d`, `~/agents/gds` | codex peers `tidy3d-agent` / `gds-agent`, threads `peer-<name>` |
-| Registry | `registry/*.md` | capability entries incl. `workdir:` used for dispatch |
+| Roster | `communicate homi agents --json` | the directory: name, measured `state`, seat surface, capability card |
 
 ## Secrets (all 0600, never in the repo)
 
@@ -34,19 +34,32 @@ Logs + pidfiles: `~/.local/state/communicate/openwebui/`.
 Peers: `communicate status` / restart with
 `communicate codex peer local <name> --dir ~/agents/<dir> --auto`.
 
-## After merging this branch
+## How dispatch works (v0.3 — one road, homi mail)
 
-The dispatch tool's `communicate_path` valve defaults to the worktree
-(`.../communicate-owui/bin/communicate`) because the registry entries live on
-this branch. After merge, update the valve (Workspace → Tools → Agent
-Dispatch → Valves) to `/Users/aadarwal/src/aadarwal/communicate/bin/communicate`.
+`list_agents` reads `communicate homi agents --json` and reports each row's
+MEASURED `state`: only an agent homi just measured `live` is called
+dispatchable now. Everything else on the roster is still *mailable* — homi
+stores and forwards — and the tool says exactly that rather than promising a
+reply it cannot measure.
+
+`ask_agent` is one call: `communicate homi ask <name> "<brief>" --from
+<caller_name> --timeout N --json`. Local specialist or an agent on another
+device, it is the same round trip — homi routes it, stores it durably, and
+correlates the reply. When nobody answers in time the tool reports that the
+message is **held in the agent's mailbox**, so the model does not resend.
+
+Valves: `communicate_path`, `timeout_seconds`, `caller_name` (the homi identity
+replies come back to; it is auto-claimed on first ask).
 
 ## Adding a specialist
 
 1. Create `~/agents/<name>` with a `.venv` + `AGENTS.md` charter.
-2. Add `registry/<peer-name>.md` (frontmatter must include `kind: codex`,
-   `device:`, `workdir:`).
-3. `communicate codex peer local <peer-name> --dir <workdir> --auto`.
+2. Give it a homi identity in that directory:
+   `communicate homi claim <peer-name> --cwd ~/agents/<name>` — or let
+   `communicate homi spawn <peer-name> --cli codex --cwd ~/agents/<name>`
+   claim it and launch it in a seat in one verb.
+3. `communicate homi describe <peer-name> --what "…" --ask-me-for "…"` so the
+   orchestrator can tell what it is for.
 4. Nothing else — the orchestrator discovers it on its next `list_agents`.
 
 ## API callers: tool execution contract
@@ -62,7 +75,7 @@ local model will then *roleplay* tool results, convincingly and wrongly.
 
 - Roster question in the UI → real `list_agents` execution ("Explored
   list_agents" block): gds-agent + tidy3d-agent LIVE/dispatchable; the
-  maintainer and peer-agent correctly shown as
+  maintainer and <their-agent> correctly shown as
   not dispatchable. No hallucinated agents.
 - "Have the gds agent generate a 10 micron radius ring resonator GDS" →
   dispatch → codex → gdsfactory → file on disk, path relayed verbatim:
@@ -71,33 +84,26 @@ local model will then *roleplay* tool results, convincingly and wrongly.
   validation **Passed**, estimated grid 231,525 cells (~27.5 nm), nothing
   submitted to the cloud. Flexcompute key validated at configure time.
 
-## Cross-device relay (v0.2 — remote Claude agents)
+## Cross-device relay (superseded in v0.3)
 
-The orchestrator has its own peer identity: a persistent mailbox daemon
-(`cc_peer.py mailbox`) listening on `/tmp/cc-socks/orchestrator.sock` with a
-maintained sidecar named `orchestrator`. `ask_agent` uses it as a return
-address, so a **Claude-kind** registry agent is now dispatchable too:
-
-1. resolve the agent via `communicate whereis`; if it isn't reachable locally,
-   auto-bridge it (`communicate claude bridge <device> <session>`) using the
-   orchestrator socket as `$CLAUDE_CODE_MESSAGING_SOCKET`;
-2. `communicate send <socket> --as orchestrator` (from = the orchestrator
-   socket, reverse-forwarded to the remote so replies route home);
-3. poll `mailbox.jsonl` for the reply, unwrap the cross-session envelope,
-   return it.
-
-A remote **interactive** Claude only answers when it takes a turn (or approves
-the held peer message), so replies are best-effort for human-driven sessions.
+v0.2 carried its own relay: a mailbox daemon on `/tmp/cc-socks/orchestrator.sock`,
+`communicate whereis` + `claude bridge` to reach a remote session, and a poll of
+`mailbox.jsonl` for the reply. All of it is now homi's job — the fabric owns
+identity, routing, durability and reply correlation across devices — so
+`ask_agent` makes one `communicate homi ask` call and that machinery is gone
+from the tool. A remote **interactive** Claude still only answers when it takes
+a turn, and homi holds the message until then instead of losing it.
 
 ## Real cross-device codex agent (mini-agent)
 
 For genuine generative work on another device, run a **codex** agent there —
-same dispatch as the local specialists, just a remote `device`. `mini-agent`
-(registry entry + `agents/mini/AGENTS.md` charter) is a codex assistant on
-`aadarshs-mac-mini-2`: `ask_agent("mini-agent", ...)` runs
-`communicate codex ask aadarshs-mac-mini-2 --dir /Users/aadarwal/agents/mini`
-and returns real output in ~5s. Verified 2026-08-09: "ask the mini agent for a
-random sentence" → an actual sentence generated on the mini.
+same dispatch as the local specialists, just a remote device. `mini-agent`
+(`agents/mini/AGENTS.md` charter) is a codex assistant on
+`aadarshs-mac-mini-2`. Verified 2026-08-09 over the v0.2 codex path: "ask the
+mini agent for a random sentence" → an actual sentence generated on the mini.
+Under v0.3 the same agent is reached by claiming a homi identity on that
+device and linking the two homis (`communicate homi link`); `ask_agent` then
+routes to it by name with no per-kind special case.
 
 Codex PATH note: a standalone codex install lands at `~/.local/bin/codex`,
 which is off the PATH of a non-interactive ssh shell — so `communicate link`

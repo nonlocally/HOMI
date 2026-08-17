@@ -214,6 +214,47 @@ if "$COMM" homi retitle "$FT" my-new-name >/dev/null 2>&1; then ok "retitle runs
 if tail -1 "$FT" | grep -q '"customTitle": "my-new-name"'; then ok "custom-title appended"; else bad "custom-title appended"; fi
 if tail -1 "$FT" | grep -q '"sessionId": "fake-transcript"'; then ok "sessionId from filename"; else bad "sessionId from filename"; fi
 
+echo "== identity record carries the four axes"
+"$COMM" homi start >/dev/null 2>&1
+"$COMM" homi claim axistest >/dev/null 2>&1
+python3 - "$COMM_STATE/homi/identities.json" <<'PY' && ok "identity has workspace/place/surface/card/aliases keys" || bad "four-axis record"
+import json,sys
+d=json.load(open(sys.argv[1]))["axistest"]
+for k in ("workspace","place","surface","card","aliases"):
+    assert k in d, (k, d)
+assert d["place"]["kind"]=="local", d["place"]
+assert d["aliases"]==[], d["aliases"]
+PY
+
+echo "== a pre-axes identities.json loads without losing anything"
+# The five flat fields a pre-ontology homi wrote. Loading must add the axes as
+# nulls and keep every fact the file already held — above all claimed_at, the
+# age of the address, which _load_identities re-stamped on every daemon start
+# (so an identity claimed in March looked seconds old after any restart).
+"$COMM" homi stop >/dev/null 2>&1; sleep 0.5
+cat > "$HOMIS/identities.json" <<'JSON'
+{
+ "oldtimer": {
+  "claimed_at": 1600000000.0,
+  "kind": "local",
+  "home": null,
+  "seat": "%42",
+  "boxed": false
+ }
+}
+JSON
+"$COMM" homi start >/dev/null 2>&1; sleep 1.5
+python3 - "$HOMIS/identities.json" <<'PY' && ok "legacy record keeps claimed_at (and its seat) across load" || bad "legacy load lost claimed_at"
+import json,sys
+d=json.load(open(sys.argv[1]))["oldtimer"]
+assert d["claimed_at"] == 1600000000.0, d
+assert d["seat"] == "%42", d
+for k in ("workspace","place","surface","card","aliases"):
+    assert k in d, (k, d)
+PY
+if [ -S "$HOMI_SOCK_DIR/homi-oldtimer.sock" ]; then ok "legacy identity was really re-claimed (socket bound)"; else bad "legacy identity not re-claimed"; fi
+"$COMM" homi stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

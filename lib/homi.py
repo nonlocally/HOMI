@@ -51,6 +51,7 @@ import zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cc_peer  # deliver, _sidecar_obj, _read_line, _extract_text, _addr_from
 import homi_seat  # the seat plane (tmux driver); imported lazily-usable, no tmux at import
+import homi_workspace  # the workspace axis (git interrogation, worktrees)
 
 
 # ---- paths / env -------------------------------------------------------------
@@ -365,7 +366,15 @@ class Homi:
                         "kind": e.get("kind", "local"),
                         "home": e.get("home"),
                         "seat": e.get("seat"),
-                        "boxed": e.get("boxed", False)}
+                        "boxed": e.get("boxed", False),
+                        "aliases": e.get("aliases") or [],
+                        "workspace": e.get("workspace"),
+                        "place": e.get("place") or {
+                            "kind": "boxed" if e.get("boxed") else "local",
+                            "device": e.get("home")},
+                        "surface": e.get("surface"),
+                        "card": e.get("card"),
+                        "supervision": e.get("supervision")}
                     for n, e in self.identities.items()}
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
@@ -752,6 +761,19 @@ class Homi:
             self._seat = homi_seat.SeatDriver(log=self.log)
         return self._seat
 
+    def _measure_surface(self, seat):
+        """The roster's surface field: a live tmux measurement, or None -- never
+        a stored handle echoed back as fact. Guarded so a missing tmux (or any
+        other measurement failure) degrades status, never breaks it."""
+        if not seat:
+            return None
+        try:
+            return self._seat_drv().measure(seat)
+        except Exception as e:
+            self.log("surface measure failed:", seat, e)
+            return {"driver": "tmux", "handle": seat, "state": "unknown",
+                    "measured_at": time.time()}
+
     def _seat_target_device(self, sub, req):
         """A seat may be addressed <device>:<seat> (or spawned with args.device).
         Returns (device_or_None, rewritten_req) with the device stripped."""
@@ -849,15 +871,21 @@ class Homi:
     # name AND watchable in a seat. The fabric becomes a creator of agents, not
     # just a router — using its OWN seat plane, with no dependency on old anu.
 
-    def _do_spawn(self, name, cmd, cwd=None, adopt=False, boot_wait=25):
+    def _do_spawn(self, name, cmd, cwd=None, adopt=False, boot_wait=25,
+                  cli=None, worktree=False):
         if not self._NAME_RE.match(name or "") or name in self._RESERVED:
             return {"ok": False, "err": "invalid name %r" % name}
         if not cmd:
             return {"ok": False, "err": "spawn needs a command (--cli or a command)"}
-        r = self._do_claim(name)
+        r = self._do_claim(name, cwd=cwd, worktree=worktree)
         if not r.get("ok"):
             return {"ok": False, "err": "claim %s: %s" % (name, r.get("err"))}
-        sp = self._do_seat("spawn", {"cmd": cmd, "cwd": cwd, "name": name})
+        # The agent goes where its RECORDED workspace is. With --worktree the
+        # claim just made <repo>-worktrees/<name> and recorded it; spawning the
+        # seat at the original `cwd` instead would put every fanned agent in the
+        # one shared checkout while each held a private branch it never touched.
+        work_cwd = (r.get("workspace") or {}).get("path") or cwd
+        sp = self._do_seat("spawn", {"cmd": cmd, "cwd": work_cwd, "name": name})
         if not sp.get("ok"):
             return {"ok": False, "err": "seat spawn: %s" % sp.get("err")}
         seat = sp["seat"]
@@ -880,8 +908,71 @@ class Homi:
                     adopted = True
                     break
                 time.sleep(0.5)
+        with self.mu:
+            if name in self.identities:
+                self.identities[name]["supervision"] = {
+                    "cmd": cmd, "cli": cli, "cwd": work_cwd,
+                    "spawned_at": time.time()}
+        self._persist_identities()
         self.log("spawned", name, "in seat", seat, "adopted" if adopted else "")
         return {"ok": True, "name": name, "seat": seat, "adopted": adopted}
+
+    def _do_restart(self, name):
+        """Bring a spawned agent back using the supervision record. homi is not
+        a process supervisor (deliberately) -- it stores what a restart WOULD
+        need and performs one only when asked."""
+        with self.mu:
+            ent = dict(self.identities.get(name) or {})
+        if ent.get("boxed"):
+            return {"ok": False, "err": "%s is a boxed identity (no tmux seat) "
+                    "-- restart the container that publishes it instead" % name}
+        sup = ent.get("supervision")
+        if not sup or not sup.get("cmd"):
+            return {"ok": False, "err": "%s has no supervision record "
+                    "(was it created with homi spawn?)" % name}
+        ws = ent.get("workspace") or {}
+        cwd = sup.get("cwd") or ws.get("path")
+        old = ent.get("seat")
+        # 1. MEASURE the old seat before deciding anything about it. A stored
+        #    pane id is not a fact: tmux restarts ids at %0 when its server
+        #    does, so after a reboot this id can name a live pane belonging to
+        #    somebody else. Kill only a seat we can still see is ours, and
+        #    never on "dead" (nothing there) or "unknown" (we could not look).
+        surf = self._measure_surface(old) if old else None
+        killable = bool(surf and surf.get("handle") == old
+                        and surf.get("state") not in ("dead", "unknown"))
+        if killable:
+            with self.mu:
+                others = [n for n, e in self.identities.items()
+                          if n != name and e.get("seat") == old]
+            if others:
+                killable = False
+                self.log("restart: seat", old, "is bound to", ",".join(others),
+                         "-- refusing to kill another identity's surface")
+        # 2. Spawn the replacement FIRST. Kill-before-spawn had no rollback: a
+        #    respawn that failed (the recorded cwd gone, tmux down) left the
+        #    agent with no surface at all AND ok:false. A failed restart must
+        #    never be worse than no restart.
+        sp = self._do_seat("spawn", {"cmd": sup["cmd"], "cwd": cwd, "name": name})
+        if not sp.get("ok"):
+            return {"ok": False, "err": "seat spawn: %s" % sp.get("err"),
+                    "name": name, "seat": old, "kept_seat": bool(old)}
+        # 3. Bind the new seat, then retire the old one.
+        self._do_seat_bind(sp["seat"], name)
+        killed = False
+        if killable:
+            try:
+                killed = bool((self._do_seat("kill", {"seat": old}) or {}).get("ok"))
+            except Exception as e:
+                self.log("restart: could not kill old seat", old, e)
+        with self.mu:
+            e = self.identities.get(name)
+            if e and isinstance(e.get("supervision"), dict):
+                e["supervision"]["spawned_at"] = time.time()
+        self._persist_identities()
+        self.log("restarted", name, "on seat", sp["seat"])
+        return {"ok": True, "name": name, "seat": sp["seat"],
+                "previous": old, "previous_killed": killed, "cmd": sup["cmd"]}
 
     def _do_fan(self, n, cmd, prefix, cwd=None, adopt=False):
         if n < 1 or n > 32:
@@ -958,6 +1049,15 @@ class Homi:
 
     def _do_agents(self):
         st = self.build_status()
+        # build_status()'s derived roster view doesn't carry "card" (it wasn't
+        # a routing/liveness fact); pull it straight from self.identities in
+        # one short-held snapshot rather than growing that view. "surface" is
+        # DIFFERENT: build_status() (called just above, into `st`) already
+        # measures it once per identity, so read it straight off `e` -- do not
+        # re-measure. That also keeps "seat" and its "surface" reporting the
+        # same moment (both come from `e`), with no second tmux round-trip.
+        with self.mu:
+            cards = {n: e.get("card") for n, e in self.identities.items()}
         agents = []
         for n, e in sorted((st.get("identities") or {}).items()):
             route = e.get("route") or {}
@@ -967,6 +1067,8 @@ class Homi:
                 "state": route.get("state"), "provenance": route.get("provenance"),
                 "undelivered": (e.get("inbox") or {}).get("undelivered", 0),
                 "seat": e.get("seat"),
+                "surface": e.get("surface"),
+                "card": cards.get(n),
             })
         return {"ok": True, "device": st["self"]["device"], "agents": agents}
 
@@ -995,7 +1097,8 @@ class Homi:
                             if sess else None),
                 "mailbox": self.inbox_path(name),
                 "cursor_path": self.cursor_path(name),
-                "lines": lines, "cursor": cur, "seat": ent.get("seat")}
+                "lines": lines, "cursor": cur, "seat": ent.get("seat"),
+                "workspace": ent.get("workspace")}
 
     def _do_depart(self, name, device):
         """Atomically release the local claim and rebind the name as a proxy
@@ -1174,11 +1277,136 @@ class Homi:
         return {"ok": False,
                 "err": "unknown identity: %s (claim it here, or address <name>@<device>)" % name}
 
-    def _do_claim(self, name, boxed=False):
+    def _blank_axes(self, boxed=False):
+        """The four axes, empty. Every identity carries them from birth so a
+        later writer never has to remember to create them (the registry law:
+        a field that needs a separate remembered write dies)."""
+        return {
+            "workspace": None,                       # {path, ref, branch, worktree}
+            "place": {"kind": "boxed" if boxed else "local", "device": None},
+            "surface": None,                         # {driver, handle, state, measured_at}
+            "card": None,                            # {what, ask_me_for, derived, updated}
+            "aliases": [],                           # durable role names for this identity
+        }
+
+    _CARD_DOC_NAMES = ("AGENTS.md", "CLAUDE.md", "README.md")
+
+    def _derive_card(self, name, cwd):
+        """A first-guess card, from what the fabric already knows. Derivation is
+        the point: a field that needs a separate remembered write dies (every
+        hand-curated registry in both repos did). A human or the agent itself
+        can overwrite it later via `describe`."""
+        what = None
+        if cwd:
+            for fn in self._CARD_DOC_NAMES:
+                p = os.path.join(cwd, fn)
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    with open(p, encoding="utf-8", errors="replace") as f:
+                        head, body = None, []
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("#") and head is None:
+                                head = line.lstrip("#").strip()
+                                continue
+                            if head is not None and not line.startswith("#"):
+                                body.append(line)
+                                break
+                    if head:
+                        what = ("%s — %s" % (head, body[0])) if body else head
+                        break
+                except OSError:
+                    continue
+            if not what:
+                what = "works in %s" % os.path.basename(cwd.rstrip("/"))
+        return {"what": what or "no description yet — set one with `homi describe`",
+                "ask_me_for": "", "derived": True, "updated": time.time()}
+
+    def _do_describe(self, name, what=None, ask_me_for=None):
+        """Author a card. This is the write an AGENT makes about itself."""
+        # Check and write under ONE hold of the lock, and write through the
+        # entry we validated rather than looking the name up again: taking the
+        # lock twice let a release land in between, and the second lookup then
+        # raised KeyError — surfacing to the agent as {"ok": false, "err":
+        # "'name'"}, which says nothing about what went wrong.
+        with self.mu:
+            ent = self.identities.get(name)
+            if not ent or ent.get("kind") != "local":
+                return {"ok": False, "err": "not a local identity: %s" % name}
+            card = dict(ent.get("card") or {})
+            if what is not None:
+                card["what"] = what
+            if ask_me_for is not None:
+                card["ask_me_for"] = ask_me_for
+            card["derived"] = False
+            card["updated"] = time.time()
+            ent["card"] = card
+        self._persist_identities()
+        self.log("card authored for", name)
+        return {"ok": True, "name": name, "card": card}
+
+    def _do_claim(self, name, boxed=False, cwd=None, worktree=False):
         if not self._NAME_RE.match(name or ""):
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
         if name in self._RESERVED:
             return {"ok": False, "err": "'%s' is reserved" % name}
+        # Compute the workspace record BEFORE the claim lock: describe() and
+        # especially make_worktree() shell out to git, and make_worktree's own
+        # timeout is 60s — holding claim_mu (instance-wide) across that would
+        # stall every OTHER claim on this daemon, including the auto-claims on
+        # inbound mail (:1929) and _do_ask (:701). Best-effort in the fullest
+        # sense: ANY failure here (bad path, permission error, malformed cwd)
+        # must never fail the claim itself, only leave the axis unset.
+        #
+        # A cheap pre-check skips that work entirely when `name` is already a
+        # LOCAL identity WITH a workspace: without it, an ordinary client retry
+        # of a claim (or any repeat --worktree claim against a different --cwd)
+        # would run `git worktree add` before ever reaching the no-op below,
+        # littering the target repo with an orphaned branch + checkout nothing
+        # references. A PROXY does not count as "already claimed" here —
+        # _do_claim releases and re-claims it below, a genuine new local
+        # claim that must still get its workspace recorded. This check is
+        # intentionally racy (outside claim_mu): a benign concurrent double
+        # claim can still do the work twice, which is acceptable; the
+        # authoritative decision stays the check inside claim_mu below,
+        # unchanged.
+        #
+        # An already-claimed name with NO workspace yet is the exception, and
+        # the reason this is not just `not already`: _do_claim is auto-invoked
+        # WITHOUT a cwd from _do_ask and from inbound mail, so any identity that
+        # received mail before its agent claimed itself was frozen at
+        # workspace:null forever — which also silently disarmed the move gate
+        # (it skips whenever ws_path is falsy). The first --cwd to arrive is
+        # allowed to fill that hole; a second one never re-points a live agent's
+        # world.
+        with self.mu:
+            ent0 = self.identities.get(name)
+            already = bool(ent0 and ent0.get("kind") == "local")
+            has_ws = bool(already and ent0.get("workspace"))
+        ws = None
+        if cwd and (not already or not has_ws):
+            try:
+                ws = (homi_workspace.make_worktree(cwd, name) if worktree
+                      else homi_workspace.describe(cwd))
+            except Exception as e:
+                self.log("workspace not recorded for", name, ":", e)
+        # Same discipline as the workspace computation above: _derive_card
+        # reads up to three files off disk, so that I/O happens out here,
+        # never inside claim_mu — holding the global claim lock across file
+        # reads would serialize every other identity's claim. Gated by
+        # `already` only (not by `cwd`): a claim with no workspace still gets
+        # a card, via _derive_card's own no-cwd fallback. Any failure here
+        # (including one _derive_card itself doesn't already swallow) must
+        # never fail the claim, only leave the card unset.
+        card = None
+        if not already:
+            try:
+                card = self._derive_card(name, cwd)
+            except Exception as e:
+                self.log("card not derived for", name, ":", e)
         with self.claim_mu:  # check+bind+insert must be one atomic step
             with self.mu:
                 ent = self.identities.get(name)
@@ -1186,7 +1414,25 @@ class Homi:
                 # A local claim outranks a remote proxy for the same name.
                 self._do_release(name)
             elif ent is not None:
-                return {"ok": True, "already": True}
+                # Already claimed: still a no-op for the claim itself, but a
+                # cwd that finally arrives for a workspace-less identity is
+                # recorded rather than dropped on the floor — and the result
+                # says which of the two happened, so the CLI can stop printing
+                # a bare "claimed" over a call that changed nothing.
+                recorded = False
+                if ws is not None and not ent.get("workspace"):
+                    with self.mu:
+                        cur = self.identities.get(name)
+                        if cur is not None and not cur.get("workspace"):
+                            cur["workspace"] = ws
+                            recorded = True
+                    if recorded:
+                        self._persist_identities()
+                        self.log("workspace recorded for already-claimed",
+                                 name, "->", ws.get("path"))
+                return {"ok": True, "already": True,
+                        "workspace_recorded": recorded,
+                        "workspace": self._workspace_of(name)}
             sock = self.identity_sock(name)
             if boxed:
                 # A BOXED identity: the socket is published INTO the sockdir by
@@ -1197,6 +1443,7 @@ class Homi:
                 # session the boxed agent looks like any other peer.
                 ent = {"sock": sock, "claimed_at": time.time(), "_srv": None,
                        "kind": "local", "boxed": True}
+                ent.update(self._blank_axes(boxed=True))
                 with self.mu:
                     self.identities[name] = ent
                 os.makedirs(self.path("mail", name), exist_ok=True)
@@ -1205,14 +1452,23 @@ class Homi:
                 self._plant(name)
                 threading.Thread(target=self._box_drain_loop, args=(name,),
                                  daemon=True).start()
+                if ws is not None:
+                    with self.mu:
+                        self.identities[name]["workspace"] = ws
+                if card is not None:
+                    with self.mu:
+                        if not self.identities[name].get("card"):
+                            self.identities[name]["card"] = card
                 self._persist_identities()
                 self.log("claimed BOXED identity:", name, "-> published", sock)
                 return {"ok": True, "boxed": True,
+                        "workspace": self._workspace_of(name),
                         "publish_in": sock,
                         "publish_out": self.path("boxes", name, "outbox.sock")}
             srv = self.bind_unix(sock)
             ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
                    "kind": "local"}
+            ent.update(self._blank_axes())
             with self.mu:
                 self.identities[name] = ent
             os.makedirs(self.path("mail", name), exist_ok=True)
@@ -1220,9 +1476,25 @@ class Homi:
             self._plant(name)
             threading.Thread(target=self._identity_server, args=(name, srv),
                              daemon=True).start()
+            if ws is not None:
+                with self.mu:
+                    self.identities[name]["workspace"] = ws
+            if card is not None:
+                with self.mu:
+                    if not self.identities[name].get("card"):
+                        self.identities[name]["card"] = card
             self._persist_identities()
         self.log("claimed identity:", name, "->", sock)
-        return {"ok": True}
+        # Return the workspace we actually RECORDED (not the one we computed):
+        # callers that place the agent in the world — _do_spawn above all — must
+        # put it where the record says it lives, or the record is a lie.
+        return {"ok": True, "workspace": self._workspace_of(name)}
+
+    def _workspace_of(self, name):
+        with self.mu:
+            ent = self.identities.get(name) or {}
+            ws = ent.get("workspace")
+        return dict(ws) if isinstance(ws, dict) else None
 
     def _box_drain_loop(self, name):
         """Hold a persistent connection to a boxed agent's OUTBOX socket (the
@@ -1364,11 +1636,16 @@ class Homi:
             r = self._do_claim(name, boxed=bool(e.get("boxed")))
             if not r.get("ok"):
                 self.log("re-claim failed:", name, r.get("err"))
-            elif e.get("seat"):
-                # A bound seat survives a daemon restart (tmux outlives us).
-                with self.mu:
-                    if name in self.identities:
-                        self.identities[name]["seat"] = e["seat"]
+                continue
+            with self.mu:
+                if name in self.identities:
+                    # claimed_at first: _do_claim above stamped a fresh
+                    # time.time(), so without restoring it every daemon restart
+                    # reset the age of every address to zero.
+                    for k in ("claimed_at", "seat", "aliases", "workspace",
+                              "place", "surface", "card", "supervision"):
+                        if e.get(k) is not None:
+                            self.identities[name][k] = e[k]
         self._persist_identities()
 
     def _name_for_socket(self, sock_path):
@@ -1420,6 +1697,13 @@ class Homi:
                 return None
             ent = {"sock": sock, "claimed_at": time.time(), "_srv": srv,
                    "kind": "proxy", "home": device}
+            # Shaped like every other identity -- blank axes, then the one axis
+            # a proxy actually knows at birth: it is BY DEFINITION remote, home
+            # at `device`. Without this, _persist_identities's fallback (no
+            # "place" key here) derives place:{"kind":"local"} for an identity
+            # that is never local -- the same class of lie as an unmeasured seat.
+            ent.update(self._blank_axes())
+            ent["place"] = {"kind": "remote", "device": device}
             with self.mu:
                 self.identities[name] = ent
             self._plant(name)
@@ -2076,6 +2360,7 @@ class Homi:
                               "provenance": "boxed-probed", "session": None},
                     "inbox": {"count": count, "undelivered": max(0, count - cur)},
                     "seat": seat,
+                    "surface": self._measure_surface(seat),
                 }
                 continue
             cands = smap.get(n) or []
@@ -2102,6 +2387,7 @@ class Homi:
                                       if sess else None)},
                 "inbox": {"count": count, "undelivered": max(0, count - cur)},
                 "seat": seat,
+                "surface": self._measure_surface(seat),
             }
         with self.mu:
             linkents = {d: dict(e) for d, e in self.links.items()}
@@ -2157,9 +2443,14 @@ class Homi:
                                  after_msg_id=req.get("after_msg_id"))
         if op == "claim":
             return self._do_claim(req.get("name", ""),
-                                  boxed=bool(req.get("boxed")))
+                                  boxed=bool(req.get("boxed")),
+                                  cwd=req.get("cwd"),
+                                  worktree=bool(req.get("worktree")))
         if op == "release":
             return self._do_release(req.get("name", ""))
+        if op == "describe":
+            return self._do_describe(req.get("name", ""), what=req.get("what"),
+                                     ask_me_for=req.get("ask_me_for"))
         if op == "send":
             return self._do_send(req.get("to", ""), req.get("text", ""),
                                  req.get("from") or "cli")
@@ -2179,7 +2470,12 @@ class Homi:
             return self._do_seat(req.get("sub", ""), req)
         if op == "spawn":
             return self._do_spawn(req.get("name", ""), req.get("cmd", ""),
-                                  cwd=req.get("cwd"), adopt=bool(req.get("adopt")))
+                                  cwd=req.get("cwd"),
+                                  adopt=bool(req.get("adopt")),
+                                  cli=req.get("cli"),
+                                  worktree=bool(req.get("worktree")))
+        if op == "restart":
+            return self._do_restart(req.get("name", ""))
         if op == "fan":
             return self._do_fan(int(req.get("n") or 1), req.get("cmd", ""),
                                 req.get("prefix") or "worker", cwd=req.get("cwd"),
@@ -2205,7 +2501,9 @@ class Homi:
                              addr=req.get("addr"), as_name=req.get("as"),
                              spawn=bool(req.get("spawn")),
                              fork=bool(req.get("fork")),
-                             dry=bool(req.get("dry_run")))
+                             dry=bool(req.get("dry_run")),
+                             allow_missing_workspace=bool(
+                                 req.get("allow_missing_workspace")))
         if op == "premove":
             return self._do_premove(req.get("name", ""))
         if op == "depart":
@@ -2663,12 +2961,12 @@ def _shq(s):
 
 def _cli_move(args):
     """communicate homi move <name> <device> [--addr user@host] [--as NEW]
-         [--spawn] [--fork] [--dry-run]
+         [--spawn] [--fork] [--dry-run] [--allow-missing-workspace]
     Relocate an agent-being: transcript (rsync) + mailbox (staged merge) +
     identity (depart->proxy at origin, arrive->claim at target). The address
     survives: after the move, mail to <name> routes over the link."""
     name = dev = addr = as_name = None
-    spawn = fork = dry = False
+    spawn = fork = dry = allow_missing_ws = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -2682,6 +2980,8 @@ def _cli_move(args):
             fork = True; i += 1; continue
         if a == "--dry-run":
             dry = True; i += 1; continue
+        if a == "--allow-missing-workspace":
+            allow_missing_ws = True; i += 1; continue
         if name is None:
             name = a
         elif dev is None:
@@ -2689,10 +2989,14 @@ def _cli_move(args):
         i += 1
     if not name or not dev:
         sys.stderr.write("usage: communicate homi move <name> <device> "
-                         "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run]\n")
+                         "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run] "
+                         "[--allow-missing-workspace]\n")
         return 1
-    r = _move_run(_call, name, dev, addr=addr, as_name=as_name,
-                  spawn=spawn, fork=fork, dry=dry)
+    # A move's control ops are the slow kind (status measures every seat,
+    # premove/depart/arrive touch the mailbox): 10s is the wrong default here.
+    r = _move_run(lambda req: _call(req, timeout=60.0), name, dev, addr=addr,
+                  as_name=as_name, spawn=spawn, fork=fork, dry=dry,
+                  allow_missing_workspace=allow_missing_ws)
     for ln in r.get("lines") or []:
         print(ln)
     if not r.get("ok"):
@@ -2702,7 +3006,7 @@ def _cli_move(args):
 
 
 def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
-              fork=False, dry=False):
+              fork=False, dry=False, allow_missing_workspace=False):
     """The move orchestration, shared by BOTH faces: the CLI passes the socket
     client as `caller`, the daemon passes its own op dispatch. One
     implementation, so `homi move` and the MCP `move` tool can never drift.
@@ -2733,9 +3037,22 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
     sid = os.path.basename(transcript)[:-6] if transcript else None
     lproj = _last_cwd(transcript) if transcript else None
 
+    # The workspace is the material the agent works on -- pulled out here (before
+    # the target probe) so the dry-run report can show what a real move would
+    # check, not just what it will move.
+    ws = pre.get("workspace") or {}
+    ws_path = ws.get("path")
+    ws_note = None
+
     # Resolve the ssh address: explicit --addr, or the link's stored addr.
     if not addr:
         st = caller({"op": "status"})
+        if not st.get("ok"):
+            # Don't let a daemon that didn't answer masquerade as "this device
+            # has no address" — the move would refuse for the wrong reason.
+            return {"ok": False, "lines": report,
+                    "err": ("could not read homi status (%s) — pass --addr "
+                            "user@host" % (st.get("err") or "no reply"))}
         addr = ((st.get("links") or {}).get(dev) or {}).get("addr")
     if not addr:
         return {"ok": False, "err": ("no ssh address for %s (link it with --addr, or pass --addr here)" % dev), "lines": report}
@@ -2743,6 +3060,7 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
     if dry:
         report.append("agent     : %s%s" % (name, " (LIVE - fork)" if pre.get("live") else ""))
         report.append("transcript: %s" % (transcript or "(none - mailbox-only identity)"))
+        report.append("workspace : %s" % (ws_path or "(none recorded)"))
         report.append("mailbox   : %s lines, cursor %s" % (pre.get("lines"), pre.get("cursor")))
         report.append("target    : %s via %s" % (dev, addr))
         report.append("mode      : %s" % ("fork -> %s" % as_name if fork else "move (depart+arrive)"))
@@ -2767,6 +3085,47 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
         return {"ok": False, "err": ("target %s lacks communicate on PATH — install it there first" % dev), "lines": report}
     if not rstate:
         rstate = rhome + "/.local/state/communicate/homi"
+
+    # The workspace is the material the agent works on. Moving the mind without
+    # the world produces an agent with a complete memory of a repository that
+    # does not exist on the target -- so check, and refuse by default.
+    if ws_path:
+        wpath = ws_path
+        home = os.path.expanduser("~")
+        if wpath.startswith(home) and rhome != home:
+            wpath = rhome + wpath[len(home):]
+        # WSCHECK is a shell comment, not a command: over real ssh a bare bareword
+        # would execute and spray "command not found" on stderr for no reason.
+        rc, wout, werr = _ssh_run(addr, "# WSCHECK\nif [ -d %s ]; then "
+                                        "printf 'WS:present\\n'; else printf 'WS:missing\\n'; fi"
+                                  % _shq(wpath))
+        # A failed probe is not evidence of an absent workspace: reporting a
+        # transient ssh failure as "target has no workspace at X" sends the
+        # operator to clone a repo that is probably already there.
+        probed = (rc == 0)
+        present = probed and "WS:present" in (wout or "")
+        if not probed and not allow_missing_workspace:
+            return {"ok": False, "lines": report,
+                    "err": ("could not probe %s for the workspace at %s (ssh "
+                            "exit %s: %s) -- refusing to move on a guess. Fix "
+                            "the connection, or pass --allow-missing-workspace "
+                            "to move anyway."
+                            % (dev, wpath, rc, (werr or "").strip()[-200:]))}
+        if not probed:
+            ws_note = ("workspace : UNVERIFIED on %s (%s) -- the probe failed; "
+                       "proceeding by request" % (dev, wpath))
+        elif not present and not allow_missing_workspace:
+            return {"ok": False, "lines": report,
+                    "err": ("target %s has no workspace at %s -- the agent would "
+                            "arrive with a memory of a repo that is not there. "
+                            "Clone/checkout it there first, or pass "
+                            "--allow-missing-workspace." % (dev, wpath))}
+        elif not present:
+            ws_note = ("workspace : MISSING on %s (%s) -- proceeding by request"
+                       % (dev, wpath))
+        else:
+            ws_note = "workspace : %s%s" % (
+                wpath, (" @ %s" % ws["ref"][:8]) if ws.get("ref") else "")
 
     target_name = as_name or name
     ssh_e = "ssh -o BatchMode=yes -o ConnectTimeout=8"
@@ -2830,6 +3189,8 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
           (" as %s" % as_name) if as_name else ""))
     if transcript:
         report.append("  transcript: %s:%s/" % (dev, rdir))
+    if ws_note:
+        report.append("  " + ws_note)
     report.append("  mailbox   : +%s delivered, +%s undelivered (deduped)"
           % (merged.get("merged_delivered"), merged.get("merged_undelivered")))
     if not fork:
@@ -2873,25 +3234,38 @@ def _call(req, timeout=10.0):
     except OSError:
         sys.stderr.write("homi not running (no listener at %s)\n" % path)
         sys.exit(2)
+    buf = b""
     try:
         s.sendall((json.dumps(req) + "\n").encode("utf-8"))
         try:
             s.shutdown(socket.SHUT_WR)
         except OSError:
             pass
-        buf = b""
         while b"\n" not in buf:
             chunk = s.recv(65536)
             if not chunk:
                 break
             buf += chunk
+    except socket.timeout:
+        # The daemon took the connection and then said nothing in time — a big
+        # fleet or one unresponsive pane can do that now that agents/status
+        # measure every seat through tmux. An error the caller can print beats
+        # a traceback out of a CLI.
+        return {"ok": False, "err": "homi did not answer in %gs (op %s)"
+                                    % (timeout, req.get("op"))}
+    except OSError as e:
+        return {"ok": False, "err": "homi connection failed: %s" % e}
     finally:
         s.close()
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
         sys.stderr.write("no reply from homi\n")
         sys.exit(2)
-    return json.loads(line.decode("utf-8", "replace"))
+    try:
+        return json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return {"ok": False, "err": "unparseable reply from homi: %s"
+                                    % line[:200].decode("utf-8", "replace")}
 
 
 def _human_status(st):
@@ -2912,10 +3286,16 @@ def cli_call(argv):
         sys.stderr.write("usage: homi.py call <op> [args...]\n")
         return 1
     op, args = argv[0], argv[1:]
+    # status and agents MEASURE: one tmux round trip per seated identity, plus
+    # a socket probe each. On a fleet that adds up, so give them real slack
+    # instead of the 10s default meant for a bookkeeping call.
+    ROSTER_TIMEOUT = 60.0
     if op == "status":
-        st = _call({"op": "status"})
+        st = _call({"op": "status"}, timeout=ROSTER_TIMEOUT)
         if "--json" in args:
             print(json.dumps(st, indent=1))
+        elif not st.get("ok"):
+            sys.stderr.write((st.get("err") or "status failed") + "\n")
         else:
             print(_human_status(st))
         return 0 if st.get("ok") else 1
@@ -2924,9 +3304,11 @@ def cli_call(argv):
         print("stopped" if r.get("ok") else json.dumps(r))
         return 0 if r.get("ok") else 1
     if op == "agents":
-        r = _call({"op": "agents"})
+        r = _call({"op": "agents"}, timeout=ROSTER_TIMEOUT)
         if "--json" in args:
             print(json.dumps(r, indent=1))
+        elif not r.get("ok"):
+            sys.stderr.write((r.get("err") or "agents failed") + "\n")
         else:
             for a in r.get("agents", []):
                 seat = ("  seat:" + a["seat"]) if a.get("seat") else ""
@@ -2952,21 +3334,67 @@ def cli_call(argv):
         return 0 if r.get("ok") else 1
     if op in ("claim", "release"):
         boxed = "--boxed" in args
-        args = [a for a in args if a != "--boxed"]
+        worktree = "--worktree" in args
+        cwd = None
+        if "--cwd" in args:
+            i = args.index("--cwd")
+            try:
+                cwd = args[i + 1]
+            except IndexError:
+                sys.stderr.write("--cwd needs a path\n")
+                return 1
+            args = args[:i] + args[i + 2:]
+        args = [a for a in args if a not in ("--boxed", "--worktree")]
         if not args:
-            sys.stderr.write("usage: communicate homi %s <name> [--boxed]\n" % op)
+            sys.stderr.write("usage: communicate homi %s <name> "
+                             "[--cwd DIR] [--worktree] [--boxed]\n" % op)
             return 1
         req = {"op": op, "name": args[0]}
-        if boxed and op == "claim":
-            req["boxed"] = True
+        if op == "claim":
+            if boxed:
+                req["boxed"] = True
+            if cwd:
+                req["cwd"] = cwd
+            if worktree:
+                req["worktree"] = True
         r = _call(req)
         if r.get("ok"):
             if r.get("boxed"):
                 print("claimed %s (boxed). Publish these from the container:" % args[0])
                 print("  --publish-socket %s:/run/homi/agent.sock" % r.get("publish_in"))
                 print("  --publish-socket %s:/run/homi/outbox.sock" % r.get("publish_out"))
+            elif r.get("already"):
+                # Say what actually happened: a claim that changed nothing must
+                # not read like a fresh claim.
+                wsp = (r.get("workspace") or {}).get("path")
+                if r.get("workspace_recorded"):
+                    print("%s was already claimed; recorded its workspace: %s"
+                          % (args[0], wsp))
+                elif cwd and wsp:
+                    print("%s already claimed (workspace stays %s)" % (args[0], wsp))
+                else:
+                    print("%s already claimed (nothing changed)" % args[0])
             else:
                 print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "describe":
+        what = askfor = None
+        if "--what" in args:
+            what = args[args.index("--what") + 1]
+        if "--ask-me-for" in args:
+            askfor = args[args.index("--ask-me-for") + 1]
+        names = [a for a in args if not a.startswith("--")
+                 and a not in (what, askfor)]
+        if not names or (what is None and askfor is None):
+            sys.stderr.write("usage: communicate homi describe <name> "
+                             "[--what TEXT] [--ask-me-for TEXT]\n")
+            return 1
+        r = _call({"op": "describe", "name": names[0], "what": what,
+                   "ask_me_for": askfor})
+        if r.get("ok"):
+            print("described %s: %s" % (r["name"], r["card"]["what"]))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
@@ -3077,10 +3505,13 @@ def cli_call(argv):
         n = 1
         timeout = 120.0
         want_json = "--json" in args
+        worktree = False
         rest = []
         i = 0
         while i < len(args):
             a = args[i]
+            if a == "--worktree":
+                worktree = True; i += 1; continue
             if a == "--cli" and i + 1 < len(args):
                 cli = args[i + 1]; i += 2; continue
             if a == "--cwd" and i + 1 < len(args):
@@ -3117,10 +3548,10 @@ def cli_call(argv):
         if op == "spawn":
             if not rest:
                 sys.stderr.write("usage: communicate homi spawn <name> --cli claude|codex "
-                                 "[--cwd DIR] [--json]\n")
+                                 "[--cwd DIR] [--worktree] [--json]\n")
                 return 1
             req = {"op": "spawn", "name": rest[0], "cmd": cmd, "cwd": cwd,
-                   "adopt": adopt}
+                   "adopt": adopt, "cli": cli, "worktree": worktree}
             r = _call(req, timeout=60)
             print(json.dumps(r) if want_json
                   else (("%s -> %s" % (r.get("name"), r.get("seat")))
@@ -3148,6 +3579,16 @@ def cli_call(argv):
     if op == "statepath":
         print(state_root())
         return 0
+    if op == "restart":
+        if not args:
+            sys.stderr.write("usage: communicate homi restart <name>\n")
+            return 1
+        r = _call({"op": "restart", "name": args[0]}, timeout=60)
+        if r.get("ok"):
+            print("restarted %s on %s" % (r["name"], r["seat"]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
     if op == "premove":
         if not args:
             sys.stderr.write("usage: communicate homi premove <name> [--json]\n")
