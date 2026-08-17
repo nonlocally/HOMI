@@ -107,7 +107,7 @@ the far inbox; the transcript resumed-able by `claude --resume <sid>` there.
   never shadow a local name); return-path auto-grant only for names YOU
   message outward; `control.token` gates the control socket once any fleet
   link exists (a forward-only peer can dial sockets but can't read files).
-- The forward-only key line (recovered from the peer collaboration, verified
+- The forward-only key line (recovered from the collaborator collaboration, verified
   against a throwaway sshd): `restrict,port-forwarding,command="/usr/bin/false"`
   — refuses exec/PTY; carries socket forwards; the grant is indivisible on
   OpenSSH 10.2 (documented honestly, bounded at other layers).
@@ -153,7 +153,7 @@ noted here so they're not lost):
    The harvest triage (what to keep/reject and why) is in
    `docs/studies/2026-08-16-harvest-old-homi.md`.
 3. **Cross-fleet live test with a real second operator** — the machinery is
-   tested between two local daemons; the human half (peer's side) needs a
+   tested between two local daemons; the human half (the collaborator's side) needs a
    willing peer.
 4. **Boxed CLAUDE agent** — the shim + transport are live-proven; putting a
    real claude CLI inside the image (per-agent credentials, never copies) is

@@ -2,7 +2,7 @@
 
 Date: 2026-08-16 · Two people, two machines, two tailnets, two Unix users. Goal: someone downloads
 homi and uses it; two people inter-communicate across shared cluster access OR shared agent comms.
-Grounded in the recovered aadarwal↔peer scheme (communicate#4/#6/#7/#8, PixCell#87). Probes ran
+Grounded in the recovered aadarwal↔collaborator scheme (communicate#4/#6/#7/#8, PixCell#87). Probes ran
 against a throwaway sshd on localhost + one read-only check of air-2; no real authorized_keys touched.
 
 ## Verified facts (throwaway sshd, OpenSSH 10.2)
@@ -40,7 +40,7 @@ OWNER of each machine.
   `{"v":1,"kind":"homi-card","fleet":"aadarwal","addr":"aadarwal@air-2.tailXXXX.ts.net",
    "tailscale_ip":"100.64.10.7","pubkey":"ssh-ed25519 …","fingerprint":"SHA256:…",
    "inbound":"/Users/aadarwal/.local/state/communicate/homi/in/peer.sock"}`
-  (inbound = where A receives peer's envelopes — in the card because the key can't echo $HOME).
+  (inbound = where A receives the collaborator's envelopes — in the card because the key can't echo $HOME).
 - **B: `homi federate accept aadarwal --card '…'`** → confirm fingerprint → append to
   `~/.ssh/authorized_keys`:
   `restrict,port-forwarding,from="100.64.10.7",command="/usr/bin/false" ssh-ed25519 … homi-fleet:aadarwal`
@@ -50,12 +50,12 @@ OWNER of each machine.
 - **A: `homi federate accept peer --card '…B'`** → mirror. Both dial OUTBOUND ONLY:
   `ssh -N -o BatchMode=yes -o IdentitiesOnly=yes -i keys/fleet_ed25519 -o ExitOnForwardFailure=yes
    -o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes
-   -L links/peer.sock:/home/peer-user/.local/state/communicate/homi/in/aadarwal.sock
-   peer-user@peer-device.tailYYYY.ts.net`
+   -L links/peer.sock:/home/<their-user>/.local/state/communicate/homi/in/aadarwal.sock
+   <their-user>@<collaborator-host>.tailYYYY.ts.net`
   = `_ssh_cmd` with two deltas: `-i`+IdentitiesOnly (fleet key not default agent keys), and the
   remote path VERBATIM from the card (not `_remote_home()` composition).
 - **Network:** each owner Tailscale-shares their gateway into the other's tailnet; ACL row
-  `{"action":"accept","src":["autogroup:shared"],"dst":["peer-device:22"]}`. Two #87 checks:
+  `{"action":"accept","src":["autogroup:shared"],"dst":["<collaborator-host>:22"]}`. Two #87 checks:
   Tailscale SSH does NOT cover shared-in external users (real authorized_keys required — which we
   install); verify the shared node with `tailscale whois` + node ID on both sides (a share once
   served .12 for a box owning .13).
@@ -92,7 +92,7 @@ wake. If librarian asleep the request WAITS (what the rendezvous bridge couldn't
 wakes, applies policy, asks ITS OWN operator for node-hour consent (B approves spend not A),
 dispatches Slurm, replies with provenance in-band (the #6 precedent: `tidy3d 2.9.1 @ Engaging,
 Slurm 19988227, input_sha256 …, 12s wall`). The capability crossed; the account did not.
-**Alternative (scoped account, PixCell #87):** uid 1008, groups video/render, NO sudo, keys from
+**Alternative (scoped account, PixCell #87):** a scoped uid, lab groups, NO sudo, keys from
 github.com/aadarwal.keys, ACL to one host:22. Rule: grant capability first; escalate to a scoped
 account only when the librarian conversation becomes the bottleneck (RL loops on a live GPU kernel);
 middle rung: librarian stands up Jupyter-on-GPU and hands A localhost:port+token (a session
@@ -111,7 +111,7 @@ L5 EXECUTION payload is text; capability only via receiving agent's own sandbox 
 TCP egress — cannot be narrowed at ssh without breaking socket forwards. Mitigations: Claude holds
 foreign turns + drops session_id-mismatched frames; **homi.sock requires control.token (a
 forward-only peer can connect to sockets but can't read files)**; from= + one-host ACL. This is the
-boundary peer accepted and twice declined to widen.
+boundary the collaborator accepted and twice declined to widen.
 
 ## 6. One naming scheme across fleets
 Bare name = fleet-local. `name@suffix`: suffix resolves against YOUR routes (own devices = full

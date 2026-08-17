@@ -75,7 +75,7 @@ local model will then *roleplay* tool results, convincingly and wrongly.
 
 - Roster question in the UI → real `list_agents` execution ("Explored
   list_agents" block): gds-agent + tidy3d-agent LIVE/dispatchable; the
-  maintainer and peer-agent correctly shown as
+  maintainer and <their-agent> correctly shown as
   not dispatchable. No hallucinated agents.
 - "Have the gds agent generate a 10 micron radius ring resonator GDS" →
   dispatch → codex → gdsfactory → file on disk, path relayed verbatim:

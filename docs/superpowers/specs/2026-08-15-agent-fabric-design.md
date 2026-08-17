@@ -29,7 +29,7 @@ The organizing spine is the four-layer decomposition:
 | **1 Identity** | a durable name, decoupled from any process; == the session's `/rename` name | registry object + rename-sync | communicate sidecar `name`; beam's `custom-title` append; Switchboard `aliases:` |
 | **2 Address** | a durable mailbox; inbound and outbound are *separate* addresses | store-and-forward + typed reach | cc_peer mailbox `inbox.jsonl`; anu reply-file channel |
 | **3 Network mgmt** | the per-device **homi** daemon that routes, probes, and does store→wake | launchd singleton | anu `watchd` lifecycle; Switchboard launchd persistence; communicate socket-wake |
-| **4 Permissions** | (a) who may message whom; (b) what compute/fs/net an identity is bound to | mailbox ACL + forward-only key + apple/container | peer's restricted key; `box`; apple/container v1.0.0 |
+| **4 Permissions** | (a) who may message whom; (b) what compute/fs/net an identity is bound to | mailbox ACL + forward-only key + apple/container | the collaborator's restricted key; `box`; apple/container v1.0.0 |
 
 ## Decisions taken (with the fork they resolve)
 
@@ -81,11 +81,11 @@ homi, not chosen by the sender.
 **Registry entry (extends the PR #2 schema, unchanged fields plus typed `reach:`):**
 
 ```yaml
-name: peer-agent        # durable identity == the session's /rename name
+name: <their-agent>        # durable identity == the session's /rename name
 kind: claude-code | codex | mailbox | box
-operator: peer
+operator: <their-operator>
 reach:
-  mail:  peer-agent@peer-device   # agent↔agent, durable (homi-owned)
+  mail:  <their-agent>@<collaborator-host>   # agent↔agent, durable (homi-owned)
   pane:  air-2:%82                           # agent↔pane, ephemeral (tmux route)
   box:   box-fdtd-3 / 192.168.64.5           # sandboxed (v2)
 aliases: [agent-2, librarian]     # historical / session names still resolve
@@ -146,7 +146,7 @@ shape: pidfile, atomic-mkdir lock, self-enforcement, auto-exit when its substrat
    that does.
 5. **Cross-device = homi ↔ homi.** Exactly one link per device pair. On your own
    tailnet (v1): ordinary SSH. Cross-fleet (v2): the forward-only restricted key. **GitHub
-   remains the auditable slow-path fallback** (peer's #8 argument: the only channel that
+   remains the auditable slow-path fallback** (the collaborator's #8 argument: the only channel that
    worked all day, and it leaves a trail).
 
 **Efficiency:** one mostly-idle process — a probe timer, a kqueue/inotify watch on the mailbox
@@ -180,7 +180,7 @@ socket can inject a turn."
   socket forwarding works, **no shell, no exec, no pty**. Plus `StreamLocalBindUnlink yes` at
   the *sshd* end (grants no new authority; converts "renegotiate after every restart" into
   "reconnects on its own") and a tailnet ACL to exactly one `host:22`. **Grant capability, not
-  credentials** — the Engaging/Slurm FDTD campaign ran on peer's cluster without you ever
+  credentials** — the Engaging/Slurm FDTD campaign ran on the collaborator's cluster without you ever
   holding an Engaging allocation; the registry entry + a message channel beat account
   provisioning.
 - **Sandbox-identity = apple/container** (v1.0.0, this host is macOS 26 with the full
@@ -240,4 +240,4 @@ the eventual operator console, not v1).
 | PR #9 Switchboard | provenance liveness; "a socket file is not a listener"; launchd stable-path persistence; `aliases:`; "patching doesn't move an agent" |
 | HOMI-engine | "identity is a registry object, not a pane id" — the four separable planes |
 | apple/container | per-VM isolation; unix socket crosses the boundary → sandbox identity == peer identity |
-| peer collaboration | the forward-only restricted key; grant-capability-not-credentials; GitHub as auditable fallback |
+| the collaborator work | the forward-only restricted key; grant-capability-not-credentials; GitHub as auditable fallback |

@@ -69,7 +69,7 @@ Two surfaces are both replaced by homi *and* actively wrong. The user's instruct
 - `origin/switchboard` — its provenance ladder is already absorbed into homi; its `aliases` idea is adopted in Task 1. Delete the branch **after** Task 1 lands, when nothing in it is unrepresented.
 
 **Files:**
-- Delete: `registry/aadarwal-communicate-maintainer.md`, `registry/peer-agent.md`, `registry/gds-agent.md`, `registry/mini-agent.md`, `registry/tidy3d-agent.md`, `lib/directory.sh`
+- Delete: `registry/aadarwal-communicate-maintainer.md`, `registry/<their-agent>.md`, `registry/gds-agent.md`, `registry/mini-agent.md`, `registry/tidy3d-agent.md`, `lib/directory.sh`
 - Create: `registry/EXAMPLE.md`
 - Modify: `bin/communicate` (remove the `directory` case + source line), `registry/README.md`, `.gitignore`, `openwebui/dispatch_tool.py`
 
@@ -81,15 +81,15 @@ Two surfaces are both replaced by homi *and* actively wrong. The user's instruct
 ```bash
 cd /Users/aadarwal/src/aadarwal/communicate
 git ls-files registry/
-grep -n 'device:\|operator:\|example-org' registry/peer-agent.md
+grep -n 'device:\|operator:\|<their-org>' registry/<their-agent>.md
 ```
-Expected: 6 tracked files; the peer card discloses `peer-device.mit.edu`, `peer-handle`, `example-org/example-repo`.
+Expected: 6 tracked files; the the collaborator card discloses `<collaborator-host>`, `<collaborator-handle>`, `<their-org>/<their-repo>`.
 
 - [ ] **Step 2: Delete the entries and the lying join**
 
 ```bash
 git rm -q registry/aadarwal-communicate-maintainer.md \
-          registry/peer-agent.md \
+          registry/<their-agent>.md \
           registry/gds-agent.md registry/mini-agent.md registry/tidy3d-agent.md \
           lib/directory.sh
 ```
