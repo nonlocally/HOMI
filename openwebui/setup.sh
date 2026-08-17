@@ -49,9 +49,16 @@ start_bg open-terminal "$STATE/open-terminal.pid" "$STATE/open-terminal.log" \
   open-terminal run --host 127.0.0.1 --port "$OT_PORT" --api-key "$(cat "$KEYF")"
 
 # --- open webui (bare metal, localhost) ---
+# Pin the session-signing key in $SECRETS, the same way open-terminal's is pinned
+# above. Without WEBUI_SECRET_KEY set, open-webui generates one into
+# .webui_secret_key in its WORKING DIRECTORY — which is how a signing key once
+# ended up committed to this repo. With it set, that file is never written.
+WKEY="$SECRETS/webui-secret.key"
+[ -f "$WKEY" ] || { openssl rand -hex 32 > "$WKEY"; chmod 600 "$WKEY"; }
 command -v open-webui >/dev/null || uv tool install --python 3.12 open-webui
 start_bg open-webui "$STATE/open-webui.pid" "$STATE/open-webui.log" \
   env OLLAMA_BASE_URL="http://127.0.0.1:11434" WEBUI_URL="http://127.0.0.1:$OWUI_PORT" \
+      WEBUI_SECRET_KEY="$(cat "$WKEY")" \
   open-webui serve --host 127.0.0.1 --port "$OWUI_PORT"
 
 for i in $(seq 1 60); do up "http://127.0.0.1:$OWUI_PORT/health" && break; sleep 2; done
