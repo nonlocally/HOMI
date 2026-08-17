@@ -13,6 +13,16 @@ export const LAUNCHD_LABEL = "com.communicate.homi";
 export const LAUNCHD_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 
 export function renderPlist(python: string, daemon: string, self: string): string {
+  // Mirror the repo installer's env preservation (lib/homi.sh): a user with
+  // HOMI_SOCK_DIR / HOMI_SESSIONS_DIR exported must not get a daemon that
+  // binds sockets and plants sidecars in dirs their clients never look at.
+  const extra =
+    (process.env.HOMI_SOCK_DIR
+      ? `\n    <key>HOMI_SOCK_DIR</key><string>${process.env.HOMI_SOCK_DIR}</string>`
+      : "") +
+    (process.env.HOMI_SESSIONS_DIR
+      ? `\n    <key>HOMI_SESSIONS_DIR</key><string>${process.env.HOMI_SESSIONS_DIR}</string>`
+      : "");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -23,7 +33,7 @@ export function renderPlist(python: string, daemon: string, self: string): strin
   <key>EnvironmentVariables</key><dict>
     <key>COMM_STATE</key><string>${process.env.COMM_STATE || path.dirname(stateRoot())}</string>
     <key>HOMI_SELF</key><string>${self}</string>
-    <key>PATH</key><string>${LAUNCHD_PATH}</string>
+    <key>PATH</key><string>${LAUNCHD_PATH}</string>${extra}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

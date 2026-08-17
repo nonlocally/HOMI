@@ -241,6 +241,20 @@ if [ "$adead1" -gt "$adead0" ] && ! printf '%s' "$libbox" | grep -q "post-rekey"
   ok "grants pinned to the ORIGINAL key: swapped-key link refused"
 else bad "grant fp pin (dead $adead0 -> $adead1)"; fi
 
+echo "== the re-key ceremony: revoke clears the pin, re-connect works"
+bcomm homi federate revoke alice >/dev/null 2>&1
+if ! grep -q '"fp"' "$T/b/homi/grants/alice.json" 2>/dev/null; then
+  ok "revoke cleared the persisted fingerprint pin"
+else bad "revoke cleared the pin (got: $(cat "$T/b/homi/grants/alice.json" 2>/dev/null))"; fi
+out="$(bcomm homi connect @alice --code "$CODE" --yes --direct 2>&1)"
+if [ $? -eq 0 ]; then
+  ok "re-connect after revoke accepted (the documented re-key path is livable)"
+else bad "re-connect after revoke (got: $out)"; fi
+bcomm homi grant alice librarian >/dev/null 2>&1
+acomm homi send librarian@bob "after re-key ceremony" --from orchestrator >/dev/null 2>&1
+wait_for 12 "mail flows again after the ceremony" \
+  grep -q "after re-key ceremony" "$T/b/homi/mail/librarian/inbox.jsonl"
+
 echo "== links restore-tuple guard: the persisted link record's key set is pinned"
 lkeys="$(python3 -c '
 import json,sys

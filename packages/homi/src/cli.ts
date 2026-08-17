@@ -97,7 +97,9 @@ function probeSocket(p: string, timeoutMs = 800): Promise<boolean> {
 // Measured first-run proof: a real claim, a real send, the line really landing
 // in the durable inbox. Never advertise what you have not measured.
 async function selfTest(): Promise<number | null> {
-  const name = "homi-selftest";
+  // A UNIQUE name: claiming an existing "homi-selftest" would be a no-op but
+  // the release would destroy someone's real identity out from under them.
+  const name = "homi-selftest-" + Math.random().toString(16).slice(2, 8);
   const token = "selftest-" + Math.random().toString(16).slice(2, 10);
   const t0 = Date.now();
   try {
@@ -151,6 +153,28 @@ async function setup(args: string[]) {
     console.error(`• launchd ${ok ? "installed" : "install attempted"}: ${plistPath}`);
   } else if (!incumbent) {
     console.error("• (persistence install: on Linux run `communicate homi install` from the repo; systemd unit)");
+  } else if (process.platform === "darwin" && !noPersist) {
+    // The incumbent gate is exactly where a split-brain machine lands (the
+    // right-root daemon answers while the BROKEN old plist still owns boot),
+    // so a wrong plist must be repaired here or it never is.
+    const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist");
+    if (fs.existsSync(plistPath)) {
+      const content = fs.readFileSync(plistPath, "utf8");
+      const m = content.match(/<key>COMM_STATE<\/key><string>([^<]*)<\/string>/);
+      const broken = !m || path.join(m[1], "homi") !== stateRoot() || !/<key>PATH<\/key>/.test(content);
+      if (broken) {
+        console.error(`• launchd unit is WRONG (state root ${m ? m[1] : "missing"} / PATH ${/<key>PATH<\/key>/.test(content) ? "ok" : "missing"}) — an old installer bug`);
+        let repair = yes;
+        if (!repair && process.stdin.isTTY && !args.includes("-y"))
+          repair = /^y?$/i.test(await promptLine("  rewrite it now (restarts the daemon through the fixed unit)? [Y/n] "));
+        if (repair) {
+          const { ok } = installLaunchd(python, daemon, self);
+          console.error(`• launchd unit ${ok ? "repaired" : "rewrite attempted"} — check any orphaned mail under ~/.local/state/homi before deleting it`);
+        } else {
+          console.error("• leaving the broken unit — after the next reboot the daemon will bind the wrong state root");
+        }
+      }
+    }
   }
 
   // Ensure it's up (autostart if launchd didn't take).

@@ -158,6 +158,13 @@ st="$("$COMM" homi status --json 2>/dev/null)"
 if [ "$(printf '%s' "$st" | jget ok)" = "True" ] && [ "$(printf '%s' "$st" | jget self user)" = "None" ]; then
   ok "boot without user.json: daemon healthy, user null again"
 else bad "boot without user.json: daemon healthy, user null again"; fi
+"$COMM" homi stop >/dev/null 2>&1; sleep 0.5
+printf '{"v":1,"handle":12}' > "$HOMIS/user.json"   # wrong TYPE, valid JSON
+"$COMM" homi start >/dev/null 2>&1; sleep 1
+st="$("$COMM" homi status --json 2>/dev/null)"
+if [ "$(printf '%s' "$st" | jget ok)" = "True" ] && [ "$(printf '%s' "$st" | jget self user)" = "None" ]; then
+  ok "a non-string handle degrades to unclaimed (no crash-loop)"
+else bad "a non-string handle degrades to unclaimed (got: $(printf '%s' "$st" | head -c 120))"; fi
 
 echo
 echo "pass=$pass fail=$fail"

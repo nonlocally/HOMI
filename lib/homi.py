@@ -152,8 +152,12 @@ def load_user(root):
         return None
     if not isinstance(u, dict):
         return None
-    handle = u.get("handle") or ""
-    if not _HANDLE_RE.match(handle) or handle in Homi._RESERVED:
+    handle = u.get("handle")
+    # A non-string handle (hand-edit, partial write, future writer) must
+    # degrade to unclaimed, never crash run() before the control server is up
+    # (KeepAlive would then crash-loop) — `or ""` sanitizes falsy, not wrong-type.
+    if not isinstance(handle, str) or not _HANDLE_RE.match(handle) \
+            or handle in Homi._RESERVED:
         return None
     return u
 
@@ -238,6 +242,7 @@ class Homi:
         # link exists). Both loaded/created in run().
         self.grants = {}       # fleet -> set of names (HUMAN grants, permanent)
         self.grant_auto = {}   # fleet -> {name: expiry} (return paths, TTL'd)
+        self.grant_auto_saved = {}  # fleet -> {name: last-PERSISTED expiry}
         self.grant_fp = {}     # fleet -> key fingerprint pinned at first grant
         # One lock for all three grant maps: sends auto-grant on the control
         # thread while link threads check _is_granted — an unlocked rebind of
@@ -252,6 +257,12 @@ class Homi:
         self.deliver_mu = {}                # name -> Lock (one drain per name)
         self.stop_ev = threading.Event()
         self.identities = {}   # name -> {"sock", "claimed_at", "kind", ["home"]}
+        # Records that failed to re-bind at load (e.g. a now-too-long socket
+        # path): kept verbatim so persist round-trips them instead of ERASING
+        # the durable record (workspace/card/mail) of an identity we merely
+        # can't serve this session.
+        self._parked_idents = {}
+        self._parked_links = {}
         self.seen = {}         # name -> set of received msg_ids (dedup)
         self.links = {}        # device -> {"addr", "sock", "created_at"}
         self.link_in = {}      # device -> inbound server socket (arrival line)
@@ -353,16 +364,20 @@ class Homi:
             f.write(str(self.pid))
 
     # -- sockets --
+    # The AF_UNIX sun_path cap: 104 bytes on macOS (→103 usable after the NUL),
+    # 108 on Linux (→107). Guard at the real per-platform limit — a lower bound
+    # would reject paths that bound fine before and, worse, make restore treat
+    # a live record as unloadable.
+    _SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
+
     def bind_unix(self, path, backlog=64):
-        # The AF_UNIX sun_path cap (~104 bytes on macOS, 108 Linux) was a known
-        # design fact with no guard — a deep state root failed at bind() with a
-        # raw OSError. Fail loud with the exact fix instead.
-        if len(path.encode()) > 100:
+        if len(path.encode()) > self._SUN_PATH_MAX:
             raise OSError(
-                "socket path too long (%d bytes; sun_path caps at ~104): %s — "
-                "shorten the name, or move its parent (HOMI_SOCK_DIR for "
-                "identity sockets, COMM_STATE for the state root; e.g. "
-                "/tmp/homi-%d)" % (len(path.encode()), path, os.getuid()))
+                "socket path too long (%d bytes; this platform caps sun_path at "
+                "%d): %s — shorten the name, or move its parent (HOMI_SOCK_DIR "
+                "for identity sockets, COMM_STATE for the state root; e.g. "
+                "/tmp/homi-%d)"
+                % (len(path.encode()), self._SUN_PATH_MAX, path, os.getuid()))
         if os.path.exists(path):
             os.unlink(path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -429,6 +444,11 @@ class Homi:
                         "card": e.get("card"),
                         "supervision": e.get("supervision")}
                     for n, e in self.identities.items()}
+        # A name that became live supersedes its parked copy; round-trip the rest.
+        for n in [n for n in self._parked_idents if n in data]:
+            self._parked_idents.pop(n, None)
+        for n, e in self._parked_idents.items():
+            data.setdefault(n, e)
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
     def _plant(self, name):
@@ -1703,6 +1723,7 @@ class Homi:
             r = self._do_claim(name, boxed=bool(e.get("boxed")))
             if not r.get("ok"):
                 self.log("re-claim failed:", name, r.get("err"))
+                self._parked_idents[name] = e   # keep it — never erase on persist
                 continue
             with self.mu:
                 if name in self.identities:
@@ -1823,6 +1844,12 @@ class Homi:
                         "card_v": e.get("card_v"),
                         "created_at": e.get("created_at")}
                     for d, e in self.links.items()}
+        # A re-established link supersedes its parked copy; round-trip the rest
+        # so a bad link never loses its durable record.
+        for d in [d for d in self._parked_links if d in data]:
+            self._parked_links.pop(d, None)
+        for d, e in self._parked_links.items():
+            data.setdefault(d, e)
         _atomic_write(self.path("links.json"), json.dumps(data, indent=1))
 
     # -- cross-fleet: control token, grants, cards --------------------------------
@@ -1921,6 +1948,7 @@ class Homi:
                     self.grant_auto[fleet] = {
                         n: t for n, t in (data.get("auto") or {}).items()
                         if isinstance(t, (int, float)) and t > now}
+                    self.grant_auto_saved[fleet] = dict(self.grant_auto[fleet])
                     if data.get("fp"):
                         self.grant_fp[fleet] = data["fp"]
 
@@ -1937,6 +1965,7 @@ class Homi:
             data["fp"] = self.grant_fp[fleet]
         _atomic_write(self.path("grants", fleet + ".json"),
                       json.dumps(data, indent=1))
+        self.grant_auto_saved[fleet] = dict(auto)   # what is now on disk
 
     def _pin_grant_fp(self, fleet):
         """First grant to a fleet pins the key it was made to. A petname later
@@ -1973,12 +2002,18 @@ class Homi:
         except ValueError:
             ttl = 604800.0
         with self.grants_mu:
-            old = self.grant_auto.get(fleet, {}).get(name)
-            self.grant_auto.setdefault(fleet, {})[name] = time.time() + ttl
-            if old is None or (time.time() + ttl - old) > ttl / 10.0:
+            new_exp = time.time() + ttl
+            fresh = name not in self.grant_auto.get(fleet, {})
+            self.grant_auto.setdefault(fleet, {})[name] = new_exp
+            # Persist only when the DURABLE record has drifted > TTL/10 behind
+            # the true expiry — comparing to the last PERSISTED value, not the
+            # in-memory one (which is refreshed every send, so comparing to it
+            # persisted exactly once and let the on-disk expiry freeze and lapse
+            # a still-active conversation across a restart).
+            saved = self.grant_auto_saved.get(fleet, {}).get(name, 0)
+            if new_exp - saved > ttl / 10.0:
                 self._pin_grant_fp(fleet)
                 self._persist_grant(fleet)
-            fresh = old is None
         if fresh:
             self.log("auto-granted return path:", name, "to fleet", fleet,
                      "(ttl %ds)" % int(ttl))
@@ -2277,6 +2312,16 @@ class Homi:
                 pass
         if not ent:
             return {"ok": False, "err": "not linked: %s" % device}
+        # Clear the key-fingerprint pin so the documented re-key ceremony
+        # (`federate revoke` → re-connect) actually works: the pin is
+        # write-once, so a stale pin would fail-closed every inbound envelope
+        # from the re-keyed peer forever. Human grants stay (same person,
+        # new key); the next grant/auto-grant re-pins to the new key.
+        with self.grants_mu:
+            if self.grant_fp.pop(device, None) is not None:
+                # The on-disk grants file carries the pin even when no human
+                # grant does (auto-grants persist it) — rewrite it pin-less.
+                self._persist_grant(device)
         self._persist_links()
         self.log("unlinked device:", device)
         return {"ok": True}
@@ -2296,11 +2341,15 @@ class Homi:
                                   card_v=e.get("card_v"))
             except OSError as e2:
                 # One bad link (e.g. an over-long socket path) must not take
-                # the whole restore — and the daemon — down with it.
+                # the whole restore — and the daemon — down with it, NOR erase
+                # the link's durable record (addr/remote_in/key_fp/handle) on
+                # the next persist.
                 self.log("re-link failed:", device, e2)
+                self._parked_links[device] = e
                 continue
             if not r.get("ok"):
                 self.log("re-link failed:", device, r.get("err"))
+                self._parked_links[device] = e
 
     def _link_server(self, device, srv):
         while not self.stop_ev.is_set():
@@ -2500,9 +2549,16 @@ class Homi:
                     "far_device": resp.get("device"),
                     "far_version": resp.get("version"),
                     "far_user": resp.get("user")}
-        if not resp.get("ok"):
+        # ONLY the exact pre-ping refusal means an old kernel — a pre-ping
+        # daemon rejects an unknown envelope kind with "bad envelope". Any
+        # other ok:false is a real far-side error the transport carried back;
+        # report it, don't tell the user to run a pointless upgrade.
+        if not resp.get("ok") and resp.get("err") == "bad envelope":
             return {"ok": True, "device": device, "rtt_ms": rtt,
                     "transport": "up", "legacy_peer": True}
+        if not resp.get("ok"):
+            return {"ok": False, "device": device, "rtt_ms": rtt,
+                    "transport": "up", "err": resp.get("err") or "far error"}
         return {"ok": False, "err": "unexpected ack: %r" % resp}
 
     def _send_envelope_result(self, endpoint, env, timeout=10.0):
@@ -2826,9 +2882,13 @@ class Homi:
         if op == "revoke-grant":
             return self._do_revoke_grant(req.get("fleet", ""), req.get("name", ""))
         if op == "grants":
+            now = time.time()
             with self.grants_mu:
                 snap = {f: sorted(s) for f, s in self.grants.items()}
-            return {"ok": True, "grants": snap}
+                auto = {f: {n: t for n, t in m.items() if t > now}
+                        for f, m in self.grant_auto.items()}
+            auto = {f: m for f, m in auto.items() if m}
+            return {"ok": True, "grants": snap, "auto": auto}
         if op == "card":
             return self._do_card(signed=bool(req.get("signed")))
         if op == "user":
@@ -3063,6 +3123,18 @@ _PUBKEY_RE = re.compile(
 _IP_RE = re.compile(r"^[0-9a-fA-F:.]{3,45}$")
 
 
+def _valid_ssh_addr(addr):
+    """An ssh login target safe to pass positionally: [user@]host, no option-
+    shaping. Rejects a leading dash (ssh would read it as -oProxyCommand=…)
+    and any whitespace/control char — the guard connect needs on a card's
+    peer-controlled `addr`, matching what pair and move already enforce."""
+    if not addr or not isinstance(addr, str):
+        return False
+    if addr[0] == "-" or any(c.isspace() for c in addr):
+        return False
+    return bool(re.match(r"^[A-Za-z0-9_.@:%+/-]{1,255}\Z", addr))
+
+
 def _card_fp(pubkey):
     """The fingerprint of the card's OWN key material — the only fingerprint
     that may ever be displayed or pinned. The card's `fingerprint` field is
@@ -3259,10 +3331,14 @@ def _cli_pair(args):
                   "HOMI_SELF=%s HOMI_TICK=1 "
                   % (shlex.quote(far_state), shlex.quote(far_home),
                      shlex.quote(far_home), shlex.quote(name_override or "fardev")))
-        far_daemon_dir = "%s/daemon" % far_home
+        far_stage_dir = "%s/daemon" % far_home  # test: no version/current split
+        far_run = far_stage_dir + "/homi.py"
     else:
-        far_daemon_dir = "~/.local/share/homi/daemon/%s" % HOMI_VERSION
-    far_daemon = far_daemon_dir + "/homi.py"
+        # STAGE into a versioned dir; RUN/PROBE through `current` — so an
+        # existing install of ANY version is found (a version-pinned run path
+        # would miss a live far daemon and misclassify it ABSENT).
+        far_stage_dir = "~/.local/share/homi/daemon/%s" % HOMI_VERSION
+        far_run = "~/.local/share/homi/daemon/current/homi.py"
 
     far_prefix = [None]  # "communicate" | "kernel"
 
@@ -3271,17 +3347,19 @@ def _cli_pair(args):
             return _pair_ssh(addr, "%scommunicate homi %s" % (farenv, verb_args),
                              timeout)
         return _pair_ssh(addr, "%spython3 %s call %s"
-                         % (farenv, far_daemon, verb_args), timeout)
+                         % (farenv, far_run, verb_args), timeout)
 
     def far_probe():
+        # Try the kernel path FIRST (works on a bare batch PATH); fall back to
+        # `communicate` (a repo install, only if it happens to be on PATH).
+        rc, out = _pair_ssh(addr, "%spython3 %s call status --json"
+                            % (farenv, far_run))
+        if rc == 0 and out.lstrip().startswith("{"):
+            far_prefix[0] = "kernel"
+            return out
         rc, out = _pair_ssh(addr, "%scommunicate homi status --json" % farenv)
         if rc == 0 and out.lstrip().startswith("{"):
             far_prefix[0] = "communicate"
-            return out
-        rc, out = _pair_ssh(addr, "%spython3 %s call status --json"
-                            % (farenv, far_daemon))
-        if rc == 0 and out.lstrip().startswith("{"):
-            far_prefix[0] = "kernel"
             return out
         return None
 
@@ -3293,7 +3371,7 @@ def _cli_pair(args):
                                                shlex.quote(far_home)))
             if far_home else ""))
         _pair_ssh(addr, "%snohup python3 %s daemon >> %s/homi/daemon.log 2>&1 "
-                  "& sleep 0.3" % (farenv, far_daemon, st))
+                  "& sleep 0.3" % (farenv, far_run, st))
 
     print("pair: enrolling %s as YOUR device" % addr)
 
@@ -3312,9 +3390,9 @@ def _cli_pair(args):
                     ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py")]
 
     def stage_kernel():
-        _pair_ssh(addr, "mkdir -p %s" % far_daemon_dir)
+        _pair_ssh(addr, "mkdir -p %s" % far_stage_dir)
         r = subprocess.run(["scp", "-q", "-o", "BatchMode=yes"] + kernel_files
-                           + ["%s:%s/" % (addr, far_daemon_dir)],
+                           + ["%s:%s/" % (addr, far_stage_dir)],
                            capture_output=True, text=True, timeout=60)
         return r.returncode == 0
 
@@ -3465,6 +3543,14 @@ def _cli_pair(args):
     # transport is kept).
     links = _read_json(os.path.join(state_root(), "links.json"), {})
     prior = links.get(fardev) or {}
+    if prior.get("kind") == "fleet":
+        # The far device calls itself the same as an existing FLEET petname —
+        # linking would repoint a collaborator's route (and their pinned key /
+        # grant posture) at your own laptop. Same-namespace collision law as
+        # connect, mirrored.
+        print("        FAILED: %r is already a fleet (person) link here — "
+              "rename the far device (HOMI_SELF) and re-run" % fardev)
+        return 1
     if far_home:
         transport = {"sock": "%s/homi/in/%s.sock" % (far_state, mydev)}
         kept = prior.get("sock") == transport["sock"]
@@ -3596,6 +3682,13 @@ def _cli_connect(args):
                          "       communicate homi connect @<handle> --check\n")
         return 1
     if args[0] == "--invite":
+        # Trust verbs refuse on an unclaimed fabric (load_user's degraded-mode
+        # contract): without a claimed handle the invite would carry the OS
+        # username, which the peer's connect can't accept as a handle.
+        u = _call({"op": "user"})
+        if not (u.get("user") or {}).get("handle"):
+            sys.stderr.write("claim a handle first: communicate homi init\n")
+            return 1
         r = _call({"op": "card", "signed": True})
         if not r.get("ok"):
             sys.stderr.write((r.get("err") or "failed") + "\n")
@@ -3672,7 +3765,11 @@ def _cli_connect(args):
     if not mine.get("ok"):
         sys.stderr.write("cannot read own card: %s\n" % mine.get("err"))
         return 1
-    my_name = mine["card"].get("user") or mine["card"].get("fleet")
+    my_name = mine["card"].get("user")
+    if not my_name:
+        sys.stderr.write("claim a handle first (the link's return address is "
+                         "your handle): communicate homi init\n")
+        return 1
     if handle == my_name:
         sys.stderr.write("refusing: @%s is YOUR OWN handle\n" % handle)
         return 1
@@ -3738,6 +3835,11 @@ def _cli_connect(args):
     if "--direct" in rest:
         req["sock"] = remote_in
     else:
+        # The card's addr is peer-controlled and flows into the ssh argv —
+        # validate it exactly as pair does, even from a confirmed peer.
+        if not _valid_ssh_addr(card.get("addr")):
+            sys.stderr.write("refusing card: bad addr %r\n" % card.get("addr"))
+            return 1
         req["addr"] = card.get("addr")
     r = _call(req)
     if not r.get("ok"):
@@ -3752,6 +3854,14 @@ def _cli_connect(args):
             print("\nClose the loop — send THIS back to @%s:\n" % handle)
             print("  homi1.%s\n" % _encode_card(mineS["card"]))
             print("They run:  communicate homi connect @%s --code '<it>'" % my_name)
+        else:
+            # Never leave the loop silently open: if we can't sign a card
+            # (e.g. OpenSSH < 8.0), say so and name the manual fallback.
+            print("\n! Could not produce your counter-code (%s)."
+                  % (mineS.get("err") or "card signing failed"))
+            print("  Send @%s your card another way:  communicate homi federate "
+                  "invite %s   (or update OpenSSH to >= 8.0 for signed cards)"
+                  % (handle, handle))
 
     chk = _call({"op": "link-check", "device": handle}, timeout=20)
     if chk.get("ok") and chk.get("rtt_ms") is not None and not chk.get("legacy_peer"):
@@ -4721,8 +4831,16 @@ def cli_call(argv):
         return 1
     if op == "grants":
         r = _call({"op": "grants"})
-        for f, names in sorted((r.get("grants") or {}).items()):
+        fleets = sorted(set(r.get("grants") or {}) | set(r.get("auto") or {}))
+        for f in fleets:
+            names = (r.get("grants") or {}).get(f) or []
             print("%-20s %s" % (f, ", ".join(names) or "(none)"))
+            auto = (r.get("auto") or {}).get(f) or {}
+            for n, exp in sorted(auto.items()):
+                hrs = max(0, int((exp - time.time()) / 3600))
+                # A return path, not a human grant — shown so "who can reach me"
+                # is honest; revoke with: communicate homi ungrant <fleet> <name>
+                print("  %-18s (auto, ~%dh left)" % (n, hrs))
         return 0 if r.get("ok") else 1
     if op == "card":
         r = _call({"op": "card"})
