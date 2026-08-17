@@ -117,6 +117,38 @@ PY
 ( cd "$REPO2" && git branch --list 'homi/ws7' | grep -q . ) && bad "re-claim created a stray homi/ws7 branch in the SECOND repo" || ok "no stray branch in the second repo"
 [ -d "$T/repo2-worktrees/ws7" ] && bad "re-claim created a stray worktree dir in the SECOND repo" || ok "no stray worktree directory in the second repo"
 
+echo "== an identity claimed WITHOUT a cwd can still be given one later"
+# The freeze this covers: _do_claim is auto-invoked with no cwd on _do_ask and
+# on inbound mail, so any identity that got mail before its agent claimed it
+# was stuck at workspace:null forever — the later `claim --cwd` printed
+# "claimed" and did nothing, which also silently disarmed the move gate (it
+# skips whenever ws_path is falsy).
+# `homi ask --from ws8` auto-claims ws8 (the asker must have a home for the
+# reply) — with no cwd, exactly as inbound mail does.
+"$COMM" homi ask ws1 "are you there?" --from ws8 --timeout 1 >/dev/null 2>&1
+python3 - "$ID" <<'PY' && ok "an auto-claimed identity starts with no workspace" || bad "auto-claim workspace"
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert "ws8" in d, sorted(d)
+assert d["ws8"]["workspace"] is None, d["ws8"]
+PY
+OUT="$("$COMM" homi claim ws8 --cwd "$REPO" 2>&1)"
+python3 - "$ID" "$REPO" <<'PY' && ok "claim --cwd on an already-claimed name records the workspace" || bad "already-claimed workspace never recorded"
+import json,os,sys
+d=json.load(open(sys.argv[1]))["ws8"]["workspace"]
+assert d and os.path.realpath(d["path"])==os.path.realpath(sys.argv[2]), d
+PY
+printf '%s' "$OUT" | grep -qi 'workspace' && ok "the CLI says what it actually did ($OUT)" || bad "CLI reported a bare success ($OUT)"
+# A SECOND cwd must not re-point a live agent's world.
+"$COMM" homi claim ws8 --cwd "$REPO2" >/dev/null 2>&1
+python3 - "$ID" "$REPO" <<'PY' && ok "a later claim never re-points an existing workspace" || bad "workspace re-pointed"
+import json,os,sys
+d=json.load(open(sys.argv[1]))["ws8"]["workspace"]
+assert os.path.realpath(d["path"])==os.path.realpath(sys.argv[2]), d
+PY
+OUT="$("$COMM" homi claim ws8 --cwd "$REPO2" 2>&1)"
+printf '%s' "$OUT" | grep -qi 'already' && ok "a true no-op claim says so instead of 'claimed'" || bad "no-op claim wording ($OUT)"
+
 "$COMM" homi stop >/dev/null 2>&1
 echo; echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

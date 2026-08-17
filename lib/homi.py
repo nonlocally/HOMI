@@ -1359,10 +1359,10 @@ class Homi:
         # must never fail the claim itself, only leave the axis unset.
         #
         # A cheap pre-check skips that work entirely when `name` is already a
-        # LOCAL identity: without it, an ordinary client retry of a claim (or
-        # any repeat --worktree claim against a different --cwd) would run
-        # `git worktree add` before ever reaching the no-op below, littering
-        # the target repo with an orphaned branch + checkout nothing
+        # LOCAL identity WITH a workspace: without it, an ordinary client retry
+        # of a claim (or any repeat --worktree claim against a different --cwd)
+        # would run `git worktree add` before ever reaching the no-op below,
+        # littering the target repo with an orphaned branch + checkout nothing
         # references. A PROXY does not count as "already claimed" here —
         # _do_claim releases and re-claims it below, a genuine new local
         # claim that must still get its workspace recorded. This check is
@@ -1370,11 +1370,21 @@ class Homi:
         # claim can still do the work twice, which is acceptable; the
         # authoritative decision stays the check inside claim_mu below,
         # unchanged.
+        #
+        # An already-claimed name with NO workspace yet is the exception, and
+        # the reason this is not just `not already`: _do_claim is auto-invoked
+        # WITHOUT a cwd from _do_ask and from inbound mail, so any identity that
+        # received mail before its agent claimed itself was frozen at
+        # workspace:null forever — which also silently disarmed the move gate
+        # (it skips whenever ws_path is falsy). The first --cwd to arrive is
+        # allowed to fill that hole; a second one never re-points a live agent's
+        # world.
         with self.mu:
-            already = (name in self.identities
-                       and self.identities[name].get("kind") == "local")
+            ent0 = self.identities.get(name)
+            already = bool(ent0 and ent0.get("kind") == "local")
+            has_ws = bool(already and ent0.get("workspace"))
         ws = None
-        if cwd and not already:
+        if cwd and (not already or not has_ws):
             try:
                 ws = (homi_workspace.make_worktree(cwd, name) if worktree
                       else homi_workspace.describe(cwd))
@@ -1401,7 +1411,25 @@ class Homi:
                 # A local claim outranks a remote proxy for the same name.
                 self._do_release(name)
             elif ent is not None:
-                return {"ok": True, "already": True}
+                # Already claimed: still a no-op for the claim itself, but a
+                # cwd that finally arrives for a workspace-less identity is
+                # recorded rather than dropped on the floor — and the result
+                # says which of the two happened, so the CLI can stop printing
+                # a bare "claimed" over a call that changed nothing.
+                recorded = False
+                if ws is not None and not ent.get("workspace"):
+                    with self.mu:
+                        cur = self.identities.get(name)
+                        if cur is not None and not cur.get("workspace"):
+                            cur["workspace"] = ws
+                            recorded = True
+                    if recorded:
+                        self._persist_identities()
+                        self.log("workspace recorded for already-claimed",
+                                 name, "->", ws.get("path"))
+                return {"ok": True, "already": True,
+                        "workspace_recorded": recorded,
+                        "workspace": self._workspace_of(name)}
             sock = self.identity_sock(name)
             if boxed:
                 # A BOXED identity: the socket is published INTO the sockdir by
@@ -3286,6 +3314,17 @@ def cli_call(argv):
                 print("claimed %s (boxed). Publish these from the container:" % args[0])
                 print("  --publish-socket %s:/run/homi/agent.sock" % r.get("publish_in"))
                 print("  --publish-socket %s:/run/homi/outbox.sock" % r.get("publish_out"))
+            elif r.get("already"):
+                # Say what actually happened: a claim that changed nothing must
+                # not read like a fresh claim.
+                wsp = (r.get("workspace") or {}).get("path")
+                if r.get("workspace_recorded"):
+                    print("%s was already claimed; recorded its workspace: %s"
+                          % (args[0], wsp))
+                elif cwd and wsp:
+                    print("%s already claimed (workspace stays %s)" % (args[0], wsp))
+                else:
+                    print("%s already claimed (nothing changed)" % args[0])
             else:
                 print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
             return 0
