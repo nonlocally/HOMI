@@ -149,6 +149,36 @@ assert r.get("ok") is False, r
 assert "workspace" in (r.get("err") or "").lower(), r
 PYEOF
 
+echo "== a failed probe is reported as a failed probe, not a missing workspace"
+python3 - <<'PYEOF' && ok "an ssh failure during WSCHECK says 'could not probe'" || bad "WSCHECK rc ignored"
+import sys; sys.path.insert(0, "lib")
+import homi
+homi._find_transcript = lambda name: None
+# The workspace probe itself fails (link flapped, host key changed, ssh died).
+# Saying "target has no workspace at /src/proj" here would send the operator
+# off to clone a repo that is very likely already sitting there.
+def fake_ssh(target, script, timeout=30):
+    if "WSCHECK" in script:
+        return (255, "", "ssh: connect to host dev port 22: Connection refused")
+    return (0, "H:/home/u\nC:/usr/bin/communicate\nS:/home/u/.st", "")
+homi._ssh_run = fake_ssh
+def caller(req):
+    op = req.get("op")
+    if op == "premove":
+        return {"ok": True, "live": False, "mailbox": "/nonexistent",
+                "lines": 0, "cursor": 0,
+                "workspace": {"path": "/src/proj", "ref": "abc", "branch": "main",
+                              "worktree": False}}
+    if op == "status":
+        return {"ok": True, "links": {"dev": {"addr": "u@dev"}}}
+    return {"ok": True}
+r = homi._move_run(caller, "agent1", "dev", addr="u@dev")
+err = (r.get("err") or "").lower()
+assert r.get("ok") is False, r
+assert "probe" in err, r
+assert "has no workspace" not in err, r
+PYEOF
+
 echo "== --allow-missing-workspace proceeds with an explicit warning"
 python3 - <<'PYEOF' && ok "--allow-missing-workspace proceeds and warns" || bad "workspace override"
 import sys; sys.path.insert(0, "lib")

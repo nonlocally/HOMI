@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for _do_restart's ORDER and its refusal to kill what it has not
-measured as its own. The live path is covered by test-homi-spawn.sh; these are
-the branches tmux will not reproduce on demand — a spawn that fails (tmux
-happily falls back to a default cwd when the recorded one is gone, so a real
-tmux cannot be made to fail this way) and a seat measured dead or unknown."""
+"""Daemon-side unit tests for the branches a live daemon will not reproduce on
+demand: _do_restart's ORDER and its refusal to kill what it has not measured as
+its own (tmux happily falls back to a default cwd when the recorded one is
+gone, so a real tmux cannot be made to fail a spawn); _call against a daemon
+that goes quiet; and the check-then-write race in _do_describe."""
 import os
 import sys
 import threading
@@ -132,7 +132,45 @@ if not res.get("ok") and not r.killed and not r.spawned:
 else:
     bad("no supervision: res=%s killed=%s spawned=%s" % (res, r.killed, r.spawned))
 
-# 7. _call must not die with a traceback when the daemon accepts the connection
+# 7. _do_describe must write through the entry it validated. Taking self.mu
+#    twice let a concurrent release land between the check and the write, and
+#    the second lookup raised KeyError — which reached the agent as
+#    {"ok": false, "err": "'name'"}. The release is staged here by having the
+#    clock tick pull the identity out mid-call, at exactly that window.
+class Describer(homi.Homi):
+    def __init__(self):
+        self.mu = threading.Lock()
+        self.identities = {"a": {"kind": "local", "card": None}}
+        self.persisted = 0
+
+    def log(self, *a):
+        pass
+
+    def _persist_identities(self):
+        self.persisted += 1
+
+
+d = Describer()
+_real_time = homi.time.time
+
+
+def _release_mid_call():
+    homi.time.time = _real_time          # only the first tick releases
+    d.identities.pop("a", None)          # a concurrent `homi release a`
+    return _real_time()
+
+
+homi.time.time = _release_mid_call
+try:
+    res = d._do_describe("a", what="I prove things")
+finally:
+    homi.time.time = _real_time
+if res.get("ok") and (res.get("card") or {}).get("what") == "I prove things":
+    ok("describe writes through the entry it checked (no KeyError on a race)")
+else:
+    bad("describe raced with release: %s" % (res,))
+
+# 8. _call must not die with a traceback when the daemon accepts the connection
 #    and then says nothing (a large fleet, or one unresponsive pane, now that
 #    `agents`/`status` measure every seat through tmux).
 import shutil          # noqa: E402

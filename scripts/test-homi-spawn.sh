@@ -129,7 +129,7 @@ r2new="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["r2"]["s
 if [ "$r2new" != "$r2old" ] && pane_alive "$r2new" && ! pane_alive "$r2old"; then
   ok "the live old seat was retired once the new one existed ($r2old -> $r2new)"
 else bad "restart seat handover ($r2old -> $r2new)"; fi
-# The failed-respawn rollback lives in scripts/test-homi-restart-unit.py: tmux
+# The failed-respawn rollback lives in scripts/test-homi-unit.py: tmux
 # cannot be made to fail a new-window on demand (it silently falls back to a
 # default cwd when the recorded one is gone).
 

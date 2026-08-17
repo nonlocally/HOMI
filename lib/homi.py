@@ -1328,19 +1328,23 @@ class Homi:
 
     def _do_describe(self, name, what=None, ask_me_for=None):
         """Author a card. This is the write an AGENT makes about itself."""
+        # Check and write under ONE hold of the lock, and write through the
+        # entry we validated rather than looking the name up again: taking the
+        # lock twice let a release land in between, and the second lookup then
+        # raised KeyError — surfacing to the agent as {"ok": false, "err":
+        # "'name'"}, which says nothing about what went wrong.
         with self.mu:
             ent = self.identities.get(name)
-        if not ent or ent.get("kind") != "local":
-            return {"ok": False, "err": "not a local identity: %s" % name}
-        card = dict(ent.get("card") or {})
-        if what is not None:
-            card["what"] = what
-        if ask_me_for is not None:
-            card["ask_me_for"] = ask_me_for
-        card["derived"] = False
-        card["updated"] = time.time()
-        with self.mu:
-            self.identities[name]["card"] = card
+            if not ent or ent.get("kind") != "local":
+                return {"ok": False, "err": "not a local identity: %s" % name}
+            card = dict(ent.get("card") or {})
+            if what is not None:
+                card["what"] = what
+            if ask_me_for is not None:
+                card["ask_me_for"] = ask_me_for
+            card["derived"] = False
+            card["updated"] = time.time()
+            ent["card"] = card
         self._persist_identities()
         self.log("card authored for", name)
         return {"ok": True, "name": name, "card": card}
@@ -3093,17 +3097,31 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
             wpath = rhome + wpath[len(home):]
         # WSCHECK is a shell comment, not a command: over real ssh a bare bareword
         # would execute and spray "command not found" on stderr for no reason.
-        rc, wout, _ = _ssh_run(addr, "# WSCHECK\nif [ -d %s ]; then "
-                                     "printf 'WS:present\\n'; else printf 'WS:missing\\n'; fi"
-                               % _shq(wpath))
-        present = "WS:present" in (wout or "")
-        if not present and not allow_missing_workspace:
+        rc, wout, werr = _ssh_run(addr, "# WSCHECK\nif [ -d %s ]; then "
+                                        "printf 'WS:present\\n'; else printf 'WS:missing\\n'; fi"
+                                  % _shq(wpath))
+        # A failed probe is not evidence of an absent workspace: reporting a
+        # transient ssh failure as "target has no workspace at X" sends the
+        # operator to clone a repo that is probably already there.
+        probed = (rc == 0)
+        present = probed and "WS:present" in (wout or "")
+        if not probed and not allow_missing_workspace:
+            return {"ok": False, "lines": report,
+                    "err": ("could not probe %s for the workspace at %s (ssh "
+                            "exit %s: %s) -- refusing to move on a guess. Fix "
+                            "the connection, or pass --allow-missing-workspace "
+                            "to move anyway."
+                            % (dev, wpath, rc, (werr or "").strip()[-200:]))}
+        if not probed:
+            ws_note = ("workspace : UNVERIFIED on %s (%s) -- the probe failed; "
+                       "proceeding by request" % (dev, wpath))
+        elif not present and not allow_missing_workspace:
             return {"ok": False, "lines": report,
                     "err": ("target %s has no workspace at %s -- the agent would "
                             "arrive with a memory of a repo that is not there. "
                             "Clone/checkout it there first, or pass "
                             "--allow-missing-workspace." % (dev, wpath))}
-        if not present:
+        elif not present:
             ws_note = ("workspace : MISSING on %s (%s) -- proceeding by request"
                        % (dev, wpath))
         else:
