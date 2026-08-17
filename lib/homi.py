@@ -962,8 +962,7 @@ class Homi:
         killed = False
         if killable:
             try:
-                self._do_seat("kill", {"seat": old})
-                killed = True
+                killed = bool((self._do_seat("kill", {"seat": old}) or {}).get("ok"))
             except Exception as e:
                 self.log("restart: could not kill old seat", old, e)
         with self.mu:

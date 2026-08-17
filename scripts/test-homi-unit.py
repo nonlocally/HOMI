@@ -28,11 +28,12 @@ def bad(m):
 class Rig(homi.Homi):
     """A Homi with only what _do_restart touches — no sockets, no daemon."""
 
-    def __init__(self, identities, spawn_ok=True, surfaces=None):
+    def __init__(self, identities, spawn_ok=True, surfaces=None, kill_ok=True):
         self.mu = threading.RLock()
         self.identities = identities
         self.surfaces = surfaces or {}
         self.spawn_ok = spawn_ok
+        self.kill_ok = kill_ok
         self.killed = []
         self.spawned = []
         self.persisted = 0
@@ -54,6 +55,8 @@ class Rig(homi.Homi):
             return {"ok": True, "seat": "%99"}
         if sub == "kill":
             self.killed.append(req.get("seat"))
+            if not self.kill_ok:
+                return {"ok": False, "err": "device not linked"}
             return {"ok": True}
         return {"ok": False, "err": "unexpected op %s" % sub}
 
@@ -132,7 +135,20 @@ if not res.get("ok") and not r.killed and not r.spawned:
 else:
     bad("no supervision: res=%s killed=%s spawned=%s" % (res, r.killed, r.spawned))
 
-# 7. _do_describe must write through the entry it validated. Taking self.mu
+# 7. previous_killed must report what _do_seat("kill", ...) actually did, not
+#    whether the call raised. _do_seat returns {"ok": False, ...} on failure
+#    (e.g. a device-qualified seat that is no longer linked) rather than
+#    raising, so a bare try/except around the call cannot see the failure.
+#    A failed retirement of the OLD seat must not fail a restart whose NEW
+#    seat came up fine -- but it must not be reported as a kill that happened.
+r = Rig({"a": ident("%1")}, surfaces={"%1": live("%1")}, kill_ok=False)
+res = r._do_restart("a")
+if res.get("ok") and r.killed == ["%1"] and res.get("previous_killed") is False:
+    ok("a failed kill is reported as previous_killed=False, restart still ok")
+else:
+    bad("failed kill: res=%s killed=%s" % (res, r.killed))
+
+# 8. _do_describe must write through the entry it validated. Taking self.mu
 #    twice let a concurrent release land between the check and the write, and
 #    the second lookup raised KeyError — which reached the agent as
 #    {"ok": false, "err": "'name'"}. The release is staged here by having the
@@ -170,7 +186,7 @@ if res.get("ok") and (res.get("card") or {}).get("what") == "I prove things":
 else:
     bad("describe raced with release: %s" % (res,))
 
-# 8. _call must not die with a traceback when the daemon accepts the connection
+# 9. _call must not die with a traceback when the daemon accepts the connection
 #    and then says nothing (a large fleet, or one unresponsive pane, now that
 #    `agents`/`status` measure every seat through tmux).
 import shutil          # noqa: E402
