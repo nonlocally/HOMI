@@ -1678,6 +1678,14 @@ class Homi:
         with self.claim_mu:
             with self.mu:
                 ent = self.identities.pop(name, None)
+            # A PARKED record (failed to re-bind at load) is releasable too —
+            # otherwise it is immortal: re-parked and re-persisted every boot
+            # with no verb that can ever delete it.
+            parked = self._parked_idents.pop(name, None)
+            if not ent and parked is not None:
+                self._persist_identities()
+                self.log("released parked identity:", name)
+                return {"ok": True, "parked": True}
             if not ent:
                 return {"ok": False, "err": "not claimed: %s" % name}
             try:
@@ -2310,7 +2318,11 @@ class Homi:
                 os.unlink(self.link_in_sock(device))
             except OSError:
                 pass
-        if not ent:
+        # A PARKED link (failed to re-bind at load) must be unlink-able too —
+        # otherwise it is immortal and `federate revoke` reports a success
+        # that removed nothing, with the stale pin left fail-closing forever.
+        parked = self._parked_links.pop(device, None)
+        if not ent and parked is None:
             return {"ok": False, "err": "not linked: %s" % device}
         # Clear the key-fingerprint pin so the documented re-key ceremony
         # (`federate revoke` → re-connect) actually works: the pin is
@@ -3878,9 +3890,14 @@ def _cli_connect(args):
         print("\nShare an agent when ready:  communicate homi grant %s <agent-name>"
               % handle)
     else:
-        print("• transport pending — expected on first contact: their side "
-              "hasn't linked back yet.\n  Mail you send will queue durably and "
-              "deliver the moment they connect back.")
+        if chk.get("transport") == "up" and chk.get("err"):
+            # The wire worked; the far daemon answered with a real error —
+            # show it instead of mislabeling a measured state as pending.
+            print("• transport up, but the far daemon errored: %s" % chk["err"])
+        else:
+            print("• transport pending — expected on first contact: their side "
+                  "hasn't linked back yet.\n  Mail you send will queue durably "
+                  "and deliver the moment they connect back.")
         counter_code()
         print("\nShare an agent when ready:  communicate homi grant %s <agent-name>"
               % handle)
