@@ -14,22 +14,18 @@ part; the body is free-form prose for skills, knowledge, and holdings.
 ```yaml
 ---
 name: <peer name as it appears in ListAgents>
-kind: claude-code | codex
-model: <model id>
-device: <Tailscale MagicDNS name or hostname>
-operator: <github handle>
-updated: YYYY-MM-DD
-reach:
-  - <how to reach this agent, one line per channel>
+what: one line — what this agent or corpus IS
+ask-me-for: what a peer should send it
+workspace: <path or repo> @ <branch>
 availability: <when the agent answers>
 ---
 ```
 
-Keep entries honest and dated: an entry describes what the agent can do **now**,
-not aspirationally. Update `updated:` whenever holdings or availability change.
+Keep entries honest: an entry describes what the agent can do **now**, not
+aspirationally — a stale card misleads a peer deciding whom to message.
 
 ## Tooling
 
-Cards are generated into the identity record by `homi claim`/`homi spawn` and
-live in the daemon's state; this folder holds hand-written cards you
-deliberately choose to write and share.
+Cards are derived into the identity record automatically, at claim time
+(`homi claim`/`homi spawn`) — never a separate remembered step; this folder
+holds the hand-written cards you deliberately choose to write and share.

@@ -1003,6 +1003,11 @@ class Homi:
 
     def _do_agents(self):
         st = self.build_status()
+        # build_status()'s derived roster view doesn't carry "card" (it wasn't
+        # a routing/liveness fact); pull it straight from self.identities in
+        # one short-held snapshot rather than growing that view.
+        with self.mu:
+            cards = {n: e.get("card") for n, e in self.identities.items()}
         agents = []
         for n, e in sorted((st.get("identities") or {}).items()):
             route = e.get("route") or {}
@@ -1012,6 +1017,7 @@ class Homi:
                 "state": route.get("state"), "provenance": route.get("provenance"),
                 "undelivered": (e.get("inbox") or {}).get("undelivered", 0),
                 "seat": e.get("seat"),
+                "card": cards.get(n),
             })
         return {"ok": True, "device": st["self"]["device"], "agents": agents}
 
@@ -1232,6 +1238,61 @@ class Homi:
             "aliases": [],                           # durable role names for this identity
         }
 
+    _CARD_DOC_NAMES = ("AGENTS.md", "CLAUDE.md", "README.md")
+
+    def _derive_card(self, name, cwd):
+        """A first-guess card, from what the fabric already knows. Derivation is
+        the point: a field that needs a separate remembered write dies (every
+        hand-curated registry in both repos did). A human or the agent itself
+        can overwrite it later via `describe`."""
+        what = None
+        if cwd:
+            for fn in self._CARD_DOC_NAMES:
+                p = os.path.join(cwd, fn)
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    with open(p, encoding="utf-8", errors="replace") as f:
+                        head, body = None, []
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("#") and head is None:
+                                head = line.lstrip("#").strip()
+                                continue
+                            if head is not None and not line.startswith("#"):
+                                body.append(line)
+                                break
+                    if head:
+                        what = ("%s — %s" % (head, body[0])) if body else head
+                        break
+                except OSError:
+                    continue
+            if not what:
+                what = "works in %s" % os.path.basename(cwd.rstrip("/"))
+        return {"what": what or "no description yet — set one with `homi describe`",
+                "ask_me_for": "", "derived": True, "updated": time.time()}
+
+    def _do_describe(self, name, what=None, ask_me_for=None):
+        """Author a card. This is the write an AGENT makes about itself."""
+        with self.mu:
+            ent = self.identities.get(name)
+        if not ent or ent.get("kind") != "local":
+            return {"ok": False, "err": "not a local identity: %s" % name}
+        card = dict(ent.get("card") or {})
+        if what is not None:
+            card["what"] = what
+        if ask_me_for is not None:
+            card["ask_me_for"] = ask_me_for
+        card["derived"] = False
+        card["updated"] = time.time()
+        with self.mu:
+            self.identities[name]["card"] = card
+        self._persist_identities()
+        self.log("card authored for", name)
+        return {"ok": True, "name": name, "card": card}
+
     def _do_claim(self, name, boxed=False, cwd=None, worktree=False):
         if not self._NAME_RE.match(name or ""):
             return {"ok": False, "err": "invalid name (want [a-z0-9][a-z0-9._-]{0,63})"}
@@ -1267,6 +1328,20 @@ class Homi:
                       else homi_workspace.describe(cwd))
             except Exception as e:
                 self.log("workspace not recorded for", name, ":", e)
+        # Same discipline as the workspace computation above: _derive_card
+        # reads up to three files off disk, so that I/O happens out here,
+        # never inside claim_mu — holding the global claim lock across file
+        # reads would serialize every other identity's claim. Gated by
+        # `already` only (not by `cwd`): a claim with no workspace still gets
+        # a card, via _derive_card's own no-cwd fallback. Any failure here
+        # (including one _derive_card itself doesn't already swallow) must
+        # never fail the claim, only leave the card unset.
+        card = None
+        if not already:
+            try:
+                card = self._derive_card(name, cwd)
+            except Exception as e:
+                self.log("card not derived for", name, ":", e)
         with self.claim_mu:  # check+bind+insert must be one atomic step
             with self.mu:
                 ent = self.identities.get(name)
@@ -1297,6 +1372,10 @@ class Homi:
                 if ws is not None:
                     with self.mu:
                         self.identities[name]["workspace"] = ws
+                if card is not None:
+                    with self.mu:
+                        if not self.identities[name].get("card"):
+                            self.identities[name]["card"] = card
                 self._persist_identities()
                 self.log("claimed BOXED identity:", name, "-> published", sock)
                 return {"ok": True, "boxed": True,
@@ -1316,6 +1395,10 @@ class Homi:
             if ws is not None:
                 with self.mu:
                     self.identities[name]["workspace"] = ws
+            if card is not None:
+                with self.mu:
+                    if not self.identities[name].get("card"):
+                        self.identities[name]["card"] = card
             self._persist_identities()
         self.log("claimed identity:", name, "->", sock)
         return {"ok": True}
@@ -2260,6 +2343,9 @@ class Homi:
                                   worktree=bool(req.get("worktree")))
         if op == "release":
             return self._do_release(req.get("name", ""))
+        if op == "describe":
+            return self._do_describe(req.get("name", ""), what=req.get("what"),
+                                     ask_me_for=req.get("ask_me_for"))
         if op == "send":
             return self._do_send(req.get("to", ""), req.get("text", ""),
                                  req.get("from") or "cli")
@@ -3131,6 +3217,25 @@ def cli_call(argv):
                 print("  --publish-socket %s:/run/homi/outbox.sock" % r.get("publish_out"))
             else:
                 print("%s %s" % (op + ("ed" if op == "claim" else "d"), args[0]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
+    if op == "describe":
+        what = askfor = None
+        if "--what" in args:
+            what = args[args.index("--what") + 1]
+        if "--ask-me-for" in args:
+            askfor = args[args.index("--ask-me-for") + 1]
+        names = [a for a in args if not a.startswith("--")
+                 and a not in (what, askfor)]
+        if not names or (what is None and askfor is None):
+            sys.stderr.write("usage: communicate homi describe <name> "
+                             "[--what TEXT] [--ask-me-for TEXT]\n")
+            return 1
+        r = _call({"op": "describe", "name": names[0], "what": what,
+                   "ask_me_for": askfor})
+        if r.get("ok"):
+            print("described %s: %s" % (r["name"], r["card"]["what"]))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
