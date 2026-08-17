@@ -55,6 +55,25 @@ if python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("reuse
 nwin="$(tmux -L "$TMUXSOCK" list-windows -a 2>/dev/null | grep -c consult-bash || true)"
 if [ "$nwin" = "1" ]; then ok "reuse spawned no second seat (1 window)"; else bad "consult seat reuse ($nwin windows)"; fi
 
+echo "== spawn records what a restart would need"
+"$COMM" homi spawn sup1 --cwd "$PWD" -- bash --norc --noprofile >/dev/null 2>&1
+python3 - "$ID" <<'PY' && ok "supervision record persisted (cmd/cwd)" || bad "supervision record"
+import json,sys
+d=json.load(open(sys.argv[1]))["sup1"]
+s=d.get("supervision")
+assert s and "bash" in s["cmd"], s
+assert s["cwd"], s
+assert d["workspace"] is not None, d
+PY
+
+echo "== restart brings the agent back on a new seat"
+old="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sup1"]["seat"])' "$ID")"
+"$COMM" homi seat kill "$old" >/dev/null 2>&1
+sleep 0.5
+"$COMM" homi restart sup1 >/dev/null 2>&1
+new="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sup1"]["seat"])' "$ID")"
+[ -n "$new" ] && [ "$new" != "$old" ] && ok "restart produced a new live seat ($old -> $new)" || bad "restart ($old -> $new)"
+
 "$COMM" homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

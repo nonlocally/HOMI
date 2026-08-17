@@ -373,7 +373,8 @@ class Homi:
                             "kind": "boxed" if e.get("boxed") else "local",
                             "device": e.get("home")},
                         "surface": e.get("surface"),
-                        "card": e.get("card")}
+                        "card": e.get("card"),
+                        "supervision": e.get("supervision")}
                     for n, e in self.identities.items()}
         _atomic_write(self.path("identities.json"), json.dumps(data, indent=1))
 
@@ -857,12 +858,13 @@ class Homi:
     # name AND watchable in a seat. The fabric becomes a creator of agents, not
     # just a router — using its OWN seat plane, with no dependency on old anu.
 
-    def _do_spawn(self, name, cmd, cwd=None, adopt=False, boot_wait=25):
+    def _do_spawn(self, name, cmd, cwd=None, adopt=False, boot_wait=25,
+                  cli=None, worktree=False):
         if not self._NAME_RE.match(name or "") or name in self._RESERVED:
             return {"ok": False, "err": "invalid name %r" % name}
         if not cmd:
             return {"ok": False, "err": "spawn needs a command (--cli or a command)"}
-        r = self._do_claim(name)
+        r = self._do_claim(name, cwd=cwd, worktree=worktree)
         if not r.get("ok"):
             return {"ok": False, "err": "claim %s: %s" % (name, r.get("err"))}
         sp = self._do_seat("spawn", {"cmd": cmd, "cwd": cwd, "name": name})
@@ -888,8 +890,43 @@ class Homi:
                     adopted = True
                     break
                 time.sleep(0.5)
+        with self.mu:
+            if name in self.identities:
+                self.identities[name]["supervision"] = {
+                    "cmd": cmd, "cli": cli, "cwd": cwd,
+                    "spawned_at": time.time()}
+        self._persist_identities()
         self.log("spawned", name, "in seat", seat, "adopted" if adopted else "")
         return {"ok": True, "name": name, "seat": seat, "adopted": adopted}
+
+    def _do_restart(self, name):
+        """Bring a spawned agent back using the supervision record. homi is not
+        a process supervisor (deliberately) -- it stores what a restart WOULD
+        need and performs one only when asked."""
+        with self.mu:
+            ent = dict(self.identities.get(name) or {})
+        if ent.get("boxed"):
+            return {"ok": False, "err": "%s is a boxed identity (no tmux seat) "
+                    "-- restart the container that publishes it instead" % name}
+        sup = ent.get("supervision")
+        if not sup or not sup.get("cmd"):
+            return {"ok": False, "err": "%s has no supervision record "
+                    "(was it created with homi spawn?)" % name}
+        ws = ent.get("workspace") or {}
+        cwd = sup.get("cwd") or ws.get("path")
+        old = ent.get("seat")
+        if old:
+            try:
+                self._do_seat("kill", {"seat": old})
+            except Exception as e:
+                self.log("restart: could not kill old seat", old, e)
+        sp = self._do_seat("spawn", {"cmd": sup["cmd"], "cwd": cwd, "name": name})
+        if not sp.get("ok"):
+            return {"ok": False, "err": "seat spawn: %s" % sp.get("err")}
+        self._do_seat_bind(sp["seat"], name)
+        self.log("restarted", name, "on seat", sp["seat"])
+        return {"ok": True, "name": name, "seat": sp["seat"],
+                "previous": old, "cmd": sup["cmd"]}
 
     def _do_fan(self, n, cmd, prefix, cwd=None, adopt=False):
         if n < 1 or n > 32:
@@ -1426,7 +1463,7 @@ class Homi:
             with self.mu:
                 if name in self.identities:
                     for k in ("seat", "aliases", "workspace", "place",
-                              "surface", "card"):
+                              "surface", "card", "supervision"):
                         if e.get(k) is not None:
                             self.identities[name][k] = e[k]
         self._persist_identities()
@@ -2241,7 +2278,12 @@ class Homi:
             return self._do_seat(req.get("sub", ""), req)
         if op == "spawn":
             return self._do_spawn(req.get("name", ""), req.get("cmd", ""),
-                                  cwd=req.get("cwd"), adopt=bool(req.get("adopt")))
+                                  cwd=req.get("cwd"),
+                                  adopt=bool(req.get("adopt")),
+                                  cli=req.get("cli"),
+                                  worktree=bool(req.get("worktree")))
+        if op == "restart":
+            return self._do_restart(req.get("name", ""))
         if op == "fan":
             return self._do_fan(int(req.get("n") or 1), req.get("cmd", ""),
                                 req.get("prefix") or "worker", cwd=req.get("cwd"),
@@ -3198,7 +3240,7 @@ def cli_call(argv):
                                  "[--cwd DIR] [--json]\n")
                 return 1
             req = {"op": "spawn", "name": rest[0], "cmd": cmd, "cwd": cwd,
-                   "adopt": adopt}
+                   "adopt": adopt, "cli": cli}
             r = _call(req, timeout=60)
             print(json.dumps(r) if want_json
                   else (("%s -> %s" % (r.get("name"), r.get("seat")))
@@ -3226,6 +3268,16 @@ def cli_call(argv):
     if op == "statepath":
         print(state_root())
         return 0
+    if op == "restart":
+        if not args:
+            sys.stderr.write("usage: communicate homi restart <name>\n")
+            return 1
+        r = _call({"op": "restart", "name": args[0]}, timeout=60)
+        if r.get("ok"):
+            print("restarted %s on %s" % (r["name"], r["seat"]))
+            return 0
+        sys.stderr.write((r.get("err") or "failed") + "\n")
+        return 1
     if op == "premove":
         if not args:
             sys.stderr.write("usage: communicate homi premove <name> [--json]\n")
