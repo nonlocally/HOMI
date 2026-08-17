@@ -45,12 +45,29 @@ scr="$("$COMM" homi seat read "$SEAT" 2>/dev/null)"
 if printf '%s' "$scr" | grep -q 'HOMISEAT_MARKER_9713'; then ok "send delivered + read saw the output"; else bad "send/read roundtrip"; fi
 
 echo "== busy detection: a foreground process reads busy, then settles idle"
-"$COMM" homi seat send "$SEAT" 'sleep 3' >/dev/null 2>&1
-sleep 0.6
-st="$("$COMM" homi seat state "$SEAT" 2>/dev/null)"
-if [ "$st" = "busy" ]; then ok "running sleep reads busy"; else bad "busy detection (got $st)"; fi
-# seat wait should block through the sleep and return idle
-w="$("$COMM" homi seat wait "$SEAT" --timeout 12 2>/dev/null)"
+# A long-lived foreground command so the busy window can't expire mid-check
+# under load (a fixed short sleep raced the sampler -- see history). Poll for
+# busy instead of a single fixed-delay sample, same idiom as the
+# deadline=$((SECONDS+N)) loops in test-homi-move.sh / test-homi-fleet.sh.
+"$COMM" homi seat send "$SEAT" 'sleep 30' >/dev/null 2>&1
+deadline=$((SECONDS+10)); busy=""
+while [ $SECONDS -lt $deadline ]; do
+  st="$("$COMM" homi seat state "$SEAT" 2>/dev/null)"
+  if [ "$st" = "busy" ]; then busy=1; break; fi
+  sleep 0.3
+done
+if [ -n "$busy" ]; then ok "running sleep reads busy"; else bad "busy detection (got $st)"; fi
+# seat wait should observe busy and then settle to idle -- without waiting
+# out the full 30s. Interrupt the sleep for real (a background job fires a
+# Ctrl-C on the pane a few seconds in, once wait is certain to have sampled
+# busy). `seat interrupt` sends Escape, which a foreground `sleep` ignores
+# (verified: state stayed busy through it); a real SIGINT on the pane is the
+# only thing that ends it without killing/respawning the seat, so this still
+# exercises a genuine busy->idle transition, not a busy->dead one.
+( sleep 3; tmux -L "$TMUXSOCK" send-keys -t "$SEAT" C-c ) &
+intpid=$!
+w="$("$COMM" homi seat wait "$SEAT" --timeout 20 2>/dev/null)"
+wait "$intpid" 2>/dev/null
 if printf '%s' "$w" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("state")=="idle" and d.get("sawbusy") else 1)' 2>/dev/null; then
   ok "seat wait saw busy and settled to idle"
 else bad "seat wait (got $w)"; fi
