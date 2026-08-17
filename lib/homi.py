@@ -2989,8 +2989,10 @@ def _cli_move(args):
                          "[--addr user@host] [--as NEW] [--spawn] [--fork] [--dry-run] "
                          "[--allow-missing-workspace]\n")
         return 1
-    r = _move_run(_call, name, dev, addr=addr, as_name=as_name,
-                  spawn=spawn, fork=fork, dry=dry,
+    # A move's control ops are the slow kind (status measures every seat,
+    # premove/depart/arrive touch the mailbox): 10s is the wrong default here.
+    r = _move_run(lambda req: _call(req, timeout=60.0), name, dev, addr=addr,
+                  as_name=as_name, spawn=spawn, fork=fork, dry=dry,
                   allow_missing_workspace=allow_missing_ws)
     for ln in r.get("lines") or []:
         print(ln)
@@ -3042,6 +3044,12 @@ def _move_run(caller, name, dev, addr=None, as_name=None, spawn=False,
     # Resolve the ssh address: explicit --addr, or the link's stored addr.
     if not addr:
         st = caller({"op": "status"})
+        if not st.get("ok"):
+            # Don't let a daemon that didn't answer masquerade as "this device
+            # has no address" — the move would refuse for the wrong reason.
+            return {"ok": False, "lines": report,
+                    "err": ("could not read homi status (%s) — pass --addr "
+                            "user@host" % (st.get("err") or "no reply"))}
         addr = ((st.get("links") or {}).get(dev) or {}).get("addr")
     if not addr:
         return {"ok": False, "err": ("no ssh address for %s (link it with --addr, or pass --addr here)" % dev), "lines": report}
@@ -3209,25 +3217,38 @@ def _call(req, timeout=10.0):
     except OSError:
         sys.stderr.write("homi not running (no listener at %s)\n" % path)
         sys.exit(2)
+    buf = b""
     try:
         s.sendall((json.dumps(req) + "\n").encode("utf-8"))
         try:
             s.shutdown(socket.SHUT_WR)
         except OSError:
             pass
-        buf = b""
         while b"\n" not in buf:
             chunk = s.recv(65536)
             if not chunk:
                 break
             buf += chunk
+    except socket.timeout:
+        # The daemon took the connection and then said nothing in time — a big
+        # fleet or one unresponsive pane can do that now that agents/status
+        # measure every seat through tmux. An error the caller can print beats
+        # a traceback out of a CLI.
+        return {"ok": False, "err": "homi did not answer in %gs (op %s)"
+                                    % (timeout, req.get("op"))}
+    except OSError as e:
+        return {"ok": False, "err": "homi connection failed: %s" % e}
     finally:
         s.close()
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
         sys.stderr.write("no reply from homi\n")
         sys.exit(2)
-    return json.loads(line.decode("utf-8", "replace"))
+    try:
+        return json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return {"ok": False, "err": "unparseable reply from homi: %s"
+                                    % line[:200].decode("utf-8", "replace")}
 
 
 def _human_status(st):
@@ -3248,10 +3269,16 @@ def cli_call(argv):
         sys.stderr.write("usage: homi.py call <op> [args...]\n")
         return 1
     op, args = argv[0], argv[1:]
+    # status and agents MEASURE: one tmux round trip per seated identity, plus
+    # a socket probe each. On a fleet that adds up, so give them real slack
+    # instead of the 10s default meant for a bookkeeping call.
+    ROSTER_TIMEOUT = 60.0
     if op == "status":
-        st = _call({"op": "status"})
+        st = _call({"op": "status"}, timeout=ROSTER_TIMEOUT)
         if "--json" in args:
             print(json.dumps(st, indent=1))
+        elif not st.get("ok"):
+            sys.stderr.write((st.get("err") or "status failed") + "\n")
         else:
             print(_human_status(st))
         return 0 if st.get("ok") else 1
@@ -3260,9 +3287,11 @@ def cli_call(argv):
         print("stopped" if r.get("ok") else json.dumps(r))
         return 0 if r.get("ok") else 1
     if op == "agents":
-        r = _call({"op": "agents"})
+        r = _call({"op": "agents"}, timeout=ROSTER_TIMEOUT)
         if "--json" in args:
             print(json.dumps(r, indent=1))
+        elif not r.get("ok"):
+            sys.stderr.write((r.get("err") or "agents failed") + "\n")
         else:
             for a in r.get("agents", []):
                 seat = ("  seat:" + a["seat"]) if a.get("seat") else ""

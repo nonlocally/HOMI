@@ -132,5 +132,30 @@ if not res.get("ok") and not r.killed and not r.spawned:
 else:
     bad("no supervision: res=%s killed=%s spawned=%s" % (res, r.killed, r.spawned))
 
+# 7. _call must not die with a traceback when the daemon accepts the connection
+#    and then says nothing (a large fleet, or one unresponsive pane, now that
+#    `agents`/`status` measure every seat through tmux).
+import shutil          # noqa: E402
+import socket          # noqa: E402
+import tempfile        # noqa: E402
+
+tmp = tempfile.mkdtemp(prefix="homi-call-")
+try:
+    root = os.path.join(tmp, "homi")
+    os.makedirs(root)
+    os.environ["COMM_STATE"] = tmp
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(os.path.join(root, "homi.sock"))
+    srv.listen(4)
+    res = homi._call({"op": "status"}, timeout=0.4)
+    if isinstance(res, dict) and res.get("ok") is False and res.get("err"):
+        ok("a silent daemon returns an error dict: %s" % res["err"])
+    else:
+        bad("silent daemon produced %r" % (res,))
+    srv.close()
+finally:
+    os.environ.pop("COMM_STATE", None)
+    shutil.rmtree(tmp, ignore_errors=True)
+
 print("\npass=%d fail=%d" % (pass_[0], fail_[0]))
 sys.exit(1 if fail_[0] else 0)
