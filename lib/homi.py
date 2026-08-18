@@ -3375,15 +3375,18 @@ def _cli_pair(args):
             return out
         return None
 
+    far_prod_env = [""]  # e.g. "HOMI_SOCK_DIR=/tmp/homi-502 " on a shared machine
+
     def far_start_nohup():
         # Fallback/test start (no persistence): state dirs + a detached daemon.
         st = far_state or "~/.local/state/communicate"
+        env = farenv + far_prod_env[0]
         _pair_ssh(addr, "%smkdir -p %s/homi %s" % (
-            farenv, st, ("%s/sess %s/socks" % (shlex.quote(far_home),
-                                               shlex.quote(far_home)))
+            env, st, ("%s/sess %s/socks" % (shlex.quote(far_home),
+                                            shlex.quote(far_home)))
             if far_home else ""))
         _pair_ssh(addr, "%snohup python3 %s daemon >> %s/homi/daemon.log 2>&1 "
-                  "& sleep 0.3" % (farenv, far_run, st))
+                  "& sleep 0.3" % (env, far_run, st))
 
     print("pair: enrolling %s as YOUR device" % addr)
 
@@ -3418,13 +3421,29 @@ def _cli_pair(args):
         if not stage_kernel():
             print("  [2/7] far daemon            FAILED to stage the kernel (scp)")
             return 1
+        sock_d = ""
         if not far_home:
             _pair_ssh(addr, "ln -sfn ~/.local/share/homi/daemon/%s "
                       "~/.local/share/homi/daemon/current" % HOMI_VERSION)
+            # SHARED machine: a foreign-owned default sockdir makes the daemon
+            # refuse to start (ensure_dir_0700 — the peer-device case, live).
+            # Detect it once and bake a per-uid dir into whatever starts it.
+            rc_s, sock_d = _pair_ssh(
+                addr, 'o=$(stat -f %u /tmp/cc-socks 2>/dev/null || '
+                      'stat -c %u /tmp/cc-socks 2>/dev/null); u=$(id -u); '
+                      'if [ -n "$o" ] && [ "$o" != "$u" ]; then '
+                      'echo "/tmp/homi-$u"; fi')
+            sock_d = sock_d.strip() if rc_s == 0 else ""
+            if sock_d:
+                far_prod_env[0] = "HOMI_SOCK_DIR=%s " % shlex.quote(sock_d)
+                print("        (far /tmp/cc-socks belongs to another user — "
+                      "using %s)" % sock_d)
         if no_persist or far_home:
             far_start_nohup()
         else:
             rc, uname = _pair_ssh(addr, "uname")
+            sockline = ('    <key>HOMI_SOCK_DIR</key><string>%s</string>\n'
+                        % sock_d) if sock_d else ""
             if "Darwin" in uname:
                 # The same unit the fixed installer writes: PATH baked,
                 # COMM_STATE one level above the far state root.
@@ -3441,6 +3460,7 @@ def _cli_pair(args):
                     '  </array>\n'
                     '  <key>EnvironmentVariables</key><dict>\n'
                     '    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>\n'
+                    + sockline +
                     '  </dict>\n'
                     '  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n'
                     '</dict></plist>\n')
@@ -3456,7 +3476,10 @@ def _cli_pair(args):
             else:
                 unit = ("[Unit]\nDescription=homi\n[Service]\n"
                         "ExecStart=/usr/bin/env python3 %%h/.local/share/homi/"
-                        "daemon/current/homi.py daemon\nRestart=always\n"
+                        "daemon/current/homi.py daemon\n"
+                        + (("Environment=HOMI_SOCK_DIR=%s\n" % sock_d)
+                           if sock_d else "")
+                        + "Restart=always\n"
                         "[Install]\nWantedBy=default.target\n")
                 _pair_ssh(addr, "mkdir -p ~/.config/systemd/user && printf %s > "
                           "~/.config/systemd/user/homi.service && "
@@ -3580,30 +3603,34 @@ def _cli_pair(args):
         print("  [4/7] link here -> there    created (%s)"
               % (transport.get("addr") or transport.get("sock")))
 
-    # [5/7] link there -> here.
+    # [5/7] link there -> here. The far side must link us REGARDLESS of
+    # reverse reachability: linking is what binds its in/<mydev>.sock — the
+    # arrival line MY forward mail lands on. (peer-device, live: skipping
+    # the far link when reverse ssh failed left the forward path acking
+    # nothing.) The reverse check only decides whether their link gets a
+    # usable outbound addr; without one, there->here queues honestly.
     my_addr = addr_me or ("%s@%s" % (getpass_user(), "localhost" if far_home else mydev))
     if far_home:
         back = "--sock %s" % shlex.quote(os.path.join(state_root(), "in",
                                                       "%s.sock" % fardev))
-        rc = 0
+        reverse_ok = True
     else:
         rc, _o = _pair_ssh(addr, "ssh -o BatchMode=yes -o ConnectTimeout=8 %s true"
                            % shlex.quote(my_addr), timeout=20)
-        back = "--addr %s" % shlex.quote(my_addr)
-    if rc != 0:
-        print("  [5/7] reverse ssh there -> here  FAILED — that device cannot dial %s"
-              % my_addr)
-        print("        mail there->here will queue until you run, ON %s:" % addr)
-        print("          ssh-copy-id %s" % my_addr)
-        print("        everything else continues; re-run pair afterwards to finish.")
+        reverse_ok = (rc == 0)
+        back = ("--addr %s" % shlex.quote(my_addr)) if reverse_ok else ""
+    rc2, out2 = far_cli(("link %s %s" % (shlex.quote(mydev), back)).strip())
+    if rc2 != 0:
+        print("  [5/7] link there -> here    FAILED to create: %s" % out2)
         fail = 1
+    elif reverse_ok:
+        print("  [5/7] link there -> here    created (%s)" % my_addr)
     else:
-        rc2, out2 = far_cli("link %s %s" % (shlex.quote(mydev), back))
-        if rc2 == 0:
-            print("  [5/7] link there -> here    created (%s)" % my_addr)
-        else:
-            print("  [5/7] link there -> here    FAILED: %s" % out2)
-            fail = 1
+        print("  [5/7] link there -> here    created INBOUND-ONLY — that device "
+              "cannot dial %s" % my_addr)
+        print("        their mail to you will queue until you run, ON %s:" % addr)
+        print("          ssh-copy-id %s   (then re-run pair)" % my_addr)
+        fail = 1
 
     # [6/7] user sync — the far device joins THIS person.
     handle = (me.get("user") or {}).get("handle")
