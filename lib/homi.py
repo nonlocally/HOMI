@@ -3399,7 +3399,8 @@ def _cli_pair(args):
     # [2/7] far daemon: probe, stage, start, upgrade.
     here_dir = os.path.dirname(os.path.abspath(__file__))
     kernel_files = [os.path.join(here_dir, f) for f in
-                    ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py")]
+                    ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
+                     "homi_board.py")]
 
     def stage_kernel():
         _pair_ssh(addr, "mkdir -p %s" % far_stage_dir)
@@ -4931,6 +4932,11 @@ def cli_call(argv):
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
+    if op == "board":
+        # The fabric's front end — a VIEW over the measured ops, extracted to
+        # its own module (homi.py must not grow a renderer).
+        import homi_board
+        return homi_board.main(args)
     if op == "pair":
         return _cli_pair(args)
     if op == "connect":

@@ -12,7 +12,7 @@ const lib = join(repo, "lib");
 const vendor = join(pkg, "vendor");
 mkdirSync(vendor, { recursive: true });
 
-const files = ["homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py"];
+const files = ["homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py", "homi_board.py"];
 for (const f of files) {
   const src = join(lib, f);
   if (!existsSync(src)) throw new Error("missing kernel file: " + src);

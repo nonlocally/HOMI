@@ -286,6 +286,16 @@ nothing said who owns an agent. v3 completes `fleet` into a claimed identity.
   minting is capped per user (`HOMI_PROXY_CAP`). Trust verbs (`init`, `pair`,
   `connect`, `grant`, `federate`, `link`) remain human-only CLI — never MCP.
 
+- **`homi board` — the fabric's front end.** One self-contained page:
+  every device's roster with measured liveness, links with live round-trip
+  numbers, queue depths, and the People section (granted names, pinned keys,
+  auto return-paths with their expiry). Works from `file://`; `--serve`
+  binds the device's Tailscale IP (tailnet-only) and the page upgrades
+  itself to live polling. `homi board --open` renders + opens;
+  `homi board --serve [port]` serves (default 7421, `HOMI_BOARD_PORT`);
+  `--no-remote` skips far-roster ssh fetches; output dir via
+  `HOMI_BOARD_DIR` (default `~/.local/state/communicate/board/`).
+
 ```sh
 communicate homi init --handle aadarwal        # claim yourself, once
 communicate homi pair aadarwal@aadarshs-mac-air-2   # enroll YOUR laptop (measured)
