@@ -319,13 +319,13 @@ def main(argv):
 
     try:
         snap = collect(no_remote=no_remote)
+        if "--json" in argv:
+            print(json.dumps(snap, indent=1))
+            return 0
+        path = write_pages(snap)   # ensure_dir_0700 can refuse a foreign dir
     except Exception as e:
         sys.stderr.write("board: %s\n" % e)
         return 1
-    if "--json" in argv:
-        print(json.dumps(snap, indent=1))
-        return 0
-    path = write_pages(snap)
     sys.stdout.write(path + "\n")
     if "--open" in argv:
         # macOS first; xdg-open for the Linux devices pair stages this onto.
