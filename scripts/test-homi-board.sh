@@ -21,7 +21,14 @@ pass=0; fail=0
 ok(){ pass=$((pass+1)); printf 'ok   %s\n' "$*"; }
 bad(){ fail=$((fail+1)); printf 'FAIL %s\n' "$*"; }
 SRVPID=""
-cleanup(){ [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null
+# $! is the backgrounded SUBSHELL; the python server is a GRANDCHILD
+# (subshell -> communicate bash -> python3), so -P misses it — target the
+# unique per-run port instead, then reap the subshell.
+kill_server(){ [ -n "$SRVPID" ] || return 0
+               pkill -f "board --serve $PORT" 2>/dev/null
+               pkill -P "$SRVPID" 2>/dev/null; kill "$SRVPID" 2>/dev/null
+               wait "$SRVPID" 2>/dev/null; SRVPID=""; }
+cleanup(){ kill_server
            acomm homi stop >/dev/null 2>&1||true; bcomm homi stop >/dev/null 2>&1||true
            dcomm homi stop >/dev/null 2>&1||true; rm -rf "$T"; }
 trap cleanup EXIT
@@ -110,8 +117,7 @@ if python3 -c '
 import json,sys
 d=json.loads(sys.argv[1])
 far=[x for x in d["devices"] if x["device"]=="alice-air"][0]
-assert far.get("roster_provenance"), far
-assert far["roster_provenance"] != "fetched", far
+assert far["roster_provenance"].startswith("not fetched"), far
 ' "$snap" 2>/dev/null; then
   ok "far roster provenance is honest (not fetched under --no-remote/sock)"
 else bad "far roster provenance honesty"; fi
@@ -143,8 +149,8 @@ else bad "snapshot inlined into the page"; fi
 if grep -q 'location.protocol === "file:"' "$T/board/index.html"; then
   ok "file:// poll guard present (self-contained offline)"
 else bad "file:// poll guard present"; fi
-if [ "$(grep -c 'https\?://' "$T/board/index.html")" = "0" ]; then
-  ok "no external references"
+if [ "$(grep -c -e 'https\?://' -e 'url(' -e '@import' -e '<link' -e 'src=' "$T/board/index.html")" = "0" ]; then
+  ok "no external references (urls, imports, links, src)"
 else bad "no external references"; fi
 if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$T/board/state.json" 2>/dev/null; then
   ok "state.json is valid JSON"
@@ -164,12 +170,23 @@ page="$(curl -sf -m 5 "http://127.0.0.1:$PORT/" 2>/dev/null)"
 if printf '%s' "$page" | grep -q "the fabric, right now"; then
   ok "served page carries the masthead"
 else bad "served page carries the masthead"; fi
-g1="$(curl -sf -m 5 "http://127.0.0.1:$PORT/state.json" 2>/dev/null | jget generated_at)"
-g2="$(curl -sf -m 5 "http://127.0.0.1:$PORT/state.json" 2>/dev/null | jget generated_at)"
+g1="$(curl -sf -m 5 "http://127.0.0.1:$PORT/state.json" 2>/dev/null | jget generated_ts)"
+g2="$(curl -sf -m 5 "http://127.0.0.1:$PORT/state.json" 2>/dev/null | jget generated_ts)"
 if [ -n "$g1" ] && [ "$g1" = "$g2" ]; then
-  ok "TTL cache: two quick reads share one collection ($g1)"
+  ok "TTL cache: two quick reads share one collection"
 else bad "TTL cache (got: $g1 vs $g2)"; fi
-kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null; SRVPID=""
+sleep 11
+g3="$(curl -sf -m 10 "http://127.0.0.1:$PORT/state.json" 2>/dev/null | jget generated_ts)"
+if [ -n "$g3" ] && [ "$g3" != "$g1" ]; then
+  ok "TTL actually expires: a later read re-collected"
+else bad "TTL expiry (got: $g3 vs $g1)"; fi
+if curl -sf -m 5 -I "http://127.0.0.1:$PORT/" 2>/dev/null | grep -q "200"; then
+  ok "HEAD answers 200 (uptime checks work)"
+else bad "HEAD answers 200"; fi
+if curl -sf -m 5 "http://127.0.0.1:$PORT/?cachebust=1" >/dev/null 2>&1; then
+  ok "a query string does not 404 the page"
+else bad "query string handling"; fi
+kill_server
 
 echo
 echo "pass=$pass fail=$fail"

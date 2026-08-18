@@ -72,25 +72,33 @@ def collect(no_remote=False):
             "card": (a.get("card") or {}).get("what"),
         }
 
-    home_agents = [_agent_row(a) for a in (ag.get("agents") or [])]
+    # A failed local call is a LABEL, never an empty roster rendered as
+    # "no agents here yet" (a confident false statement).
+    ag_ok = bool(ag.get("ok"))
+    home_agents = [_agent_row(a) for a in (ag.get("agents") or [])] if ag_ok else []
     devices = [{
         "device": self_.get("device"), "self": True,
         "version": self_.get("version"),
         "reachability": {"state": "here"},
-        "roster_provenance": "probed",
+        "roster_provenance": ("probed" if ag_ok
+                              else "roster unavailable (%s)" % (ag.get("err") or "?")),
         "agents": home_agents,
     }]
+    grants_ok = bool(gr.get("ok"))
 
-    links = []
-    people = []
-    for dev, l in sorted((st.get("links") or {}).items()):
-        rec = persisted.get(dev) or {}
+    def _link_work(dev, l, rec):
+        """One link's whole measurement (check + optional far roster) — run
+        in parallel so a wedged peer costs its own timeout, not the page's.
+        Never raises: homi._call can sys.exit when the daemon vanishes."""
         row = {"device": dev, "kind": l.get("kind", "device"),
                "queue": l.get("queue", 0), "dead": l.get("dead", 0),
                "allow_seats": bool(l.get("allow_seats")),
                "rtt_ms": None, "far_version": None, "far_user": None,
                "err": None, "legacy": False}
-        chk = homi._call({"op": "link-check", "device": dev}, timeout=25)
+        try:
+            chk = homi._call({"op": "link-check", "device": dev}, timeout=10)
+        except (Exception, SystemExit) as e:
+            chk = {"ok": False, "err": "check failed: %s" % e}
         if chk.get("ok") and chk.get("rtt_ms") is not None:
             row["rtt_ms"] = chk["rtt_ms"]
             row["far_version"] = chk.get("far_version")
@@ -98,20 +106,22 @@ def collect(no_remote=False):
             row["legacy"] = bool(chk.get("legacy_peer"))
         else:
             row["err"] = chk.get("err") or "unreachable"
-        links.append(row)
 
-        if row["kind"] == "fleet":
-            people.append({
+        # Deny-by-default: only an explicit DEVICE link (same operator) is
+        # ever ssh'd for its roster; fleet AND unknown kinds render as people.
+        if row["kind"] != "device":
+            person = {
                 "handle": rec.get("handle") or dev,
                 "fp": rec.get("key_fp"),
-                "granted": sorted((gr.get("grants") or {}).get(dev, [])),
-                "auto": (gr.get("auto") or {}).get(dev, {}),
+                "granted": (sorted((gr.get("grants") or {}).get(dev, []))
+                            if grants_ok else None),
+                "auto": ((gr.get("auto") or {}).get(dev, {}) if grants_ok else {}),
+                "grants_ok": grants_ok,
                 "link": {"rtt_ms": row["rtt_ms"], "queue": row["queue"],
                          "dead": row["dead"], "err": row["err"]},
-            })
-            continue
+            }
+            return row, None, person
 
-        # A second device of this user.
         far = {"device": dev, "self": False,
                "version": row["far_version"],
                "reachability": ({"state": "up", "rtt_ms": row["rtt_ms"]}
@@ -126,13 +136,32 @@ def collect(no_remote=False):
             far["roster_provenance"] = ("unreachable — mail queues (%d pending)"
                                         % row["queue"])
         else:
-            roster = _fetch_far_roster(rec["addr"])
+            try:
+                roster = _fetch_far_roster(rec["addr"])
+            except (Exception, SystemExit):
+                roster = None
             if roster and roster.get("ok"):
                 far["roster_provenance"] = "fetched over ssh"
                 far["agents"] = [_agent_row(a) for a in (roster.get("agents") or [])]
             else:
                 far["roster_provenance"] = "roster fetch failed (ssh)"
-        devices.append(far)
+        return row, far, None
+
+    items = [(dev, l, persisted.get(dev) or {})
+             for dev, l in sorted((st.get("links") or {}).items())]
+    links = []
+    people = []
+    if items:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(items))) as ex:
+            results = list(ex.map(lambda t: _link_work(*t), items))
+        for row, far, person in results:
+            links.append(row)
+            if far is not None:
+                devices.append(far)
+            if person is not None:
+                people.append(person)
 
     live = sum(1 for d in devices for a in d["agents"] if a.get("state") == "live")
     agents_n = sum(len(d["agents"]) for d in devices)
@@ -156,23 +185,34 @@ def collect(no_remote=False):
 # ---- render ------------------------------------------------------------------
 
 def render_html(snap):
-    """Inject the snapshot at __HOMI__. Escape </ so no string in the data can
-    terminate the inline <script> early."""
-    data = json.dumps(snap).replace("</", "<\\/")
+    """Inject the snapshot at __HOMI__ with EVERY `<` escaped to \\u003c —
+    lossless in JSON, and no fabric string (a granted peer chooses its own
+    from-names) can reach the HTML tokenizer at all. Escaping only `</` was
+    provably bypassable: `<!--<script>` double-escapes the script element and
+    blanks the whole page without ever executing."""
+    data = json.dumps(snap).replace("<", "\\u003c")
     return TEMPLATE.replace("__HOMI__", data, 1)
 
 
 def write_pages(snap):
+    """The snapshot names the pinned key fingerprint, every agent, every
+    grant — it gets the same 0700/0600 posture as the state dir itself."""
     d = board_dir()
-    os.makedirs(d, exist_ok=True)
-    homi._atomic_write(os.path.join(d, "index.html"), render_html(snap))
-    homi._atomic_write(os.path.join(d, "state.json"), json.dumps(snap))
+    homi.ensure_dir_0700(d)
+    for name, body in (("index.html", render_html(snap)),
+                       ("state.json", json.dumps(snap))):
+        p = os.path.join(d, name)
+        homi._atomic_write(p, body)
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
     return os.path.join(d, "index.html")
 
 
 # ---- serve -------------------------------------------------------------------
 
-class _Cache(object):
+class _Cache:
     """Collection costs real measurements (a ping per link, optional ssh) —
     one collection serves every request inside the TTL."""
     def __init__(self, no_remote, ttl=10.0):
@@ -195,26 +235,42 @@ def serve(port, bind, no_remote, ttl=10.0):
     cache = _Cache(no_remote, ttl=ttl)
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def _body(self):
+            path = self.path.split("?", 1)[0]   # cache-busters must not 404
+            if path in ("/", "/index.html"):
+                return render_html(cache.get()).encode(), "text/html; charset=utf-8"
+            if path == "/state.json":
+                return json.dumps(cache.get()).encode(), "application/json"
+            return None, None
+
+        def _get(self, send_body):
+            # homi._call sys.exit()s when the daemon is down — SystemExit is a
+            # BaseException, so a bare `except Exception` provably let it
+            # escape the handler and the client saw an EMPTY REPLY instead of
+            # a 500. Catch both; the detail goes to stderr, never the status
+            # line (which BaseHTTPRequestHandler emits unescaped).
             try:
-                if self.path in ("/", "/index.html"):
-                    body = render_html(cache.get()).encode()
-                    ctype = "text/html; charset=utf-8"
-                elif self.path == "/state.json":
-                    body = json.dumps(cache.get()).encode()
-                    ctype = "application/json"
-                else:
-                    self.send_error(404)
-                    return
-            except Exception as e:
-                self.send_error(500, str(e))
+                body, ctype = self._body()
+            except (Exception, SystemExit) as e:
+                sys.stderr.write("board serve: collect failed: %s\n" % e)
+                self.send_error(500, "collect failed")
+                return
+            if body is None:
+                self.send_error(404)
                 return
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if send_body:
+                self.wfile.write(body)
+
+        def do_GET(self):
+            self._get(True)
+
+        def do_HEAD(self):
+            self._get(False)
 
         def log_message(self, *a):
             pass
@@ -249,6 +305,8 @@ def main(argv):
         bind = None
         if "--bind" in argv and argv.index("--bind") + 1 < len(argv):
             bind = argv[argv.index("--bind") + 1]
+            if bind.startswith("--"):   # a flag is not an address
+                bind = None
         if not bind:
             # Tailnet-only by construction: bind the device's Tailscale IP,
             # never 0.0.0.0 (the docs/site/serve.sh idiom).
@@ -270,7 +328,13 @@ def main(argv):
     path = write_pages(snap)
     sys.stdout.write(path + "\n")
     if "--open" in argv:
-        subprocess.run(["open", path], check=False)
+        # macOS first; xdg-open for the Linux devices pair stages this onto.
+        for opener in ("open", "xdg-open"):
+            try:
+                subprocess.run([opener, path], check=False)
+                break
+            except OSError:
+                continue
     return 0
 
 
@@ -302,6 +366,7 @@ TEMPLATE = r"""<!doctype html>
     --grid: #262624;
     --baseline: #36352f;
     --border: rgba(255, 255, 255, 0.075);
+    --rule: #1e1e1c;   /* fallback: ~55% of --grid on the plane */
     --rule: color-mix(in srgb, var(--grid) 55%, transparent);
     --status-good: #0ca30c;
     --status-warn: #fab219;
@@ -461,10 +526,14 @@ TEMPLATE = r"""<!doctype html>
     return Math.floor(d / 86400) + "d ago";
   }
   function hoursLeft(exp) {
+    // "expired" is a definite claim — reserve it for a finite PAST timestamp;
+    // absent or malformed data is honestly "unknown".
+    if (exp == null || !isFinite(Number(exp))) return "unknown";
     var s = Number(exp) - Date.now() / 1000;
-    if (!isFinite(s) || s <= 0) return "expired";
+    if (s <= 0) return "expired";
     if (s < 3600) return "~" + Math.max(1, Math.floor(s / 60)) + "m left";
-    return "~" + Math.floor(s / 3600) + "h left";
+    if (s < 172800) return "~" + Math.floor(s / 3600) + "h left";
+    return "~" + Math.floor(s / 86400) + "d left";
   }
 
   var hosts = {};
@@ -522,7 +591,8 @@ TEMPLATE = r"""<!doctype html>
   function renderDevices(host) {
     host.textContent = "";
     var total = 0;
-    (state.devices || []).forEach(function (d, di) {
+    var headDone = false;
+    (state.devices || []).forEach(function (d) {
       var g = add(host, "div", "grouprow");
       add(g, "span", "dev", d.device || "?");
       var bits = [];
@@ -534,11 +604,16 @@ TEMPLATE = r"""<!doctype html>
       if (!d.agents || !d.agents.length) {
         var note = (d.reachability && d.reachability.state === "unreachable")
           ? "unreachable — mail queues durably (" + (d.reachability.queued || 0) + " pending)"
-          : "no agents here yet — communicate homi claim <name>";
+          : (d.roster_provenance && d.roster_provenance.indexOf("unavailable") >= 0)
+            ? "roster unavailable"
+            : "no agents here yet — communicate homi claim <name>";
         add(host, "div", "note", note);
         return;
       }
-      if (di === 0) {
+      if (!headDone) {
+        // One header for the whole instrument, before the FIRST device that
+        // actually has rows (an empty home device must not eat it).
+        headDone = true;
         var hd = add(host, "div", "head");
         add(hd, "span");
         add(hd, "span", null, "name");
@@ -611,7 +686,8 @@ TEMPLATE = r"""<!doctype html>
       if (p.fp) add(box, "div", "key", p.fp);
       var g = add(box, "div", "line");
       add(g, "span", "lbl", "granted ");
-      if (p.granted && p.granted.length) g.appendChild(document.createTextNode(p.granted.join(", ")));
+      if (p.grants_ok === false) add(g, "span", "lbl", "grants unavailable");
+      else if (p.granted && p.granted.length) g.appendChild(document.createTextNode(p.granted.join(", ")));
       else add(g, "span", "lbl", "nothing — communicate homi grant " + p.handle + " <agent>");
       var auto = p.auto || {};
       var names = Object.keys(auto).sort();
@@ -633,6 +709,8 @@ TEMPLATE = r"""<!doctype html>
   }
 
   function renderAll() {
+    var who = state.user && state.user.handle ? "@" + state.user.handle : "unclaimed";
+    document.title = "homi / " + who;
     renderLede();
     renderDevices(hosts.devices);
     renderLinks(hosts.links);
@@ -648,6 +726,7 @@ TEMPLATE = r"""<!doctype html>
   function pollState() {
     if (window.location.protocol === "file:") return;
     window.setInterval(function () {
+      if (document.hidden) return;   // a background tab must not drive collects
       fetch("state.json", { cache: "no-store" })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (next) {
