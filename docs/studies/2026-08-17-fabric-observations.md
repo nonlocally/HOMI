@@ -117,6 +117,13 @@ them. Items the @handles work fixes on its way are marked [handles].
   links/federation, and spawn/move are the natural next module extractions
   (workspace/seat extractions set the pattern).
 
+- **Reboot-reattach is designed but not exercised** (flagged by the
+  collaborator in #8, 2026-08-19): `test-homi-persist.sh` proves KeepAlive
+  kill-respawn — a strict subset of reboot (cold launchd, cleared /tmp, all
+  sockets gone are not in the kill path) — and is the MANUAL suite outside
+  the automated count. Close with one measured before/after at the next
+  natural laptop reboot; never cite it under the broader label meanwhile.
+
 ## Ontology / model gaps
 
 - **The four axes do not survive `move`.** `_do_arrive` re-claims with no cwd
