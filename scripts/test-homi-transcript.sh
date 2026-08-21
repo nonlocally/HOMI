@@ -170,6 +170,71 @@ if [ "$r" = "user librarian@peer hey from the fleet / real text" ]; then
   ok "cross-session sender carried (who), embedded reminder stripped"
 else bad "attribution/reminder (got: $r)"; fi
 
+echo "== hostile sender shapes never fail open to the operator's byline"
+r="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+def parse(text):
+    return ht._parse_record({'type': 'user',
+                             'message': {'role': 'user', 'content': text}})
+# (a) 200-char from-name: must be truncated, never dropped to who=None
+long_name = 'e' * 200
+t = parse('<cross-session-message from=\"uds:/x\" from-name=\"' + long_name
+          + '\">\nhi\n</cross-session-message>')
+a_ok = (len(t) == 1 and t[0].get('who')
+        and t[0]['who'] != long_name and len(t[0]['who']) <= 121
+        and t[0]['text'] == 'hi')
+# (b) wrapper missing from-name entirely: honest unknown, never bare
+t = parse('<cross-session-message from=\"uds:/x\">\nhi\n</cross-session-message>')
+b_ok = (len(t) == 1 and t[0].get('who') == 'unknown sender')
+# (c) opener tag pushed past the 4096 bound but properly closed: the turn
+# is machine noise — skipped, and raw wrapper markup never renders
+t = parse('<cross-session-message from-name=\"x\" junk=\"' + 'A' * 5000
+          + '\">\ninner\n</cross-session-message>')
+c_ok = (t == [])
+print(a_ok, b_ok, c_ok)")"
+if [ "$r" = "True True True" ]; then
+  ok "long/absent/oversized senders: truncated, unknown-sender, or skipped — never 'you'"
+else bad "hostile sender shapes (got: $r)"; fi
+
+echo "== same-inode same-head growing overwrite is detected"
+python3 - "$T" $$ <<'PY'
+import json, os, sys
+t, pid = sys.argv[1], int(sys.argv[2])
+with open(os.path.join(t, "cc", "sessions", "112.json"), "w") as f:
+    json.dump({"name": "inplace", "pid": pid, "sessionId": "ses-inplace",
+               "messagingSocketPath": t + "/dummy.sock", "startedAt": 1,
+               "kind": "interactive"}, f)
+PY
+r="$(python3 -c "
+import json, os, sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+t = '$T'
+path = os.path.join(t, 'cc', 'projects', '-fake-proj', 'ses-inplace.jsonl')
+header = json.dumps({'type': 'user', 'message':
+    {'role': 'user', 'content': 'H' * 300}}) + chr(10)   # head lives in line 1
+with open(path, 'w') as f:
+    f.write(header)
+    f.write(json.dumps({'type': 'user', 'message':
+        {'role': 'user', 'content': 'old branch'}}) + chr(10))
+a = ht.turns_for('inplace')
+ino0 = os.stat(path).st_ino
+with open(path, 'r+b') as f:   # same inode: in-place divergent overwrite
+    f.seek(0)
+    f.write(header.encode())
+    for i in range(3):
+        f.write((json.dumps({'type': 'user', 'message':
+            {'role': 'user', 'content': 'new branch %d' % i}}) + chr(10)).encode())
+    f.truncate()
+b = ht.turns_for('inplace')
+texts = [x['text'] for x in b['turns']]
+print(os.stat(path).st_ino == ino0, len(b['turns']),
+      any('old branch' in x for x in texts),
+      sum('new branch' in x for x in texts))")"
+if [ "$r" = "True 4 False 3" ]; then
+  ok "in-place divergent overwrite reparsed — no stale turns, no silent drops"
+else bad "same-inode overwrite (got: $r)"; fi
+
 echo "== window arithmetic, explicit index sets (10-turn fixture)"
 r="$(python3 -c "
 import sys; sys.path.insert(0, '$HERE/lib')
@@ -330,9 +395,9 @@ import re
 board = open('$HERE/lib/homi_board.py').read()
 mods = sorted(set(re.findall(r'import (homi_[a-z]+)', board)))
 missing = []
-for src, pat in [('$HERE/lib/homi.py', r'kernel_files.*?\]'),
-                 ('$HERE/packages/homi/scripts/vendor.mjs', r'const files.*'),
-                 ('$HERE/packages/homi/src/cli.ts', r'for \(const f of \[.*')]:
+for src, pat in [('$HERE/lib/homi.py', r'kernel_files = \[[^\]]*\)\]'),
+                 ('$HERE/packages/homi/scripts/vendor.mjs', r'const files = \[[^\]]*\]'),
+                 ('$HERE/packages/homi/src/cli.ts', r'for \(const f of \[[^\]]*\]')]:
     s = open(src).read()
     m = re.search(pat, s, re.S)
     seg = m.group(0) if m else ''

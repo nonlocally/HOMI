@@ -38,24 +38,30 @@ _SKIP_PREFIXES = (
 # below is a bounded find().
 _XS_OPEN = "<cross-session-message"
 _XS_CLOSE = "</cross-session-message>"
-_WHO_RE = re.compile(r'from-name="([^"]{1,120})"')
 
 
 def _extract_xsession(text):
     """(inner_text, sender) when the record is a cross-session delivery,
-    else None. The sender comes from the wrapper's from-name attribute —
-    discarding it rendered other people's words under the operator's own
-    byline."""
+    else None; ("", None) for a malformed/hostile wrapper, which the caller
+    skips. The sender is the wrapper's from-name — and an attacker-length
+    attribute must DEGRADE (truncate, or 'unknown sender', or skip), never
+    fail open to rendering under the operator's own 'you' byline."""
     s = text.lstrip()
     if not s.startswith(_XS_OPEN):
         return None
     gt = s.find(">", 0, 4096)
     if gt < 0:
-        return s[len(_XS_OPEN):].strip(), None
-    who = None
-    m = _WHO_RE.search(s, 0, gt)
-    if m:
-        who = m.group(1)
+        # No honest wrapper has a 4 KB opener tag: machine noise. Skipping
+        # beats the old fallback, which leaked raw wrapper markup as "you".
+        return "", None
+    head = s[:gt]
+    who = "unknown sender"
+    i = head.find('from-name="')
+    if i >= 0:
+        j = head.find('"', i + 11)
+        if j > i + 11:
+            name = head[i + 11:j]
+            who = name[:120] + ("…" if len(name) > 120 else "")
     j = s.find(_XS_CLOSE, gt)
     inner = s[gt + 1:j] if j > gt else s[gt + 1:]
     return inner.strip(), who
@@ -282,10 +288,19 @@ class _Cache:
                 # REPLACED (beam copies transcripts onto these names) — a
                 # longer replacement is otherwise indistinguishable from an
                 # append and got spliced onto stale turns.
-                if (ent is None or st.st_size < ent["size"]
-                        or st.st_ino != ent["ino"] or head != ent["head"]):
+                fresh = (ent is None or st.st_size < ent["size"]
+                         or st.st_ino != ent["ino"] or head != ent["head"])
+                if not fresh and ent["offset"] > 0 and ent.get("mark"):
+                    # Same-inode in-place divergence (cp onto the dest,
+                    # rsync --inplace) can keep inode AND head while the
+                    # body changed: re-check the bytes just before our
+                    # offset — stale turns must never splice onto new tail.
+                    f.seek(ent["offset"] - len(ent["mark"]))
+                    if f.read(len(ent["mark"])) != ent["mark"]:
+                        fresh = True
+                if fresh:
                     ent = {"size": 0, "offset": 0, "base": 0, "turns": [],
-                           "ino": st.st_ino, "head": head}
+                           "ino": st.st_ino, "head": head, "mark": b""}
                     self.by_path[path] = ent
                 if st.st_size > ent["offset"]:
                     f.seek(ent["offset"])
@@ -307,6 +322,8 @@ class _Cache:
                         except Exception:
                             continue
                         ent["turns"].extend(new)
+                    consumed = chunk[:last_nl + 1]
+                    ent["mark"] = (ent["mark"] + consumed)[-64:]
                     ent["offset"] += last_nl + 1
                     ent["size"] = st.st_size
                     drop = len(ent["turns"]) - CAP
