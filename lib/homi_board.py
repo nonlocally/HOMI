@@ -242,6 +242,7 @@ def serve(port, bind, no_remote, ttl=10.0):
     import http.server
     import urllib.parse
     import homi_talk
+    import homi_transcript
 
     cache = _Cache(no_remote, ttl=ttl)
     # Write-path defense, honestly named. The AUTHN boundary is tailnet
@@ -331,6 +332,36 @@ def serve(port, bind, no_remote, ttl=10.0):
                     return None, None
                 return (homi_talk.render_talk(handle, target, token).encode(),
                         "text/html; charset=utf-8")
+            if path.startswith("/api/session/"):
+                # Transcripts are the most sensitive read on the board —
+                # same token gate as conversations, malformed names get an
+                # explicit 400 (never a path lookup), and qualified targets
+                # are refused honestly: the transcript lives on the agent's
+                # own device, and this server only reads local files.
+                if not self._token_ok():
+                    self._json(403, {"ok": False, "err": "token"})
+                    raise _Handled
+                target = urllib.parse.unquote(path[len("/api/session/"):])
+                if "@" in target:
+                    self._json(400, {"ok": False,
+                                     "err": "session view is local-only"})
+                    raise _Handled
+                if not homi_talk.valid_target(target):
+                    self._json(400, {"ok": False, "err": "bad target"})
+                    raise _Handled
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query)
+
+                def _iq(k):
+                    v = (q.get(k) or [None])[0]
+                    try:
+                        return int(v) if v is not None else None
+                    except ValueError:
+                        return None
+                r = homi_transcript.turns_for(target, after=_iq("after"),
+                                              before=_iq("before"),
+                                              n=_iq("n") or None)
+                return json.dumps(r).encode(), "application/json"
             if path.startswith("/api/conv/"):
                 if not self._token_ok():
                     self._json(403, {"ok": False, "err": "token"})

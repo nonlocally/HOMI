@@ -201,11 +201,25 @@ TALK_TEMPLATE = r"""<!doctype html>
   header .tag { margin-left: auto; font-size: 10.5px; letter-spacing: 0.06em;
                 text-transform: uppercase; color: var(--muted); }
 
-  #log {
+  #log, #sess {
     flex: 1; overflow-y: auto;
     padding: 14px 16px;
     display: flex; flex-direction: column; gap: 10px;
   }
+  #tabs { display: flex; gap: 2px; padding: 0 12px;
+          border-bottom: 1px solid var(--grid); }
+  .tab { background: none; border: none; color: var(--muted); font: inherit;
+         font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+         padding: 8px 10px; cursor: pointer;
+         border-bottom: 2px solid transparent; }
+  .tab.on { color: var(--ink); border-bottom-color: var(--ink); }
+  .trn-tool { font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+              padding: 1px 2px; white-space: pre-wrap; word-break: break-word; }
+  .trn-mark { align-self: center; color: var(--muted); font-size: 11px;
+              letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 0; }
+  #older { align-self: center; background: var(--surface); color: var(--muted);
+           border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+           font: inherit; font-size: 12px; cursor: pointer; }
   .msg { max-width: 86%; }
   .msg .meta { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
                color: var(--muted); margin-bottom: 3px; font-variant-numeric: tabular-nums; }
@@ -256,7 +270,12 @@ TALK_TEMPLATE = r"""<!doctype html>
   <span class="who" id="who"></span>
   <span class="tag" id="stat"></span>
 </header>
+<nav id="tabs">
+  <button class="tab on" data-tab="chat" type="button">chat</button>
+  <button class="tab" data-tab="session" type="button">session</button>
+</nav>
 <div id="log" class="composer-log"></div>
+<div id="sess" class="composer-log" hidden></div>
 <form id="composer" class="composer">
   <textarea id="inp" rows="1" placeholder="message" autocomplete="off"></textarea>
   <button id="snd" type="submit">send</button>
@@ -373,10 +392,110 @@ TALK_TEMPLATE = r"""<!doctype html>
     }
   });
 
-  poll();
-  window.setInterval(poll, 2500);
+  // ---- session tab: the read-only observatory over the agent's transcript.
+  var sess = document.getElementById("sess");
+  var sFirst = null, sLast = null;   // absolute turn-index window loaded
+  var sSeen = {};
+  var sTab = "chat";
+  var sNote = null, older = null;
+
+  function addTurn(t, front) {
+    if (sSeen[t.i]) return;
+    sSeen[t.i] = 1;
+    var n;
+    if (t.role === "tool") {
+      n = el("div", "trn-tool", t.text);
+    } else if (t.role === "mark") {
+      n = el("div", "trn-mark", t.text);
+    } else {
+      n = el("div", "msg " + (t.role === "user" ? "out" : "in"));
+      var meta = [t.role === "user" ? "you" : target];
+      if (t.ts) meta.push(ago(t.ts));
+      n.appendChild(el("div", "meta", meta.join(" · ")));
+      var b = el("div", "body");
+      renderBody(b, t.text);
+      n.appendChild(b);
+    }
+    if (front && older) sess.insertBefore(n, older.nextSibling);
+    else sess.appendChild(n);
+  }
+  function sessNote(text) {
+    if (sNote) sNote.remove();
+    sNote = el("div", "empty", text);
+    sess.appendChild(sNote);
+  }
+  function sessFetch(qs, onDone) {
+    fetch("/api/session/" + encodeURIComponent(target) + qs,
+          { headers: { "X-Homi-Token": token }, cache: "no-store" })
+      .then(function (r) {
+        if (r.status === 403) { stat.textContent = "session expired — reload"; return null; }
+        if (!r.ok) { return r.json().then(function (d) {
+          sessNote(d && d.err ? d.err : "error " + r.status); return null;
+        }, function () { sessNote("error " + r.status); return null; }); }
+        return r.json();
+      })
+      .then(function (d) { if (d) onDone(d); })
+      .catch(function () { stat.textContent = "disconnected"; });
+  }
+  function sessPoll() {
+    if (sTab !== "session" || document.hidden) return;
+    var qs = sLast === null ? "" : "?after=" + sLast;
+    sessFetch(qs, function (d) {
+      if (!d.live && sLast === null) {
+        sessNote("no live session — mail still delivers on wake");
+        return;
+      }
+      if (sNote) { sNote.remove(); sNote = null; }
+      var atBottom = sess.scrollHeight - sess.scrollTop - sess.clientHeight < 40;
+      (d.turns || []).forEach(function (t) { addTurn(t, false); });
+      (d.turns || []).forEach(function (t) {
+        if (sLast === null || t.i > sLast) sLast = t.i;
+        if (sFirst === null || t.i < sFirst) sFirst = t.i;
+      });
+      if (older === null && sFirst !== null && (sFirst > 0 || d.truncated)) {
+        older = el("button", null, d.truncated && sFirst === 0
+                   ? "· earlier history trimmed ·" : "earlier");
+        older.id = "older"; older.type = "button";
+        older.addEventListener("click", loadOlder);
+        sess.insertBefore(older, sess.firstChild);
+      }
+      if (atBottom || sLast === null) sess.scrollTop = sess.scrollHeight;
+    });
+  }
+  function loadOlder() {
+    if (sFirst === null || sFirst <= 0) return;
+    sessFetch("?before=" + sFirst, function (d) {
+      var h0 = sess.scrollHeight;
+      (d.turns || []).slice().reverse().forEach(function (t) { addTurn(t, true); });
+      (d.turns || []).forEach(function (t) {
+        if (t.i < sFirst) sFirst = t.i;
+      });
+      sess.scrollTop += sess.scrollHeight - h0;   // keep your place
+      if (sFirst <= 0 || !(d.turns || []).length) {
+        older.textContent = d.truncated
+          ? "· earlier history trimmed ·" : "· start ·";
+        older.disabled = true;
+      }
+    });
+  }
+  var tabs = document.getElementById("tabs");
+  tabs.addEventListener("click", function (ev) {
+    var t = ev.target.getAttribute && ev.target.getAttribute("data-tab");
+    if (!t || t === sTab) return;
+    sTab = t;
+    var btns = tabs.querySelectorAll(".tab");
+    for (var i = 0; i < btns.length; i++)
+      btns[i].className = "tab" + (btns[i].getAttribute("data-tab") === t ? " on" : "");
+    log.hidden = (t !== "chat");
+    sess.hidden = (t !== "session");
+    if (t === "session") { sessPoll(); sess.scrollTop = sess.scrollHeight; }
+  });
+
+  function tick() { poll(); sessPoll(); }
+  tick();
+  window.setInterval(tick, 2500);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) poll();   // reload-on-foreground: iOS froze us
+    if (!document.hidden) tick();   // reload-on-foreground: iOS froze us
   });
 })();
 </script>

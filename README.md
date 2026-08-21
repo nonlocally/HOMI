@@ -301,6 +301,24 @@ nothing said who owns an agent. v3 completes `fleet` into a claimed identity.
   `tailscale serve` command that gives a real HTTPS origin (iOS secure
   context, installable PWA).
 
+  The talk page's second tab is the **session view** — a read-only
+  rendering of the agent's live Claude session, straight from its
+  transcript on disk (files-as-API, no daemon involvement): your words and
+  the agent's prose as chat, tool calls as one-line receipts, compactions
+  as dividers; thinking blocks and machine plumbing are filtered out. The
+  name resolves to a live session exactly the way delivery does (registry
+  scan, pid alive, newest wins), then to the transcript by session-id —
+  never by munging cwd, which drifts. Served token-gated at
+  `/api/session/<name>`, last 150 turns with "earlier" paging, at most
+  1000 turns held (a page below the cap says `truncated`, never
+  pretends). Local sessions only — a `name@device` target is refused
+  honestly. **Deployment caveat, stated plainly:** transcripts are the
+  most sensitive read on the board; the board assumes a single-operator
+  tailnet. Before this device is ever shared into someone else's tailnet,
+  move the board behind `tailscale serve` with identity pinning or ACL
+  the port — a shared-in peer who can reach the port can read pages, and
+  the page carries the token.
+
 - **`homi board` — the fabric's front end.** One self-contained page:
   every device's roster with measured liveness, links with live round-trip
   numbers, queue depths, and the People section (granted names, pinned keys,
