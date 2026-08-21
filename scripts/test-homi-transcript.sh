@@ -348,7 +348,8 @@ echo "== server: token-gated session API on the talk page"
 "$COMM" homi init --handle alice >/dev/null 2>&1
 "$COMM" homi claim scout >/dev/null 2>&1
 PORT=$((18921 + RANDOM % 500))
-"$COMM" homi board --serve "$PORT" --bind 127.0.0.1 --no-remote >/dev/null 2>&1 &
+HOMI_BOARD_HOSTS="agents.example.com" \
+  "$COMM" homi board --serve "$PORT" --bind 127.0.0.1 --no-remote >/dev/null 2>&1 &
 SRVPID=$!
 up=""
 for i in $(seq 1 20); do
@@ -375,6 +376,17 @@ else bad "qualified target (got $c)"; fi
 c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "X-Homi-Token: $TOKEN" "http://127.0.0.1:$PORT/api/session/..%2fetc")"
 if [ "$c" = "400" ]; then ok "invalid name refused (no traversal)"
 else bad "invalid name (got $c)"; fi
+
+echo "== a fronting domain can be allowlisted; strangers still cannot"
+c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: agents.example.com" "http://127.0.0.1:$PORT/state.json")"
+if [ "$c" = "200" ]; then ok "HOMI_BOARD_HOSTS host accepted"
+else bad "allowlisted host (got $c)"; fi
+c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: AGENTS.Example.com" "http://127.0.0.1:$PORT/state.json")"
+if [ "$c" = "200" ]; then ok "allowlisted host is case-insensitive"
+else bad "case-insensitive host (got $c)"; fi
+c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: evil.example.com" "http://127.0.0.1:$PORT/state.json")"
+if [ "$c" = "403" ]; then ok "unlisted host still refused"
+else bad "unlisted host (got $c)"; fi
 
 echo "== the talk page grows tabs"
 if printf '%s' "$page" | grep -q 'data-tab="session"' && printf '%s' "$page" | grep -q 'api/session'; then

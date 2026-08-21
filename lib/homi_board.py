@@ -296,6 +296,14 @@ def serve(port, bind, no_remote, ttl=10.0):
                                   "%s:%d" % (dns.split(".")[0], port)})
     except Exception as e:
         sys.stderr.write("board serve: no tailscale DNS names (%s)\n" % e)
+    # A fronting proxy (e.g. a Cloudflare Tunnel with an identity wall) has
+    # its own Host name for us. HOMI_BOARD_HOSTS names it explicitly — the
+    # allowlist stays a pin, never a wildcard. The proxy MUST gate identity
+    # before the origin; this env only teaches the origin its public name.
+    for h in (os.environ.get("HOMI_BOARD_HOSTS") or "").split(","):
+        h = h.strip()
+        if h:
+            allowed_hosts.update({h, "%s:%d" % (h, port)})
     # Compared case-insensitively (Host header is lowercased on receipt).
     allowed_hosts = {h.lower() for h in allowed_hosts}
 
@@ -456,7 +464,8 @@ def serve(port, bind, no_remote, ttl=10.0):
             if not homi_talk.valid_target(target) or not text:
                 self._json(400, {"ok": False, "err": "bad target or empty text"})
                 return
-            who = self.headers.get("Tailscale-User-Login")
+            who = (self.headers.get("Tailscale-User-Login")
+                   or self.headers.get("Cf-Access-Authenticated-User-Email"))
             try:
                 entry = homi_talk.send(handle, target, text)
             except homi_talk.SendRefused as e:
