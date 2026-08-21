@@ -3407,7 +3407,7 @@ def _cli_pair(args):
     here_dir = os.path.dirname(os.path.abspath(__file__))
     kernel_files = [os.path.join(here_dir, f) for f in
                     ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
-                     "homi_board.py", "homi_talk.py")]
+                     "homi_board.py", "homi_talk.py", "homi_transcript.py")]
 
     def stage_kernel():
         _pair_ssh(addr, "mkdir -p %s" % far_stage_dir)

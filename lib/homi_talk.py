@@ -206,6 +206,9 @@ TALK_TEMPLATE = r"""<!doctype html>
     padding: 14px 16px;
     display: flex; flex-direction: column; gap: 10px;
   }
+  /* The author flex rule above outranks the UA's [hidden] { display:none }
+     — without this guard the tabs render both panes stacked, always. */
+  #log[hidden], #sess[hidden] { display: none; }
   #tabs { display: flex; gap: 2px; padding: 0 12px;
           border-bottom: 1px solid var(--grid); }
   .tab { background: none; border: none; color: var(--muted); font: inherit;
@@ -398,6 +401,8 @@ TALK_TEMPLATE = r"""<!doctype html>
   var sSeen = {};
   var sTab = "chat";
   var sNote = null, older = null;
+  var sSid = null;                   // transcript identity — resets the pane
+  var sOlderBusy = false;
 
   function addTurn(t, front) {
     if (sSeen[t.i]) return;
@@ -409,7 +414,11 @@ TALK_TEMPLATE = r"""<!doctype html>
       n = el("div", "trn-mark", t.text);
     } else {
       n = el("div", "msg " + (t.role === "user" ? "out" : "in"));
-      var meta = [t.role === "user" ? "you" : target];
+      // A cross-session record carries its real sender — another agent's
+      // words must never wear the operator's "you" byline.
+      var by = t.role === "user"
+        ? (t.who && t.who !== handle ? t.who : "you") : target;
+      var meta = [by];
       if (t.ts) meta.push(ago(t.ts));
       n.appendChild(el("div", "meta", meta.join(" · ")));
       var b = el("div", "body");
@@ -419,12 +428,19 @@ TALK_TEMPLATE = r"""<!doctype html>
     if (front && older) sess.insertBefore(n, older.nextSibling);
     else sess.appendChild(n);
   }
+  function sessReset(noteText) {
+    sess.textContent = "";
+    sSeen = {}; sFirst = null; sLast = null; older = null; sNote = null;
+    if (noteText) sess.appendChild(el("div", "trn-mark", noteText));
+  }
   function sessNote(text) {
     if (sNote) sNote.remove();
     sNote = el("div", "empty", text);
     sess.appendChild(sNote);
   }
   function sessFetch(qs, onDone) {
+    // onDone ALWAYS runs (with null on failure) so callers' busy-guards
+    // release even when the server errors or the network drops.
     fetch("/api/session/" + encodeURIComponent(target) + qs,
           { headers: { "X-Homi-Token": token }, cache: "no-store" })
       .then(function (r) {
@@ -434,37 +450,52 @@ TALK_TEMPLATE = r"""<!doctype html>
         }, function () { sessNote("error " + r.status); return null; }); }
         return r.json();
       })
-      .then(function (d) { if (d) onDone(d); })
-      .catch(function () { stat.textContent = "disconnected"; });
+      .then(function (d) { onDone(d || null); },
+            function () { stat.textContent = "disconnected"; onDone(null); });
   }
   function sessPoll() {
     if (sTab !== "session" || document.hidden) return;
     var qs = sLast === null ? "" : "?after=" + sLast;
     sessFetch(qs, function (d) {
-      if (!d.live && sLast === null) {
-        sessNote("no live session — mail still delivers on wake");
+      if (!d) return;
+      if (!d.live) {
+        if (sLast === null) sessNote("no live session — mail still delivers on wake");
+        else sessNote("session ended — mail still delivers on wake");
         return;
       }
+      if (d.sid && sSid && d.sid !== sSid) {
+        // The agent restarted into a new transcript: stale cursors would
+        // freeze the pane forever. Start over, honestly marked.
+        sessReset("· session restarted ·");
+      }
+      if (d.sid) sSid = d.sid;
       if (sNote) { sNote.remove(); sNote = null; }
       var atBottom = sess.scrollHeight - sess.scrollTop - sess.clientHeight < 40;
-      (d.turns || []).forEach(function (t) { addTurn(t, false); });
-      (d.turns || []).forEach(function (t) {
+      var firstLoad = (sLast === null);
+      var ts = d.turns || [];
+      if (!firstLoad && ts.length && ts[0].i > sLast + 1) {
+        sess.appendChild(el("div", "trn-mark", "· gap — turns evicted ·"));
+      }
+      ts.forEach(function (t) { addTurn(t, false); });
+      ts.forEach(function (t) {
         if (sLast === null || t.i > sLast) sLast = t.i;
         if (sFirst === null || t.i < sFirst) sFirst = t.i;
       });
-      if (older === null && sFirst !== null && (sFirst > 0 || d.truncated)) {
-        older = el("button", null, d.truncated && sFirst === 0
-                   ? "· earlier history trimmed ·" : "earlier");
+      if (older === null && sFirst !== null && sFirst > 0) {
+        older = el("button", null, "earlier");
         older.id = "older"; older.type = "button";
         older.addEventListener("click", loadOlder);
         sess.insertBefore(older, sess.firstChild);
       }
-      if (atBottom || sLast === null) sess.scrollTop = sess.scrollHeight;
+      if (atBottom || firstLoad) sess.scrollTop = sess.scrollHeight;
     });
   }
   function loadOlder() {
-    if (sFirst === null || sFirst <= 0) return;
+    if (sOlderBusy || sFirst === null || sFirst <= 0) return;
+    sOlderBusy = true;
     sessFetch("?before=" + sFirst, function (d) {
+      sOlderBusy = false;
+      if (!d) return;
       var h0 = sess.scrollHeight;
       (d.turns || []).slice().reverse().forEach(function (t) { addTurn(t, true); });
       (d.turns || []).forEach(function (t) {

@@ -147,6 +147,202 @@ elif printf '%s' "$r" | grep -q "^1 later.$"; then
   ok "append re-read; after=<last> returns exactly the new turn"
 else bad "incremental after-cursor (got: $r)"; fi
 
+echo "== attribution + embedded reminders (fixture extension)"
+python3 - "$T" <<'PY'
+import json, os, sys
+proj = os.path.join(sys.argv[1], "cc", "projects", "-fake-proj")
+with open(os.path.join(proj, "ses-scout-new.jsonl"), "a") as f:
+    f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:00:30.000Z",
+        "message": {"role": "user", "content":
+            '<cross-session-message from="uds:/y" from-name="librarian@peer">\n'
+            'hey from the fleet\n</cross-session-message>\n\nboilerplate.'}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:00:31.000Z",
+        "message": {"role": "user", "content":
+            "real text <system-reminder>machine noise</system-reminder>"}}) + "\n")
+PY
+r="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+ts = ht.turns_for('scout')['turns']
+a, b = ts[-2], ts[-1]
+print(a['role'], a.get('who'), a['text'], '/', b['text'])")"
+if [ "$r" = "user librarian@peer hey from the fleet / real text" ]; then
+  ok "cross-session sender carried (who), embedded reminder stripped"
+else bad "attribution/reminder (got: $r)"; fi
+
+echo "== window arithmetic, explicit index sets (10-turn fixture)"
+r="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+def ids(**kw): return [t['i'] for t in ht.turns_for('scout', **kw)['turns']]
+print(ids(after=-1) == list(range(10)),
+      ids(before=0) == [],
+      ids(before=3, n=2) == [1, 2],
+      ids(after=3, before=9) == [4, 5, 6, 7, 8, 9],
+      ids(n=99999) == list(range(10)),
+      ids(after=999) == [])")"
+if [ "$r" = "True True True True True True" ]; then
+  ok "after/before boundaries exact (negative, zero, both-cursors, huge n, stale)"
+else bad "window arithmetic (got: $r)"; fi
+
+echo "== malformed records never poison the cache"
+python3 - "$T" $$ <<'PY'
+import json, os, sys
+t, pid = sys.argv[1], int(sys.argv[2])
+with open(os.path.join(t, "cc", "sessions", "110.json"), "w") as f:
+    json.dump({"name": "brute", "pid": pid, "sessionId": "ses-brute",
+               "messagingSocketPath": t + "/dummy.sock", "startedAt": 1,
+               "kind": "interactive"}, f)
+proj = os.path.join(t, "cc", "projects", "-fake-proj")
+with open(os.path.join(proj, "ses-brute.jsonl"), "w") as f:
+    f.write(json.dumps({"type": "user", "message": "not-a-dict"}) + "\n")
+    f.write("this line is not json\n")
+    f.write(json.dumps({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "tool_use", "name": "Bash", "input": [1, 2]}]}}) + "\n")
+    f.write(json.dumps({"type": "user", "message":
+        {"role": "user", "content": "survivor"}}) + "\n")
+PY
+r="$(python3 -c "
+import json, sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+a = ht.turns_for('brute'); b = ht.turns_for('brute')
+texts_a = [t['text'] for t in a['turns'] if t['role'] == 'user']
+stable = [t['i'] for t in a['turns']] == [t['i'] for t in b['turns']]
+path, _ = ht.find_transcript('brute')
+with open(path, 'a') as f:
+    f.write(json.dumps({'type': 'user', 'message':
+        {'role': 'user', 'content': 'after-bad'}}) + chr(10))
+c = ht.turns_for('brute', after=b['turns'][-1]['i'])
+print('survivor' in texts_a, stable, len(c['turns']), c['turns'][-1]['text'] if c['turns'] else '-')")"
+if [ "$r" = "True True 1 after-bad" ]; then
+  ok "bad lines skipped, offset advances, repeat calls stable, appends still seen"
+else bad "malformed-record poisoning (got: $r)"; fi
+
+echo "== pathological unclosed wrappers parse in bounded time"
+r="$(python3 -c "
+import json, sys, time; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+t0 = time.time()
+for text in ['<cross-session-message ' * 8000,
+             '<cross-session-message ' + 'x' * (512 * 1024),
+             '<cross-session-message a=b>' + 'x' * (512 * 1024)]:
+    ht._parse_record({'type': 'user',
+                      'message': {'role': 'user', 'content': text}})
+print('fast' if time.time() - t0 < 1.0 else 'slow')")"
+if [ "$r" = "fast" ]; then ok "unclosed/half-megabyte wrappers parse under a second"
+else bad "pathological wrapper timing (got: $r)"; fi
+
+echo "== replacement by a LONGER file is detected"
+python3 - "$T" $$ <<'PY'
+import json, os, sys
+t, pid = sys.argv[1], int(sys.argv[2])
+with open(os.path.join(t, "cc", "sessions", "111.json"), "w") as f:
+    json.dump({"name": "swap", "pid": pid, "sessionId": "ses-swap",
+               "messagingSocketPath": t + "/dummy.sock", "startedAt": 1,
+               "kind": "interactive"}, f)
+proj = os.path.join(t, "cc", "projects", "-fake-proj")
+with open(os.path.join(proj, "ses-swap.jsonl"), "w") as f:
+    f.write(json.dumps({"type": "user", "message":
+        {"role": "user", "content": "old world"}}) + "\n")
+PY
+r="$(python3 -c "
+import json, os, sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+a = ht.turns_for('swap')
+path, _ = ht.find_transcript('swap')
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    for i in range(5):
+        f.write(json.dumps({'type': 'user', 'message':
+            {'role': 'user', 'content': 'new world %d' % i}}) + chr(10))
+os.replace(tmp, path)
+b = ht.turns_for('swap')
+texts = [t['text'] for t in b['turns']]
+print(len(a['turns']), len(b['turns']), any('old world' in x for x in texts))")"
+if [ "$r" = "1 5 False" ]; then
+  ok "longer replacement reparsed from zero — no spliced history"
+else bad "longer-replacement detection (got: $r)"; fi
+
+echo "== collision resolution matches the daemon's chooser (probe parity)"
+r="$(python3 -c "
+import json, os, socket, sys, threading
+sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+import homi
+t = '$T'
+live = t + '/live.sock'
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(live); srv.listen(8)
+held = []
+def acceptor():
+    while True:
+        try:
+            c, _ = srv.accept()
+            held.append(c)   # hold open: probe's recv must TIME OUT (live)
+        except OSError:
+            return
+threading.Thread(target=acceptor, daemon=True).start()
+sess = os.path.join(t, 'cc', 'sessions')
+recs = []
+for fn, sid, sock, started in [('120.json', 'ses-twin-live', live, 1000),
+                               ('121.json', 'ses-twin-dead', t + '/dummy.sock', 2000)]:
+    d = {'name': 'twin', 'pid': int(sys.argv[1]), 'sessionId': sid,
+         'messagingSocketPath': sock, 'startedAt': started,
+         'kind': 'interactive'}
+    recs.append(d)
+    with open(os.path.join(sess, fn), 'w') as f:
+        json.dump(d, f)
+proj = os.path.join(t, 'cc', 'projects', '-fake-proj')
+for sid in ('ses-twin-live', 'ses-twin-dead'):
+    with open(os.path.join(proj, sid + '.jsonl'), 'w') as f:
+        f.write(json.dumps({'type': 'user', 'message':
+            {'role': 'user', 'content': sid}}) + chr(10))
+oracle = homi.Homi._choose_session(recs)['sessionId']
+mine = ht.find_session('twin')['sessionId']
+srv.close()
+print(oracle, mine, oracle == mine)" $$)"
+if printf '%s' "$r" | grep -q "True$"; then
+  ok "find_session agrees with Homi._choose_session under a dead-socket collision"
+else bad "collision parity (got: $r)"; fi
+
+echo "== concurrent readers on distinct transcripts"
+r="$(python3 -c "
+import sys, threading; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+errs = []
+def go(name, n):
+    try:
+        for _ in range(20):
+            r = ht.turns_for(name)
+            assert r['ok'] and len(r['turns']) == n, (name, len(r['turns']))
+    except Exception as e:
+        errs.append(repr(e))
+a = threading.Thread(target=go, args=('scout', 10))
+b = threading.Thread(target=go, args=('brute', 3))
+a.start(); b.start(); a.join(); b.join()
+print(errs or 'clean')")"
+if [ "$r" = "clean" ]; then ok "two threads, two transcripts, no interference"
+else bad "concurrency (got: $r)"; fi
+
+echo "== every board-imported homi module ships in all three distribution lists"
+r="$(python3 -c "
+import re
+board = open('$HERE/lib/homi_board.py').read()
+mods = sorted(set(re.findall(r'import (homi_[a-z]+)', board)))
+missing = []
+for src, pat in [('$HERE/lib/homi.py', r'kernel_files.*?\]'),
+                 ('$HERE/packages/homi/scripts/vendor.mjs', r'const files.*'),
+                 ('$HERE/packages/homi/src/cli.ts', r'for \(const f of \[.*')]:
+    s = open(src).read()
+    m = re.search(pat, s, re.S)
+    seg = m.group(0) if m else ''
+    for mod in mods:
+        if mod + '.py' not in seg:
+            missing.append(src.split('/')[-1] + ':' + mod)
+print(missing or 'complete')")"
+if [ "$r" = "complete" ]; then ok "kernel_files + vendor.mjs + cli.ts all carry every board module"
+else bad "distribution lists (missing: $r)"; fi
+
 echo "== server: token-gated session API on the talk page"
 "$COMM" homi start >/dev/null 2>&1
 "$COMM" homi init --handle alice >/dev/null 2>&1
@@ -165,8 +361,9 @@ TOKEN="$(printf '%s' "$page" | grep -o '"token": *"[a-f0-9]*"' | head -1 | grep 
 c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/session/scout")"
 if [ "$c" = "403" ]; then ok "session API without token refused (403)"; else bad "no-token refused (got $c)"; fi
 r="$(curl -s -m 5 -H "X-Homi-Token: $TOKEN" "http://127.0.0.1:$PORT/api/session/scout")"
-n="$(printf '%s' "$r" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("turns") or []), d.get("ok"), d.get("live"))' 2>/dev/null)"
-if [ "$n" = "8 True True" ]; then ok "session API serves the parsed turns (live:true)"
+n="$(printf '%s' "$r" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("turns") or []), d.get("ok"), d.get("live"), d.get("sid"), "cwd" in d)' 2>/dev/null)"
+if [ "$n" = "10 True True ses-scout-new False" ]; then
+  ok "session API serves the turns + sid, and no cwd disclosure"
 else bad "session API turns (got: $n / $(printf '%s' "$r" | head -c 120))"; fi
 r="$(curl -s -m 5 -H "X-Homi-Token: $TOKEN" "http://127.0.0.1:$PORT/api/session/nobody")"
 n="$(printf '%s' "$r" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("ok"), d.get("live"), len(d.get("turns") or []))' 2>/dev/null)"
@@ -183,6 +380,15 @@ echo "== the talk page grows tabs"
 if printf '%s' "$page" | grep -q 'data-tab="session"' && printf '%s' "$page" | grep -q 'api/session'; then
   ok "talk page carries the session tab + its poll wiring"
 else bad "talk page tabs"; fi
+if printf '%s' "$page" | grep -q '\[hidden\]' && printf '%s' "$page" | grep -A1 '\[hidden\]' | grep -q 'display: *none'; then
+  ok "hidden panes actually hide (author [hidden] guard beats the flex rule)"
+else bad "hidden guard css"; fi
+if printf '%s' "$page" | grep -q 'sSid' && printf '%s' "$page" | grep -q 'session restarted'; then
+  ok "client detects a restarted session (sid tracked, pane reset)"
+else bad "sid tracking in page"; fi
+if printf '%s' "$page" | grep -q 't.who'; then
+  ok "client renders foreign senders by name, not as you"
+else bad "who byline in page"; fi
 if [ "$(printf '%s' "$page" | grep -c -e 'https\?://' -e 'url(' -e '@import' -e '<link' -e 'src=')" = "0" ]; then
   ok "talk page still self-contained"
 else bad "talk page self-contained"; fi
