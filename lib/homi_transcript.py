@@ -40,21 +40,34 @@ _XS_OPEN = "<cross-session-message"
 _XS_CLOSE = "</cross-session-message>"
 
 
-def _extract_xsession(text):
-    """(inner_text, sender) when the record is a cross-session delivery,
-    else None; ("", None) for a malformed/hostile wrapper, which the caller
-    skips. The sender is the wrapper's from-name — and an attacker-length
-    attribute must DEGRADE (truncate, or 'unknown sender', or skip), never
-    fail open to rendering under the operator's own 'you' byline."""
-    s = text.lstrip()
-    if not s.startswith(_XS_OPEN):
+# Harness packaging around a delivered message: the preamble line above the
+# wrapper and the stapled-on advisory after it. Matching is by marker, and
+# the failure direction is deliberate: unrecognized packaging RENDERS (noise
+# you can see) — it is never silently eaten.
+_XS_PREAMBLES = ("Another Claude session sent a message:",
+                 "[Cross-session delivery notice]")
+_XS_BOIL_START = "This came from another Claude session"
+_XS_BOIL_END = "permission laundering."
+
+
+def _xsession_turns(text, ts):
+    """Turns for a user record containing a cross-session wrapper ANYWHERE
+    (the harness prepends a preamble line, so start-anchored matching let
+    raw envelopes render whole). Returns None when no wrapper; [] for a
+    hostile/unparseable wrapper (machine noise, skipped); else 1-2 turns:
+    the delivered message under its sender's byline, plus any text the
+    operator themselves typed after the packaging. An attacker-length
+    from-name DEGRADES (truncate / 'unknown sender'), never renders as
+    'you'."""
+    idx = text.find(_XS_OPEN)
+    if idx < 0:
         return None
-    gt = s.find(">", 0, 4096)
+    gt = text.find(">", idx, idx + 4096)
     if gt < 0:
-        # No honest wrapper has a 4 KB opener tag: machine noise. Skipping
-        # beats the old fallback, which leaked raw wrapper markup as "you".
-        return "", None
-    head = s[:gt]
+        # No honest wrapper has a 4 KB opener tag: machine noise, whole
+        # turn skipped (the old fallback leaked raw markup as "you").
+        return []
+    head = text[idx:gt]
     who = "unknown sender"
     i = head.find('from-name="')
     if i >= 0:
@@ -62,9 +75,26 @@ def _extract_xsession(text):
         if j > i + 11:
             name = head[i + 11:j]
             who = name[:120] + ("…" if len(name) > 120 else "")
-    j = s.find(_XS_CLOSE, gt)
-    inner = s[gt + 1:j] if j > gt else s[gt + 1:]
-    return inner.strip(), who
+    j = text.find(_XS_CLOSE, gt)
+    inner = text[gt + 1:j] if j > gt else text[gt + 1:]
+    post = text[j + len(_XS_CLOSE):] if j > gt else ""
+    out = []
+    pre = text[:idx].strip()
+    if pre and not pre.startswith(_XS_PREAMBLES):
+        # Unknown pre-text: keep it visible rather than guess.
+        out.append({"role": "user", "ts": ts, "text": pre})
+    inner = inner.strip()
+    if inner:
+        out.append({"role": "user", "ts": ts, "text": inner, "who": who})
+    b = post.find(_XS_BOIL_START)
+    if b >= 0:
+        e = post.find(_XS_BOIL_END, b)
+        post = (post[:b] + post[e + len(_XS_BOIL_END):]) if e >= 0 \
+            else post[:b]
+    post = post.strip()
+    if post:
+        out.append({"role": "user", "ts": ts, "text": post})
+    return out
 
 
 def _strip_spans(text, open_tag="<system-reminder>",
@@ -266,19 +296,13 @@ def _parse_record(rec):
                              if isinstance(b, dict) and b.get("type") == "text")
         else:
             return []
-        who = None
-        xs = _extract_xsession(text)
+        xs = _xsession_turns(text, ts)
         if xs is not None:
-            text, who = xs
-        else:
-            text = _strip_spans(text)
-        text = text.strip()
+            return xs
+        text = _strip_spans(text).strip()
         if not text or text.startswith(_SKIP_PREFIXES):
             return []
-        t = {"role": "user", "ts": ts, "text": text}
-        if who:
-            t["who"] = who
-        return [t]
+        return [{"role": "user", "ts": ts, "text": text}]
     out, buf = [], []
     if not isinstance(content, list):
         return []

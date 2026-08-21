@@ -54,7 +54,8 @@ function makeNode(tag) {
 
 function newPage(boot) {
   const ids = {};
-  for (const id of ["talk-boot", "inp", "snd", "stat", "note", "filt", "log", "composer", "who"]) {
+  for (const id of ["talk-boot", "inp", "snd", "stat", "note", "filt", "log",
+                    "composer", "who", "pill", "dot"]) {
     ids[id] = makeNode(id === "inp" ? "textarea" : "div");
     ids[id].id = id;
   }

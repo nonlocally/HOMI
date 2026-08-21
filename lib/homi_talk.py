@@ -306,7 +306,7 @@ TALK_TEMPLATE = r"""<!doctype html>
   body {
     background: var(--plane); color: var(--ink);
     font-family: var(--font-sans);
-    font-size: 15px; line-height: 1.45; letter-spacing: -0.006em;
+    font-size: 14px; line-height: 1.45; letter-spacing: -0.006em;
     -webkit-font-smoothing: antialiased;
     display: flex; flex-direction: column;
     height: 100vh;   /* fallback for browsers without dvh */
@@ -315,57 +315,138 @@ TALK_TEMPLATE = r"""<!doctype html>
   :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
   header {
-    display: flex; align-items: baseline; gap: 12px;
+    display: flex; align-items: center; gap: 10px;
     padding: 14px 16px 10px;
     border-bottom: 1px solid var(--grid);
     padding-top: calc(14px + env(safe-area-inset-top));
   }
-  header a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  header a { color: var(--muted); text-decoration: none;
+             font-family: var(--font-mono); font-size: 11px;
+             letter-spacing: 0.04em; }
   header a:hover { color: var(--ink); }
-  header .who { font-weight: 500; letter-spacing: -0.012em; }
-  header .tag { margin-left: auto; font-size: 10.5px; letter-spacing: 0.06em;
-                text-transform: uppercase; color: var(--muted); }
+  #dot { width: 8px; height: 8px; border-radius: 50%; flex: none;
+         background: var(--baseline); }
+  #dot.live { background: var(--status-good); }
+  #dot.asleep { background: var(--status-warn); }
+  header .who { font-size: 16px; font-weight: 500;
+                letter-spacing: -0.02em; }
+  header .tag { margin-left: auto; font-family: var(--font-mono);
+                font-size: 10.5px; letter-spacing: 0.12em;
+                text-transform: uppercase; color: var(--muted);
+                font-variant-numeric: tabular-nums; }
+  #filt { background: transparent; border: 1px solid var(--baseline);
+          border-radius: 3px; color: var(--ink-2); padding: 3px 10px;
+          font-family: var(--font-mono); font-size: 12px; cursor: pointer;
+          transition: border-color 0.15s ease, color 0.15s ease; }
+  #filt:hover { border-color: var(--ink); color: var(--ink); }
+  #filt.on { border-color: var(--ink); color: var(--ink); }
+
+  #note { display: flex; gap: 8px; align-items: center;
+          padding: 8px 16px; color: var(--muted);
+          font-family: var(--font-mono); font-size: 11px;
+          letter-spacing: 0.06em; border-bottom: 1px solid var(--grid); }
+  #note::before { content: ""; width: 7px; height: 7px; border-radius: 50%;
+                  background: var(--baseline); flex: none; }
+  #note.warn::before { background: var(--status-warn); }
+  #note[hidden] { display: none; }
 
   #log {
     flex: 1; overflow-y: auto;
     padding: 14px 16px;
     display: flex; flex-direction: column; gap: 10px;
   }
-  #filt { background: none; border: 1px solid var(--border);
-          border-radius: 8px; color: var(--muted); padding: 2px 10px;
-          font-size: 14px; cursor: pointer; }
-  #filt.on { color: var(--ink); border-color: var(--ink); }
-  #note { padding: 8px 16px; color: var(--muted); font-size: 12.5px;
-          border-bottom: 1px solid var(--grid); }
-  #note[hidden] { display: none; }
-  /* the ✉ lens: hide the session's working life, keep the correspondence */
-  body.msgs .sess { display: none; }
-  .trn-tool { font-family: var(--font-mono); font-size: 12px; color: var(--muted);
-              padding: 1px 2px; white-space: pre-wrap; word-break: break-word; }
-  .trn-mark { align-self: center; color: var(--muted); font-size: 11px;
-              letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 0; }
-  #older { align-self: center; background: var(--surface); color: var(--muted);
-           border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
-           font: inherit; font-size: 12px; cursor: pointer; }
   .msg { max-width: 86%; }
-  .msg .meta { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
-               color: var(--muted); margin-bottom: 3px; font-variant-numeric: tabular-nums; }
+  .msg .meta { font-family: var(--font-mono); font-size: 10px;
+               letter-spacing: 0.12em; text-transform: uppercase;
+               color: var(--muted); margin-bottom: 4px;
+               font-variant-numeric: tabular-nums; }
   .msg .body {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 7px;
     padding: 9px 12px;
     white-space: pre-wrap; word-break: break-word;
   }
   .msg.out { align-self: flex-end; }
   .msg.out .meta { text-align: right; }
   .msg.out .body { background: var(--surface-2); }
-  .msg .code {
+  /* the substrate: session prose sits BEHIND the correspondence — outlined,
+     not surfaced, so the ✉ plane reads as the elevated layer */
+  .msg.sess .body { background: transparent; border-color: var(--grid); }
+  .msg.sess .meta { opacity: 0.8; }
+  .msg .body code {
+    font-family: var(--font-mono); font-size: 0.92em;
+    background: var(--plane); border: 1px solid var(--grid);
+    border-radius: 4px; padding: 0 4px;
+  }
+  .msg .body strong { font-weight: 600; }
+  .msg .body ul { padding-left: 18px; margin: 4px 0; white-space: normal; }
+  .msg .body li { margin: 2px 0; }
+  .code {
+    position: relative;
     font-family: var(--font-mono); font-size: 12.5px;
     background: var(--plane); border: 1px solid var(--grid); border-radius: 6px;
     padding: 8px 10px; margin: 6px 0 2px; overflow-x: auto; white-space: pre;
   }
+  .code .cp {
+    position: absolute; top: 6px; right: 6px;
+    background: var(--surface); color: var(--muted);
+    border: 1px solid var(--baseline); border-radius: 3px;
+    font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 2px 8px; cursor: pointer;
+  }
+  .code .cp:active { color: var(--ink); }
+
+  .trn-tool { font-family: var(--font-mono); font-size: 11px;
+              color: var(--muted); padding: 1px 2px;
+              white-space: pre-wrap; word-break: break-word; }
+  .trn-mark { align-self: center; color: var(--muted);
+              font-family: var(--font-mono); font-size: 10.5px;
+              letter-spacing: 0.12em; text-transform: uppercase;
+              padding: 6px 0; }
+  .trn-time { align-self: stretch; display: flex; align-items: center;
+              gap: 12px; color: var(--muted);
+              font-family: var(--font-mono); font-size: 10px;
+              letter-spacing: 0.12em; text-transform: uppercase;
+              font-variant-numeric: tabular-nums; padding: 8px 0 0; }
+  .trn-time::before, .trn-time::after {
+    content: ""; flex: 1; border-top: 1px solid var(--grid); }
+  /* the work ledger: consecutive receipts fold into one line of record */
+  details.ledger { margin: 0; }
+  details.ledger summary {
+    cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent;
+    color: var(--muted); font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.12em; text-transform: uppercase; padding: 3px 0;
+    display: flex; align-items: center; gap: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  details.ledger summary::-webkit-details-marker { display: none; }
+  details.ledger summary::before { content: "\25B8"; font-size: 9px;
+                                   color: var(--baseline); }
+  details.ledger[open] summary::before { content: "\25BE"; }
+  details.ledger .trn-tool { padding-left: 14px; margin-left: 3px;
+                             border-left: 1px solid var(--grid); }
+  #older { align-self: center; background: transparent;
+           color: var(--ink-2); border: 1px solid var(--baseline);
+           border-radius: 3px; padding: 5px 12px;
+           font-family: var(--font-mono); font-size: 11px; cursor: pointer; }
+  #older:hover { border-color: var(--ink); color: var(--ink); }
+  #pill {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(78px + env(safe-area-inset-bottom));
+    background: var(--surface-2); color: var(--ink);
+    border: 1px solid var(--baseline); border-radius: 7px;
+    padding: 5px 12px; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer;
+  }
+  #pill[hidden] { display: none; }
+  body.msgs .sess, body.msgs details.ledger { display: none; }
   .empty { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .msg, .trn-tool, .trn-mark, .trn-time, details.ledger {
+      animation: rise 0.18s ease-out; }
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(3px); } }
 
   form {
     display: flex; gap: 8px;
@@ -376,30 +457,34 @@ TALK_TEMPLATE = r"""<!doctype html>
   #inp {
     flex: 1; resize: none;
     background: var(--surface); color: var(--ink);
-    border: 1px solid var(--border); border-radius: 10px;
+    border: 1px solid var(--border); border-radius: 7px;
     padding: 10px 12px; font: inherit; font-size: 16px; /* 16px: no iOS zoom */
     max-height: 30dvh;
   }
   #snd {
     align-self: flex-end;
-    background: var(--surface-2); color: var(--ink);
-    border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 16px; font: inherit; font-size: 13px; font-weight: 500;
+    background: transparent; color: var(--ink-2);
+    border: 1px solid var(--baseline); border-radius: 3px;
+    padding: 10px 15px; font-family: var(--font-mono); font-size: 11.5px;
     cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
   }
-  #snd:disabled { color: var(--muted); }
+  #snd:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+  #snd:disabled { opacity: 0.55; cursor: default; }
 </style>
 </head>
 <body>
 <script id="talk-boot" type="application/json">__BOOT__</script>
 <header>
   <a href="/" id="back">&#9666; board</a>
+  <span id="dot"></span>
   <span class="who" id="who"></span>
   <button id="filt" class="msgs-only" type="button" title="messages only">&#9993;</button>
   <span class="tag" id="stat"></span>
 </header>
 <div id="note" hidden></div>
 <div id="log" class="composer-log"></div>
+<button id="pill" type="button" hidden>new &#8595;</button>
 <form id="composer" class="composer">
   <textarea id="inp" rows="1" placeholder="message" autocomplete="off"></textarea>
   <button id="snd" type="submit">send</button>
@@ -420,6 +505,8 @@ TALK_TEMPLATE = r"""<!doctype html>
   var stat = document.getElementById("stat");
   var note = document.getElementById("note");
   var filt = document.getElementById("filt");
+  var pill = document.getElementById("pill");
+  var dot = document.getElementById("dot");
   // Composite cursor: tCur is the transcript turn index, tsCur the mail
   // timestamp. Both advance ONLY from server responses.
   var tCur = null, tsCur = 0;
@@ -427,6 +514,8 @@ TALK_TEMPLATE = r"""<!doctype html>
   var seen = {};
   var firstI = null, older = null, olderBusy = false;
   var inFlight = false;
+  var curLedger = null, curLedgerN = 0;
+  var lastDivTs = 0;
 
   function el(t, c, x) {
     var n = document.createElement(t);
@@ -442,14 +531,67 @@ TALK_TEMPLATE = r"""<!doctype html>
     if (d < 86400) return Math.floor(d / 3600) + "h ago";
     return Math.floor(d / 86400) + "d ago";
   }
-  // Fenced code renders mono; everything else is textContent — nothing from
-  // the fabric or a transcript can become markup.
+  var MONTHS = ["jan","feb","mar","apr","may","jun",
+                "jul","aug","sep","oct","nov","dec"];
+  function fmtClock(ts) {
+    var d = new Date(ts * 1000);
+    var hh = ("0" + d.getHours()).slice(-2);
+    var mm = ("0" + d.getMinutes()).slice(-2);
+    return hh + ":" + mm + " · " + MONTHS[d.getMonth()] + " " + d.getDate();
+  }
+  // Markdown-lite, textContent-only: fenced code (with copy), inline code,
+  // bold, dash lists. Bounded token classes — nothing here backtracks and
+  // nothing from the fabric can become markup.
+  function inline(parent, s) {
+    var re = /(\*\*[^*\n]{1,200}\*\*|`[^`\n]{1,200}`)/g;
+    var last = 0, m;
+    while ((m = re.exec(s))) {
+      if (m.index > last) parent.appendChild(document.createTextNode(s.slice(last, m.index)));
+      var tok = m[0];
+      if (tok.charAt(0) === "`") parent.appendChild(el("code", null, tok.slice(1, -1)));
+      else parent.appendChild(el("strong", null, tok.slice(2, -2)));
+      last = m.index + tok.length;
+    }
+    if (last < s.length) parent.appendChild(document.createTextNode(s.slice(last)));
+  }
   function renderBody(parent, text) {
     var parts = String(text).split("```");
     for (var i = 0; i < parts.length; i++) {
       if (!parts[i]) continue;
-      if (i % 2 === 1) parent.appendChild(el("div", "code", parts[i].replace(/^[a-z]*\n/, "")));
-      else parent.appendChild(document.createTextNode(parts[i]));
+      if (i % 2 === 1) {
+        var codeText = parts[i].replace(/^[a-z]*\n/, "");
+        var box = el("div", "code");
+        box.appendChild(document.createTextNode(codeText));
+        var cp = el("button", "cp", "copy");
+        cp.type = "button";
+        (function (t, b) {
+          b.addEventListener("click", function () {
+            try {
+              navigator.clipboard.writeText(t);
+              b.textContent = "copied";
+              setTimeout(function () { b.textContent = "copy"; }, 1200);
+            } catch (e) {}
+          });
+        })(codeText, cp);
+        box.appendChild(cp);
+        parent.appendChild(box);
+      } else {
+        var lines = parts[i].split("\n");
+        var ul = null;
+        for (var j = 0; j < lines.length; j++) {
+          var ln = lines[j];
+          if (/^\s*[-•] /.test(ln)) {
+            if (!ul) { ul = el("ul"); parent.appendChild(ul); }
+            var li = el("li");
+            inline(li, ln.replace(/^\s*[-•] /, ""));
+            ul.appendChild(li);
+          } else {
+            ul = null;
+            inline(parent, ln);
+            if (j < lines.length - 1) parent.appendChild(document.createTextNode("\n"));
+          }
+        }
+      }
     }
   }
   function key(it) {
@@ -475,7 +617,6 @@ TALK_TEMPLATE = r"""<!doctype html>
       }
       return bubble("in", ["✉ " + (it.who || target), ago(it.ts)], it.text);
     }
-    // session items — the agent's working life
     var n;
     if (it.role === "tool") n = el("div", "trn-tool sess", it.text);
     else if (it.role === "mark") n = el("div", "trn-mark sess", it.text);
@@ -499,23 +640,53 @@ TALK_TEMPLATE = r"""<!doctype html>
     }
     return n;
   }
-  function addItem(it, front) {
-    var k = key(it);
-    if (seen[k]) return;
-    seen[k] = 1;
-    var n = build(it);
-    if (front && older) log.insertBefore(n, older.nextSibling);
-    else log.appendChild(n);
+  function trackFirstI(it) {
     if (it.via === "session" && typeof it.i === "number"
         && (firstI === null || it.i < firstI)) firstI = it.i;
   }
-  function setNote(text) {
-    if (text) { note.textContent = text; note.hidden = false; }
+  function addItem(it, front) {
+    var k = key(it);
+    if (seen[k]) return false;
+    seen[k] = 1;
+    trackFirstI(it);
+    // The work ledger: consecutive receipts (tool lines, sends to third
+    // parties) fold into one collapsible record; anything else closes it.
+    var isReceipt = it.via === "session"
+      && (it.role === "tool" || (it.role === "reply" && it.to !== handle));
+    if (!front && isReceipt) {
+      if (!curLedger) {
+        curLedger = el("details", "ledger sess");
+        curLedger.appendChild(el("summary", null, ""));
+        curLedgerN = 0;
+        log.appendChild(curLedger);
+      }
+      curLedgerN++;
+      curLedger.children[0].textContent =
+        "⚙ worked · " + curLedgerN + " step" + (curLedgerN === 1 ? "" : "s");
+      curLedger.appendChild(el("div", "trn-tool",
+        it.role === "tool" ? it.text : "⟶ send " + (it.to || "?")));
+      return true;
+    }
+    if (!front) {
+      curLedger = null;
+      if (it.ts && it.ts - lastDivTs > 1800) {
+        log.appendChild(el("div", "trn-time", fmtClock(it.ts)));
+        lastDivTs = it.ts;
+      }
+    }
+    var n = build(it);
+    if (front && older) log.insertBefore(n, older.nextSibling);
+    else log.appendChild(n);
+    return true;
+  }
+  function setNote(text, kind) {
+    if (text) { note.textContent = text; note.className = kind || ""; note.hidden = false; }
     else note.hidden = true;
   }
   function reset(markText) {
     log.textContent = "";
     seen = {}; tCur = null; firstI = null; older = null;
+    curLedger = null; lastDivTs = 0;
     tsCur = 0;   // replay the WHOLE mail thread — a restart must never eat it
     if (markText) log.appendChild(el("div", "trn-mark", markText));
   }
@@ -547,8 +718,9 @@ TALK_TEMPLATE = r"""<!doctype html>
         return;
       }
       if (d.sid) sSid = d.sid;
-      if (!d.present) setNote("no session on this device — messages only");
-      else if (!d.live) setNote("asleep — messages queue and deliver on wake");
+      dot.className = d.live ? "live" : (d.present ? "asleep" : "");
+      if (!d.present) setNote("no session on this device — messages only", "");
+      else if (!d.live) setNote("asleep — messages queue and deliver on wake", "warn");
       else setNote(null);
       var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
       var firstLoad = (tCur === null);
@@ -562,7 +734,8 @@ TALK_TEMPLATE = r"""<!doctype html>
           }
         }
       }
-      d.items.forEach(function (it) { addItem(it, false); });
+      var had = false;
+      d.items.forEach(function (it) { if (addItem(it, false)) had = true; });
       if (typeof d.t_cursor === "number" && (tCur === null || d.t_cursor > tCur))
         tCur = d.t_cursor;
       if (typeof d.ts_cursor === "number" && d.ts_cursor > tsCur)
@@ -574,7 +747,8 @@ TALK_TEMPLATE = r"""<!doctype html>
         log.insertBefore(older, log.firstChild);
       }
       stat.textContent = "";
-      if (atBottom || firstLoad) log.scrollTop = log.scrollHeight;
+      if (atBottom || firstLoad) { log.scrollTop = log.scrollHeight; pill.hidden = true; }
+      else if (had) pill.hidden = false;
     });
   }
   function loadOlder() {
@@ -601,6 +775,13 @@ TALK_TEMPLATE = r"""<!doctype html>
     document.body.classList.toggle("msgs");
     filt.classList.toggle("on");
     log.scrollTop = log.scrollHeight;
+  });
+  pill.addEventListener("click", function () {
+    log.scrollTop = log.scrollHeight;
+    pill.hidden = true;
+  });
+  log.addEventListener("scroll", function () {
+    if (log.scrollHeight - log.scrollTop - log.clientHeight < 40) pill.hidden = true;
   });
 
   document.getElementById("composer").addEventListener("submit", function (ev) {

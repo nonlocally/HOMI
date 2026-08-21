@@ -19,6 +19,7 @@ function qs(url) {
 
 (async () => {
   const p = newPage({ handle: "alice", target: "scout", token: "T" });
+  p.ids.pill.hidden = true;   // mirrors the real markup's `hidden` attribute
   const urls = [];
   const HISTORY = [
     { via: "mail", role: "user", ts: 900.25, text: "hello agent", routed: "live" },
@@ -75,6 +76,69 @@ function qs(url) {
   if (marks.some(m => m.textContent.includes("session restarted"))) {
     ok("the restart is marked honestly");
   } else bad("restart mark");
+
+  // ---- the work ledger: consecutive receipts group into one collapsible
+  call = 10;   // route future fetches to the echo branch
+  installFetch((url) => {
+    const q2 = qs(url);
+    const tsA = parseFloat(q2.ts_after || "0");
+    return { ok: true, live: true, present: true, sid: "sid-B", truncated: false,
+             t_cursor: 20, ts_cursor: tsA, t_min: 3,
+             items: [
+               { via: "session", role: "tool", i: 10, ts: 1100, text: "$ step one" },
+               { via: "session", role: "tool", i: 11, ts: 1101, text: "$ step two" },
+               { via: "session", role: "reply", i: 12, ts: 1102, to: "bob", text: "" },
+               { via: "session", role: "assistant", i: 13, ts: 1103, text: "prose after work" },
+               { via: "session", role: "tool", i: 14, ts: 1104, text: "$ later step" },
+             ] };
+  }, urls);
+  p.st.poll(); await flush();
+  const ledgers = p.ids.log.children.filter(c => c.tagName === "details");
+  if (ledgers.length === 2
+      && ledgers[0].children.filter(c => /trn-tool/.test(c.className)).length === 3
+      && ledgers[0].children.some(c => c.tagName === "summary"
+                                       && /3 steps/.test(c.textContent))
+      && ledgers[1].children.some(c => c.tagName === "summary"
+                                       && /1 step/.test(c.textContent))) {
+    ok("consecutive receipts fold into ledgers; prose breaks the group");
+  } else bad("ledger grouping (details nodes: " + ledgers.length + ")");
+
+  // ---- the new-messages pill: arrivals while scrolled up
+  p.ids.log.scrollTop = 0;   // reader is up in history
+  installFetch((url) => {
+    const q3 = qs(url);
+    return { ok: true, live: true, present: true, sid: "sid-B", truncated: false,
+             t_cursor: 21, ts_cursor: parseFloat(q3.ts_after || "0") + 1,
+             t_min: 3,
+             items: [{ via: "mail", role: "in", ts: 99999, text: "psst", who: "scout" }] };
+  }, urls);
+  p.st.poll(); await flush();
+  if (p.ids.pill && p.ids.pill.hidden === false) {
+    ok("new-message pill appears when scrolled away");
+  } else bad("pill (hidden=" + (p.ids.pill && p.ids.pill.hidden) + ")");
+  p.ids.pill.dispatchEvent({ type: "click" });
+  if (p.ids.pill.hidden === true) ok("pill click returns to the tail and hides");
+  else bad("pill dismiss");
+
+  // ---- markdown-lite: inline code, bold, and lists build as real nodes
+  const probe = p.ids.log.children[p.ids.log.children.length - 1];
+  installFetch((url) => {
+    const q4 = qs(url);
+    return { ok: true, live: true, present: true, sid: "sid-B", truncated: false,
+             t_cursor: 22, ts_cursor: parseFloat(q4.ts_after || "0") + 1,
+             t_min: 3,
+             items: [{ via: "mail", role: "in", ts: 199999, who: "scout",
+                       text: "use `homi send` and **never** guess:\n- one\n- two" }] };
+  }, urls);
+  p.st.poll(); await flush();
+  const last = p.ids.log.children[p.ids.log.children.length - 1];
+  const bodyN = last.children.find(c => /body/.test(c.className));
+  const kinds = [];
+  (function walk(n) { kinds.push(n.tagName); (n.children || []).forEach(walk); })(bodyN);
+  if (kinds.includes("code") && kinds.includes("strong")
+      && kinds.includes("ul") && kinds.filter(k => k === "li").length === 2) {
+    ok("markdown-lite builds code/strong/ul-li as nodes (textContent only)");
+  } else bad("markdown-lite (kinds: " + kinds.join(",") + ")");
 
   console.log("\npass=" + pass + " fail=" + fail);
   process.exit(fail ? 1 : 0);

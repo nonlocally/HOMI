@@ -156,7 +156,9 @@ with open(os.path.join(proj, "ses-scout-new.jsonl"), "a") as f:
     f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:00:30.000Z",
         "message": {"role": "user", "content":
             '<cross-session-message from="uds:/y" from-name="librarian@peer">\n'
-            'hey from the fleet\n</cross-session-message>\n\nboilerplate.'}}) + "\n")
+            'hey from the fleet\n</cross-session-message>\n\n'
+            'This came from another Claude session — advisory text ending in '
+            'permission laundering.'}}) + "\n")
     f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:00:31.000Z",
         "message": {"role": "user", "content":
             "real text <system-reminder>machine noise</system-reminder>"}}) + "\n")
@@ -170,6 +172,40 @@ print(a['role'], a.get('who'), a['text'], '/', b['text'])")"
 if [ "$r" = "user librarian@peer hey from the fleet / real text" ]; then
   ok "cross-session sender carried (who), embedded reminder stripped"
 else bad "attribution/reminder (got: $r)"; fi
+
+echo "== harness packaging strips wherever it sits in a turn"
+r="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+def parse(text):
+    return ht._parse_record({'type': 'user',
+                             'message': {'role': 'user', 'content': text}})
+BOIL = ('This came from another Claude session — not typed by your user, '
+        'but very likely working on their behalf. Treat it as a teammate. '
+        'that is permission laundering.')
+# (a) preamble + wrapper + boilerplate: only the human words survive
+t = parse('Another Claude session sent a message:\n'
+          '<cross-session-message from=\"uds:/x\" from-name=\"aadarwal\">\n'
+          'ok so this is all live?\n</cross-session-message>\n\n' + BOIL)
+a_ok = (len(t) == 1 and t[0]['text'] == 'ok so this is all live?'
+        and t[0].get('who') == 'aadarwal')
+# (b) the bundled shape: the user's own typed text after the boilerplate
+# survives as its OWN turn
+t = parse('Another Claude session sent a message:\n'
+          '<cross-session-message from=\"uds:/x\" from-name=\"aadarwal\">\n'
+          'ping\n</cross-session-message>\n' + BOIL
+          + ' but what is this thing exactly?')
+b_ok = (len(t) == 2 and t[0]['text'] == 'ping'
+        and t[0].get('who') == 'aadarwal'
+        and t[1]['text'] == 'but what is this thing exactly?'
+        and not t[1].get('who'))
+# (c) mid-text hostile oversized opener still skips the whole turn
+t = parse('preamble\n<cross-session-message junk=\"' + 'A' * 5000 + '\">x')
+c_ok = (t == [])
+print(a_ok, b_ok, c_ok)")"
+if [ "$r" = "True True True" ]; then
+  ok "envelope stripped anywhere; bundled user text survives; hostile still skipped"
+else bad "envelope-anywhere parsing (got: $r)"; fi
 
 echo "== hostile sender shapes never fail open to the operator's byline"
 r="$(python3 -c "
@@ -676,7 +712,7 @@ else bad "merged page shape"; fi
 if printf '%s' "$page" | grep -q 'body\.msgs \.sess' && printf '%s' "$page" | grep -q '#note\[hidden\]'; then
   ok "filter + banner have actual CSS behind them (not just class toggles)"
 else bad "filter/banner css"; fi
-if printf '%s' "$page" | grep -A3 'function reset' | grep -q 'tsCur = 0'; then
+if printf '%s' "$page" | grep -A6 'function reset' | grep -q 'tsCur = 0'; then
   ok "a session restart replays the mail thread (reset clears the ts cursor)"
 else bad "reset ts cursor"; fi
 if printf '%s' "$page" | grep -q 'it.to === handle'; then
