@@ -165,8 +165,34 @@ def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
     base, _, qual = target.partition("@")
     items, live, present, sid = [], False, False, ""
     t_cursor = -1 if t_after is None else int(t_after)
+    t_min = None
     total = 0
     truncated = False
+    # One read of each mail source serves both purposes: FULL history feeds
+    # the twin sets (a twin can be far older than this poll's window), the
+    # since-filter feeds the new items.
+    journal, inmsgs = [], []
+    if t_before is None or not qual:
+        try:
+            with open(_journal_path(target)) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    journal.append(e)
+        except OSError:
+            pass
+        try:
+            r = inbox(handle) if inbox else homi._call(
+                {"op": "inbox", "name": handle, "tail": 500})
+        except (Exception, SystemExit):
+            r = {}
+        inmsgs = [m for m in (r.get("messages") or [])
+                  if _matches(m, base, qual)]
     if not qual:
         d = homi_transcript.turns_for(base, after=t_after, before=t_before,
                                       n=n)
@@ -174,34 +200,61 @@ def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
         sid = d.get("sid") or ""
         total = d.get("total") or 0
         truncated = bool(d.get("truncated"))
-        last_ts = 0.0
-        for t in d.get("turns") or []:
+        # Twin sets, consume-once. A drop needs PROOF a mail copy renders:
+        # sends made outside this page (CLI --from, another device) have no
+        # journal twin, and a REFUSED send has no inbox twin — dropping
+        # those made real content invisible. (Residual: a later no-journal
+        # send with the exact text of an earlier page send can consume the
+        # stale twin — same words, still visible once, accepted.)
+        out_twins = [e.get("text", "") for e in journal
+                     if e.get("dir") == "out"]
+        in_twins = [m.get("text", "") for m in inmsgs]
+        turns = d.get("turns") or []
+        last_ts = next((t["ts"] for t in turns if t.get("ts")), 0.0)
+        for t in turns:
             if t.get("ts"):
                 last_ts = t["ts"]
             if t["i"] > t_cursor:
                 t_cursor = t["i"]
-            if t["role"] == "user" and t.get("who") == handle:
-                continue   # the mail thread carries this
-            if t["role"] == "reply" and t.get("to") == handle:
-                continue   # the mail thread carries this
+            if t_min is None or t["i"] < t_min:
+                t_min = t["i"]
+            if (t["role"] == "user" and t.get("who") == handle
+                    and t["text"] in out_twins):
+                out_twins.remove(t["text"])
+                continue   # the mail thread renders this
+            if (t["role"] == "reply" and t.get("to") == handle
+                    and t["text"] in in_twins):
+                in_twins.remove(t["text"])
+                continue   # the mail thread renders this
             it = dict(t)
             it["via"] = "session"
             if not it.get("ts"):
                 it["ts"] = last_ts
+            if it["role"] == "reply" and it.get("to") != handle:
+                it["text"] = ""   # third-party mail: address renders, not prose
             items.append(it)
     ts_cursor = ts_after
     if t_before is None:
-        for e in conversation(handle, target, since=ts_after, inbox=inbox):
-            items.append({"via": "mail",
-                          "role": "user" if e.get("dir") == "out" else "in",
-                          "ts": e.get("ts") or 0, "text": e.get("text", ""),
-                          "routed": e.get("routed"), "who": e.get("from")})
-            if (e.get("ts") or 0) > ts_cursor:
-                ts_cursor = e["ts"]
+        for e in journal:
+            if e.get("ts", 0) > ts_after:
+                items.append({"via": "mail", "role": "user",
+                              "ts": e.get("ts") or 0,
+                              "text": e.get("text", ""),
+                              "routed": e.get("routed")})
+                if e["ts"] > ts_cursor:
+                    ts_cursor = e["ts"]
+        for m in inmsgs:
+            ts = m.get("ts", 0)
+            if ts > ts_after:
+                items.append({"via": "mail", "role": "in", "ts": ts,
+                              "text": m.get("text", ""),
+                              "who": m.get("from_name")})
+                if ts > ts_cursor:
+                    ts_cursor = ts
     items.sort(key=lambda i: i.get("ts") or 0)
     return {"ok": True, "live": live, "present": present, "sid": sid,
             "items": items, "t_cursor": t_cursor, "ts_cursor": ts_cursor,
-            "total": total, "truncated": truncated}
+            "t_min": t_min, "total": total, "truncated": truncated}
 
 
 def render_talk(handle, target, token):
@@ -258,21 +311,20 @@ TALK_TEMPLATE = r"""<!doctype html>
   header .tag { margin-left: auto; font-size: 10.5px; letter-spacing: 0.06em;
                 text-transform: uppercase; color: var(--muted); }
 
-  #log, #sess {
+  #log {
     flex: 1; overflow-y: auto;
     padding: 14px 16px;
     display: flex; flex-direction: column; gap: 10px;
   }
-  /* The author flex rule above outranks the UA's [hidden] { display:none }
-     — without this guard the tabs render both panes stacked, always. */
-  #log[hidden], #sess[hidden] { display: none; }
-  #tabs { display: flex; gap: 2px; padding: 0 12px;
+  #filt { background: none; border: 1px solid var(--border);
+          border-radius: 8px; color: var(--muted); padding: 2px 10px;
+          font-size: 14px; cursor: pointer; }
+  #filt.on { color: var(--ink); border-color: var(--ink); }
+  #note { padding: 8px 16px; color: var(--muted); font-size: 12.5px;
           border-bottom: 1px solid var(--grid); }
-  .tab { background: none; border: none; color: var(--muted); font: inherit;
-         font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
-         padding: 8px 10px; cursor: pointer;
-         border-bottom: 2px solid transparent; }
-  .tab.on { color: var(--ink); border-bottom-color: var(--ink); }
+  #note[hidden] { display: none; }
+  /* the ✉ lens: hide the session's working life, keep the correspondence */
+  body.msgs .sess { display: none; }
   .trn-tool { font-family: var(--font-mono); font-size: 12px; color: var(--muted);
               padding: 1px 2px; white-space: pre-wrap; word-break: break-word; }
   .trn-mark { align-self: center; color: var(--muted); font-size: 11px;
@@ -412,8 +464,14 @@ TALK_TEMPLATE = r"""<!doctype html>
     var n;
     if (it.role === "tool") n = el("div", "trn-tool sess", it.text);
     else if (it.role === "mark") n = el("div", "trn-mark sess", it.text);
-    else if (it.role === "reply")
-      n = el("div", "trn-tool sess", "⟶ send " + (it.to || "?"));
+    else if (it.role === "reply") {
+      // A kept reply TO the viewer has no mailbox copy (refused, or aged
+      // out of the tail): show its content honestly, marked unconfirmed.
+      if (it.to === handle) {
+        n = bubble("in", [target, ago(it.ts), "unconfirmed"], it.text);
+        n.className += " sess";
+      } else n = el("div", "trn-tool sess", "⟶ send " + (it.to || "?"));
+    }
     else if (it.role === "user") {
       // A foreign sender renders under its own name, never as "you".
       n = (it.who && it.who !== handle)
@@ -443,6 +501,7 @@ TALK_TEMPLATE = r"""<!doctype html>
   function reset(markText) {
     log.textContent = "";
     seen = {}; tCur = null; firstI = null; older = null;
+    tsCur = 0;   // replay the WHOLE mail thread — a restart must never eat it
     if (markText) log.appendChild(el("div", "trn-mark", markText));
   }
   function tlFetch(qs, onDone) {
@@ -503,8 +562,12 @@ TALK_TEMPLATE = r"""<!doctype html>
       if (!d || !d.ok) return;
       var h0 = log.scrollHeight;
       (d.items || []).slice().reverse().forEach(function (it) { addItem(it, true); });
+      // Step by the RAW window (t_min), not rendered items — an all-dropped
+      // batch must keep paging, not lie "start".
+      if (typeof d.t_min === "number" && d.t_min !== null
+          && (firstI === null || d.t_min < firstI)) firstI = d.t_min;
       log.scrollTop += log.scrollHeight - h0;   // keep your place
-      if (firstI <= 0 || !(d.items || []).length) {
+      if (firstI <= 0 || d.t_min === null) {
         older.textContent = d.truncated
           ? "· earlier history trimmed ·" : "· start ·";
         older.disabled = true;

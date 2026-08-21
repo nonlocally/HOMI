@@ -159,8 +159,9 @@ def _pid_alive(pid):
 
 
 def _find_session_dead(name):
-    """The most recent REGISTERED session for `name` whose process is gone —
-    a sleeping agent still deserves to show its last working life."""
+    """All REGISTERED sessions for `name`, newest first, regardless of
+    process state — a sleeping agent still deserves to show its last
+    working life, and the caller walks the list until a transcript exists."""
     cands = []
     try:
         files = os.listdir(sessions_dir())
@@ -180,36 +181,36 @@ def _find_session_dead(name):
             continue
         cands.append(d)
     cands.sort(key=lambda dd: dd.get("startedAt") or 0, reverse=True)
-    return cands[0] if cands else None
+    return cands
 
 
 def find_transcript(name):
     """(transcript_path, session_record) — the LIVE session when one exists,
-    else the most recent dead one, else None."""
-    sess = find_session(name) or _find_session_dead(name)
-    if not sess:
-        return None
-    sid = sess["sessionId"]
-    # The registry is local trusted state, but a session id feeds a glob —
-    # refuse shapes that could ever mean anything to the filesystem, and
-    # verify containment on what the glob returned.
-    if not _SID_RE.match(sid):
-        return None
+    else the newest dead one THAT HAS a transcript on disk, else None."""
+    live = find_session(name)
+    cands = [live] if live else _find_session_dead(name)
     root = os.path.realpath(projects_dir())
-    hits = []
-    for p in glob.glob(os.path.join(projects_dir(), "*", sid + ".jsonl")):
-        try:
-            rp = os.path.realpath(p)
-            if not rp.startswith(root + os.sep):
-                continue
-            hits.append((os.path.getmtime(p), p))
-        except OSError:
-            continue   # vanished between glob and stat
-    if not hits:
-        return None
-    # A session id is unique; multiple hits would be copies — newest wins.
-    hits.sort(reverse=True)
-    return hits[0][1], sess
+    for sess in cands:
+        sid = sess["sessionId"]
+        # The registry is local trusted state, but a session id feeds a
+        # glob — refuse shapes that could ever mean anything to the
+        # filesystem, and verify containment on what the glob returned.
+        if not _SID_RE.match(sid):
+            continue
+        hits = []
+        for p in glob.glob(os.path.join(projects_dir(), "*", sid + ".jsonl")):
+            try:
+                rp = os.path.realpath(p)
+                if not rp.startswith(root + os.sep):
+                    continue
+                hits.append((os.path.getmtime(p), p))
+            except OSError:
+                continue   # vanished between glob and stat
+        if hits:
+            # A session id is unique; multiple hits are copies — newest wins.
+            hits.sort(reverse=True)
+            return hits[0][1], sess
+    return None
 
 
 def _iso_ts(rec):
@@ -392,7 +393,10 @@ def turns_for(name, after=None, before=None, n=DEFAULT_N):
         return {"ok": True, "live": False, "present": False, "turns": [],
                 "total": 0, "truncated": False}
     path, sess = found
-    live = _pid_alive(sess.get("pid"))
+    # Live means DELIVERABLE: process alive AND its socket file present —
+    # a pid with no socket queues mail like any sleeper and must say so.
+    live = (_pid_alive(sess.get("pid"))
+            and os.path.exists(sess.get("messagingSocketPath") or ""))
     ent = _cache.turns(path)
     if ent is None:
         return {"ok": True, "live": False, "present": False, "turns": [],

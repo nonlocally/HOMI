@@ -508,6 +508,42 @@ if [ "$r" = "$expect" ]; then
   ok "composition exact: twins dropped, mail interleaved by ts, queued shown"
 else bad "timeline composition (got: $r)"; fi
 
+echo "== the drop rule needs a twin: orphan correspondence stays visible"
+python3 - "$T" <<'PY'
+import json, os, sys
+t = sys.argv[1]
+proj = os.path.join(t, "cc", "projects", "-fake-proj")
+with open(os.path.join(proj, "ses-compo.jsonl"), "a") as f:
+    # a send attributed to the handle that never went through the talk page
+    # (CLI --from alice): NO journal twin -> must render, not vanish
+    f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:01:55.000Z",
+        "message": {"role": "user", "content":
+            '<cross-session-message from="uds:/x" from-name="alice">\n'
+            'cli steering order\n</cross-session-message>'}}) + "\n")
+    # a reply the daemon REFUSED: no inbox twin -> must render, not vanish
+    f.write(json.dumps({"type": "assistant", "timestamp": "2026-08-21T10:01:58.000Z",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "mcp__homi__send",
+             "input": {"to": "alice", "from": "compo",
+                       "text": "refused answer"}}]}}) + "\n")
+PY
+r="$(python3 -c "
+import json, sys; sys.path.insert(0, '$HERE/lib')
+import homi_talk
+ep = json.load(open('$T/ep.json'))
+fake_inbox = lambda name: {'messages': [
+    {'ts': ep['in_ts'], 'from_name': 'compo', 'text': 'done, check it'}]}
+d = homi_talk.timeline('alice', 'compo', inbox=fake_inbox)
+texts = ['%s|%s' % (i['role'], i['text']) for i in d['items']]
+kept_in = 'user|cli steering order' in texts
+kept_out = 'reply|refused answer' in texts
+dropped_twin = 'user|ping from phone' not in [x for x in texts if x.startswith('user|')][1:] and sum(1 for x in texts if x == 'mail-marker') == 0
+mail_out = sum(1 for i in d['items'] if i.get('via') == 'mail' and i['text'] == 'ping from phone')
+print(kept_in, kept_out, mail_out)")"
+if [ "$r" = "True True 1" ]; then
+  ok "no-twin turns kept (CLI send, refused reply); twinned ones still single"
+else bad "twin-gated drops (got: $r)"; fi
+
 echo "== timeline cursors return only the new"
 r="$(python3 -c "
 import json, sys; sys.path.insert(0, '$HERE/lib')
@@ -594,9 +630,15 @@ echo "== the talk page is ONE timeline (tabs are gone)"
 if ! printf '%s' "$page" | grep -q 'data-tab' && printf '%s' "$page" | grep -q 'api/timeline'; then
   ok "no tabs; the page polls the merged timeline"
 else bad "merged page shape"; fi
-if printf '%s' "$page" | grep -q 'msgs-only'; then
-  ok "messages-only filter present (chat as a lens, not a tab)"
-else bad "messages filter"; fi
+if printf '%s' "$page" | grep -q 'body\.msgs \.sess' && printf '%s' "$page" | grep -q '#note\[hidden\]'; then
+  ok "filter + banner have actual CSS behind them (not just class toggles)"
+else bad "filter/banner css"; fi
+if printf '%s' "$page" | grep -A3 'function reset' | grep -q 'tsCur = 0'; then
+  ok "a session restart replays the mail thread (reset clears the ts cursor)"
+else bad "reset ts cursor"; fi
+if printf '%s' "$page" | grep -q 'it.to === handle'; then
+  ok "kept replies to the viewer render as content, not a bare receipt"
+else bad "kept-reply rendering"; fi
 if printf '%s' "$page" | grep -q 'sSid' && printf '%s' "$page" | grep -q 'session restarted'; then
   ok "client detects a restarted session (sid tracked, pane reset)"
 else bad "sid tracking in page"; fi
