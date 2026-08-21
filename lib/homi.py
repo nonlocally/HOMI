@@ -2432,7 +2432,7 @@ class Homi:
             result = self._do_seat(env.get("sub", ""), env.get("args") or {})
             return {"ok": True, "ack": mid, "result": result}
         to = env.get("to") or ""
-        frm = env.get("from") or "unknown"
+        frm = self._safe_sender(env.get("from"))
         text = env.get("text") or ""
         if not to:
             return {"ok": False, "err": "bad envelope"}
@@ -2515,6 +2515,18 @@ class Homi:
         # session must not push the sender into ack-timeout retry churn.
         threading.Thread(target=self._safe_deliver, args=(to,), daemon=True).start()
         return {"ok": True, "ack": mid}
+
+    @staticmethod
+    def _safe_sender(frm):
+        """Sender names cross the link trust boundary attacker-controlled
+        and historically unvalidated (the recipient is checked; the sender
+        was not). A name that conforms to the identity grammar passes
+        verbatim; anything else — attacker-length strings, quote-breaking
+        junk, absence — normalizes to "unknown" so it can never distort
+        rendered attribution downstream."""
+        if isinstance(frm, str) and Homi._NAME_RE.match(frm):
+            return frm
+        return "unknown"
 
     def _safe_deliver(self, name):
         try:
@@ -3407,7 +3419,7 @@ def _cli_pair(args):
     here_dir = os.path.dirname(os.path.abspath(__file__))
     kernel_files = [os.path.join(here_dir, f) for f in
                     ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
-                     "homi_board.py", "homi_talk.py")]
+                     "homi_board.py", "homi_talk.py", "homi_transcript.py")]
 
     def stage_kernel():
         _pair_ssh(addr, "mkdir -p %s" % far_stage_dir)

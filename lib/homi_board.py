@@ -242,6 +242,7 @@ def serve(port, bind, no_remote, ttl=10.0):
     import http.server
     import urllib.parse
     import homi_talk
+    import homi_transcript
 
     cache = _Cache(no_remote, ttl=ttl)
     # Write-path defense, honestly named. The AUTHN boundary is tailnet
@@ -295,6 +296,14 @@ def serve(port, bind, no_remote, ttl=10.0):
                                   "%s:%d" % (dns.split(".")[0], port)})
     except Exception as e:
         sys.stderr.write("board serve: no tailscale DNS names (%s)\n" % e)
+    # A fronting proxy (e.g. a Cloudflare Tunnel with an identity wall) has
+    # its own Host name for us. HOMI_BOARD_HOSTS names it explicitly — the
+    # allowlist stays a pin, never a wildcard. The proxy MUST gate identity
+    # before the origin; this env only teaches the origin its public name.
+    for h in (os.environ.get("HOMI_BOARD_HOSTS") or "").split(","):
+        h = h.strip()
+        if h:
+            allowed_hosts.update({h, "%s:%d" % (h, port)})
     # Compared case-insensitively (Host header is lowercased on receipt).
     allowed_hosts = {h.lower() for h in allowed_hosts}
 
@@ -331,6 +340,36 @@ def serve(port, bind, no_remote, ttl=10.0):
                     return None, None
                 return (homi_talk.render_talk(handle, target, token).encode(),
                         "text/html; charset=utf-8")
+            if path.startswith("/api/session/"):
+                # Transcripts are the most sensitive read on the board —
+                # same token gate as conversations, malformed names get an
+                # explicit 400 (never a path lookup), and qualified targets
+                # are refused honestly: the transcript lives on the agent's
+                # own device, and this server only reads local files.
+                if not self._token_ok():
+                    self._json(403, {"ok": False, "err": "token"})
+                    raise _Handled
+                target = urllib.parse.unquote(path[len("/api/session/"):])
+                if "@" in target:
+                    self._json(400, {"ok": False,
+                                     "err": "session view is local-only"})
+                    raise _Handled
+                if not homi_talk.valid_target(target):
+                    self._json(400, {"ok": False, "err": "bad target"})
+                    raise _Handled
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query)
+
+                def _iq(k):
+                    v = (q.get(k) or [None])[0]
+                    try:
+                        return int(v) if v is not None else None
+                    except ValueError:
+                        return None
+                r = homi_transcript.turns_for(target, after=_iq("after"),
+                                              before=_iq("before"),
+                                              n=_iq("n") or None)
+                return json.dumps(r).encode(), "application/json"
             if path.startswith("/api/conv/"):
                 if not self._token_ok():
                     self._json(403, {"ok": False, "err": "token"})
@@ -425,7 +464,8 @@ def serve(port, bind, no_remote, ttl=10.0):
             if not homi_talk.valid_target(target) or not text:
                 self._json(400, {"ok": False, "err": "bad target or empty text"})
                 return
-            who = self.headers.get("Tailscale-User-Login")
+            who = (self.headers.get("Tailscale-User-Login")
+                   or self.headers.get("Cf-Access-Authenticated-User-Email"))
             try:
                 entry = homi_talk.send(handle, target, text)
             except homi_talk.SendRefused as e:

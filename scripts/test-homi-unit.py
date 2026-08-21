@@ -211,5 +211,19 @@ finally:
     os.environ.pop("COMM_STATE", None)
     shutil.rmtree(tmp, ignore_errors=True)
 
+# -- _safe_sender: the link boundary never lets a hostile sender name
+# through to attribution (conforming names verbatim; everything else,
+# including attacker-length strings, normalizes to "unknown").
+if (homi.Homi._safe_sender("librarian") == "librarian"
+        and homi.Homi._safe_sender("a.b-c_9") == "a.b-c_9"
+        and homi.Homi._safe_sender("e" * 200) == "unknown"
+        and homi.Homi._safe_sender('x" junk="y') == "unknown"
+        and homi.Homi._safe_sender("") == "unknown"
+        and homi.Homi._safe_sender(None) == "unknown"
+        and homi.Homi._safe_sender("UPPER") == "unknown"):
+    ok("_safe_sender: conforming verbatim, hostile/absent -> unknown")
+else:
+    bad("_safe_sender normalization")
+
 print("\npass=%d fail=%d" % (pass_[0], fail_[0]))
 sys.exit(1 if fail_[0] else 0)
