@@ -122,11 +122,55 @@ if [ "$routed" = "inbox" ] || [ "$routed" = "live" ]; then
   ok "send returns the daemon's routed verdict ($routed)"
 else bad "routed verdict (got: $r)"; fi
 
+echo "== C1: a fleet-qualified from_name never leaks into a bare local thread"
+# Plant an arrival that LOOKS like scout but is fleet-qualified (scout@peer,
+# via=peer) directly into the human's inbox — the confirmed-spoof shape.
+python3 - "$COMM_STATE/homi/mail/alice/inbox.jsonl" <<'PY'
+import json, sys, time
+with open(sys.argv[1], "a") as f:
+    f.write(json.dumps({"ts": time.time(), "msg_id": "spoof1",
+                        "from": "", "from_name": "scout@peer", "via": "peer",
+                        "text": "IMPOSTOR"}) + "\n")
+PY
+conv="$(curl -sf -m 5 -H "X-Homi-Token: $TOKEN" "http://127.0.0.1:$PORT/api/conv/scout" 2>/dev/null)"
+if printf '%s' "$conv" | grep -q "IMPOSTOR"; then
+  bad "fleet-qualified arrival leaked into the bare local thread (C1)"
+else ok "scout@peer does NOT appear in the bare scout thread (spoof closed)"; fi
+
+echo "== Sec-Fetch-Site: same-origin passes, cross-site refused"
+c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -H "Sec-Fetch-Site: same-origin" -d '{"to":"scout","text":"sfs ok"}')"
+if [ "$c" = "200" ]; then ok "Sec-Fetch-Site same-origin accepted"; else bad "SFS same-origin (got $c)"; fi
+c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -H "Sec-Fetch-Site: cross-site" -d '{"to":"scout","text":"x"}')"
+if [ "$c" = "403" ]; then ok "Sec-Fetch-Site cross-site refused"; else bad "SFS cross-site (got $c)"; fi
+
+echo "== a daemon refusal is a 400 with the honest reason, not a 500"
+r="$(curl -s -m 5 -X POST "http://127.0.0.1:$PORT/api/send" -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -w '\n%{http_code}' -d '{"to":"ghostagent","text":"x"}')"
+code="$(printf '%s' "$r" | tail -1)"
+if [ "$code" = "400" ] && printf '%s' "$r" | grep -qi "unknown identity"; then
+  ok "unknown target -> 400 + daemon reason surfaced"
+else bad "unknown target 400+reason (got: $r)"; fi
+
+echo "== negative Content-Length does not hang the server"
+( curl -s -m 4 -X POST "http://127.0.0.1:$PORT/api/send" -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -H "Content-Length: -1" -d '{}' >/dev/null 2>&1 ) &
+BADPID=$!
+sleep 0.5
+if curl -sf -m 4 "http://127.0.0.1:$PORT/state.json" >/dev/null 2>&1; then
+  ok "server still answers while a bad request is in flight"
+else bad "server wedged by negative Content-Length"; fi
+kill "$BADPID" 2>/dev/null
+
+echo "== the journal is private (0700 dir, 0600 file)"
+dm="$(stat -f '%Lp' "$T/board/talk" 2>/dev/null || stat -c '%a' "$T/board/talk" 2>/dev/null)"
+fm="$(stat -f '%Lp' "$T/board/talk/scout.jsonl" 2>/dev/null || stat -c '%a' "$T/board/talk/scout.jsonl" 2>/dev/null)"
+if [ "$dm" = "700" ] && [ "$fm" = "600" ]; then
+  ok "talk dir 0700, journal 0600"
+else bad "talk privacy (dir=$dm file=$fm)"; fi
+
 echo "== board rows link to talk"
 board="$(curl -sf -m 5 "http://127.0.0.1:$PORT/" 2>/dev/null)"
-if printf '%s' "$board" | grep -q "/talk/"; then
-  ok "board page carries /talk hrefs"
-else bad "board page carries /talk hrefs"; fi
+if printf '%s' "$board" | grep -q 'href = "/talk/" + encodeURIComponent'; then
+  ok "board page builds /talk hrefs (link construction present)"
+else bad "board page builds /talk hrefs"; fi
 
 echo "== invalid targets refused"
 c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -d '{"to":"../evil","text":"x"}')"

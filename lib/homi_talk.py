@@ -40,11 +40,31 @@ def ensure_human(handle):
 
 def valid_target(target):
     """<name> or <name>@<device> — the daemon's own grammars, so nothing
-    filename- or path-shaped sneaks in."""
-    base, _, qual = (target or "").partition("@")
+    filename- or path-shaped sneaks in. A trailing '@' (empty suffix) is
+    rejected: it would render a working page that can never send."""
+    base, sep, qual = (target or "").partition("@")
     if not homi.Homi._NAME_RE.match(base):
         return False
-    return not qual or bool(homi.Homi._DEV_RE.match(qual))
+    if not sep:
+        return True
+    return bool(homi.Homi._DEV_RE.match(qual))
+
+
+def _matches(m, base, qual):
+    """Does an inbox arrival belong to THIS conversation? The daemon stamps
+    from_name/via distinctly per plane, and getting this wrong LEAKS a granted
+    fleet peer's messages into a local thread:
+      - local agent → me:      from_name='scout',      via absent
+      - my device's agent:     from_name='scout',      via='<device>'   (mail)
+      - fleet peer's agent:    from_name='scout@peer',  via='peer'       (mail)
+    A BARE target is a LOCAL agent ONLY: exact name, no '@', not arrived over
+    any link. A fleet-qualified from_name or any via-stamped arrival never
+    matches it — that was the confirmed spoof (scout@peer landing in scout)."""
+    fn = m.get("from_name") or ""
+    via = m.get("via")
+    if not qual:
+        return fn == base and via is None
+    return fn == (base + "@" + qual) or (fn.partition("@")[0] == base and via == qual)
 
 
 def _talk_dir():
@@ -56,34 +76,45 @@ def _journal_path(target):
     return os.path.join(_talk_dir(), target.replace("@", "+") + ".jsonl")
 
 
+def ensure_talk_dir():
+    homi.ensure_dir_0700(_talk_dir())
+
+
 def journal_append(target, entry):
-    d = _talk_dir()
-    homi.ensure_dir_0700(d)
+    # One atomic O_APPEND write: a buffered text write of a >8KiB line becomes
+    # multiple write(2) calls that two request threads can interleave, and the
+    # reader silently drops the torn JSON. Open 0600 from birth (no
+    # world-readable window). The dir is ensured once at serve start.
     p = _journal_path(target)
-    with open(p, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    blob = (json.dumps(entry) + "\n").encode("utf-8")
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+
+
+class SendRefused(ValueError):
+    """The daemon refused the send (unknown target, ungranted, …) — a CLIENT
+    error carrying the daemon's honest reason, not a server fault."""
 
 
 def send(handle, target, text):
     """One daemon send + a journal line. Returns the daemon's honest routed
-    verdict (live / inbox / link:<dev>) or raises ValueError on refusal."""
+    verdict (live / inbox / link:<dev>) or raises SendRefused on refusal."""
     r = homi._call({"op": "send", "to": target, "text": text, "from": handle})
     if not r.get("ok"):
-        raise ValueError(r.get("err") or "send failed")
+        raise SendRefused(r.get("err") or "send failed")
     entry = {"ts": time.time(), "dir": "out", "text": text,
              "routed": r.get("routed")}
     journal_append(target, entry)
     return entry
 
 
-def conversation(handle, target, since=0.0):
+def conversation(handle, target, since=0.0, inbox=None):
     """Merged, time-ordered view: journal (out) + the human's inbox filtered
-    by correspondent (in). Bare targets match any arrival of that base name;
-    qualified targets additionally require the arrival device."""
+    by correspondent (in). `inbox` is an optional cached reader (name -> the
+    inbox op result) so many pollers share one mailbox read."""
     base, _, qual = target.partition("@")
     entries = []
     try:
@@ -101,14 +132,12 @@ def conversation(handle, target, since=0.0):
     except OSError:
         pass
     try:
-        r = homi._call({"op": "inbox", "name": handle, "tail": 500})
+        r = inbox(handle) if inbox else homi._call(
+            {"op": "inbox", "name": handle, "tail": 500})
     except (Exception, SystemExit):
         r = {}
     for m in (r.get("messages") or []):
-        fn = (m.get("from_name") or "").partition("@")[0]
-        if fn != base:
-            continue
-        if qual and m.get("via") != qual:
+        if not _matches(m, base, qual):
             continue
         ts = m.get("ts", 0)
         if ts > since:
@@ -133,6 +162,8 @@ TALK_TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#090909">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <title>talk</title>
 <style>
   :root {
@@ -153,6 +184,7 @@ TALK_TEMPLATE = r"""<!doctype html>
     font-size: 15px; line-height: 1.45; letter-spacing: -0.006em;
     -webkit-font-smoothing: antialiased;
     display: flex; flex-direction: column;
+    height: 100vh;   /* fallback for browsers without dvh */
     height: 100dvh;
   }
   :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
@@ -243,8 +275,9 @@ TALK_TEMPLATE = r"""<!doctype html>
   var inp = document.getElementById("inp");
   var snd = document.getElementById("snd");
   var stat = document.getElementById("stat");
-  var lastTs = 0;
-  var seen = {};   // ts+dir+text de-dup across polls
+  var lastTs = 0;       // the since-cursor — advanced ONLY by server polls
+  var seen = {};        // ts+dir+text de-dup across polls
+  var inFlight = false; // one send at a time (no Enter-key double-send)
 
   function el(t, c, x) {
     var n = document.createElement(t);
@@ -274,6 +307,9 @@ TALK_TEMPLATE = r"""<!doctype html>
     var key = e.ts + "|" + e.dir + "|" + e.text;
     if (seen[key]) return;
     seen[key] = 1;
+    // Autoscroll only if you're already near the bottom — never yank you away
+    // from history you're reading.
+    var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     var m = el("div", "msg " + (e.dir === "out" ? "out" : "in"));
     var meta = [];
     meta.push(e.dir === "out" ? "you" : (e.from || target));
@@ -284,18 +320,25 @@ TALK_TEMPLATE = r"""<!doctype html>
     renderBody(b, e.text);
     m.appendChild(b);
     log.appendChild(m);
-    if (e.ts > lastTs) lastTs = e.ts;
-    log.scrollTop = log.scrollHeight;
+    if (atBottom) log.scrollTop = log.scrollHeight;
   }
 
   function poll() {
     if (document.hidden) return;
     fetch("/api/conv/" + encodeURIComponent(target) + "?since=" + lastTs,
           { headers: { "X-Homi-Token": token }, cache: "no-store" })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (r) {
+        if (r.status === 403) { stat.textContent = "session expired — reload"; return null; }
+        if (!r.ok) { stat.textContent = "server error " + r.status; return null; }
+        return r.json();
+      })
       .then(function (d) {
         if (!d) return;
-        (d.entries || []).forEach(addMsg);
+        var es = d.entries || [];
+        es.forEach(addMsg);
+        // Advance the cursor ONLY from server data — never from the optimistic
+        // echo, or a reply that arrived just before a send is skipped forever.
+        es.forEach(function (e) { if (e.ts > lastTs) lastTs = e.ts; });
         stat.textContent = "";
       })
       .catch(function () { stat.textContent = "disconnected"; });
@@ -303,21 +346,25 @@ TALK_TEMPLATE = r"""<!doctype html>
 
   document.getElementById("composer").addEventListener("submit", function (ev) {
     ev.preventDefault();
+    if (inFlight) return;   // guard the keydown path too, not just the button
     var text = inp.value.trim();
     if (!text) return;
-    snd.disabled = true;
+    inFlight = true; snd.disabled = true; stat.textContent = "";
     fetch("/api/send", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Homi": "1",
                  "X-Homi-Token": token },
       body: JSON.stringify({ to: target, text: text }),
-    }).then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) {
-        if (d && d.entry) { addMsg(d.entry); inp.value = ""; }
-        else stat.textContent = "send failed";
+    }).then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, d: d }; },
+                             function () { return { ok: r.ok, d: null }; });
+      })
+      .then(function (res) {
+        if (res.ok && res.d && res.d.entry) { addMsg(res.d.entry); inp.value = ""; }
+        else stat.textContent = (res.d && res.d.err) ? res.d.err : "send failed";
       })
       .catch(function () { stat.textContent = "send failed"; })
-      .then(function () { snd.disabled = false; inp.focus(); });
+      .then(function () { inFlight = false; snd.disabled = false; inp.focus(); });
   });
   inp.addEventListener("keydown", function (ev) {
     if (ev.key === "Enter" && !ev.shiftKey) {
