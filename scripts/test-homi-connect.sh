@@ -164,6 +164,16 @@ if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.
   ok "cross-user ask/reply round-trips on handle-derived petnames"
 else bad "cross-user ask/reply (got: $(cat "$T/ask.json" 2>/dev/null))"; fi
 
+echo "== the stored reply is fleet-qualified (no bare-thread spoof on the r plane)"
+check_rrec(){ python3 -c '
+import json,sys
+lines=open(sys.argv[1]).read().strip().splitlines()
+d=json.loads(lines[-1])
+assert d.get("from_name")=="librarian@bob", d
+assert d.get("via")=="bob", d
+' "$T/a/homi/mail/orchestrator/inbox.jsonl"; }
+wait_for 5 "link reply stored as librarian@bob via bob (both planes carry provenance)" check_rrec
+
 echo "== the return-path auto-grant is scoped (TTL'd, separate from human grants)"
 g="$(cat "$T/a/homi/grants/bob.json" 2>/dev/null)"
 if python3 -c '

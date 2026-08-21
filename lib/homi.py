@@ -1349,7 +1349,6 @@ class Homi:
             if dup:
                 return {"ok": True, "routed": "dup"}
             self._resolve_ask_natural(name, text, from_name)
-            self._resolve_ask_natural(name, text, from_name)
             try:
                 self._deliver_pending(name)
             except Exception as e:
@@ -2464,21 +2463,26 @@ class Homi:
         with self.mu:
             local_to = (to in self.identities
                         and self.identities[to].get("kind") == "local")
+        # Both planes carry provenance: every link arrival is attributed
+        # through the link's lens (fleet-qualified name, via=device), so a
+        # peer's REPLY can no more render as a bare local correspondent than
+        # its mail can.
+        proxy_name = ("%s@%s" % (frm, fleet)) if fleet else frm
         if kind == "r":
             # A reply routed home from a remote target: resolve the pending ask
             # (by corr) and store durably in the asker's inbox.
             corr = env.get("corr") or ""
-            self._fill_ask(corr, text, frm)
+            self._fill_ask(corr, text, proxy_name)
             if not local_to:
                 if fleet:
                     return {"ok": False, "err": "unknown or ungranted"}
                 self._do_claim(to)  # device link: auto-claim as before
             self._store(to, {"ts": time.time(), "msg_id": mid, "from": "",
-                             "from_name": frm, "text": text, "corr": corr})
+                             "from_name": proxy_name, "via": device,
+                             "text": text, "corr": corr})
             self._remember_dev_msg(device, mid)
             threading.Thread(target=self._safe_deliver, args=(to,), daemon=True).start()
             return {"ok": True, "ack": mid}
-        proxy_name = ("%s@%s" % (frm, fleet)) if fleet else frm
         if fleet:
             # Boundary rewrite (the token is a return address): an ask token
             # embeds the asker's DEVICE name, which means nothing here — the
