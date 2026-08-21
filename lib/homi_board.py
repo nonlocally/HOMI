@@ -340,6 +340,33 @@ def serve(port, bind, no_remote, ttl=10.0):
                     return None, None
                 return (homi_talk.render_talk(handle, target, token).encode(),
                         "text/html; charset=utf-8")
+            if path.startswith("/api/timeline/"):
+                # The merged view: session spine + authoritative mail.
+                # Same token gate as every other read of fabric content.
+                if not self._token_ok():
+                    self._json(403, {"ok": False, "err": "token"})
+                    raise _Handled
+                target = urllib.parse.unquote(path[len("/api/timeline/"):])
+                if not handle or not homi_talk.valid_target(target):
+                    self._json(400, {"ok": False, "err": "bad target"})
+                    raise _Handled
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query)
+
+                def _iq(k, cast=int):
+                    v = (q.get(k) or [None])[0]
+                    try:
+                        return cast(v) if v is not None else None
+                    except ValueError:
+                        return None
+                tsa = _iq("ts_after", float) or 0.0
+                if not math.isfinite(tsa):   # nan/inf would poison the cursor
+                    tsa = 0.0
+                r = homi_talk.timeline(
+                    handle, target, t_after=_iq("t_after"), ts_after=tsa,
+                    t_before=_iq("t_before"), n=_iq("n") or 150,
+                    inbox=_inbox_cached)
+                return json.dumps(r).encode(), "application/json"
             if path.startswith("/api/session/"):
                 # Transcripts are the most sensitive read on the board —
                 # same token gate as conversations, malformed names get an

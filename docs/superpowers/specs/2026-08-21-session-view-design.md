@@ -1,6 +1,14 @@
 # Session view — the talk page's read-only observatory
 
-**Date:** 2026-08-21 · **Status:** shipped (worktree-sessionview)
+**Date:** 2026-08-21 · **Status:** shipped (worktree-sessionview), then
+**superseded the same day** by the merged timeline (worktree-timeline):
+the chat/session TAB split mirrored the system's planes, not the user's
+needs — the operator's immediate confusion ("shouldn't these two just be
+merged?") was the evidence. The v2 rule: one timeline; mail is
+authoritative for correspondence and the transcript's copies of it are
+dropped unconditionally; the session is the spine for everything else.
+Everything below about resolution, parsing, caching, and the trust
+envelope carries forward unchanged.
 
 ## What this is
 

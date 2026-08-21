@@ -129,8 +129,8 @@ def find_session(name):
         if not os.path.exists(sock):
             continue
         cands.append(d)
-    cands.sort(key=lambda d: (d.get("kind") == "interactive",
-                              d.get("startedAt") or 0), reverse=True)
+    cands.sort(key=lambda dd: (dd.get("kind") == "interactive",
+                               dd.get("startedAt") or 0), reverse=True)
     if len(cands) > 1:
         # Mirror the daemon's chooser EXACTLY (Homi._choose_session): on a
         # collision the probe-live socket wins, so the tab shows the same
@@ -150,32 +150,67 @@ def find_session(name):
 _SID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
-def find_transcript(name):
-    """(transcript_path, session_record) for a live session, else None."""
-    sess = find_session(name)
-    if not sess:
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _find_session_dead(name):
+    """All REGISTERED sessions for `name`, newest first, regardless of
+    process state — a sleeping agent still deserves to show its last
+    working life, and the caller walks the list until a transcript exists."""
+    cands = []
+    try:
+        files = os.listdir(sessions_dir())
+    except OSError:
         return None
-    sid = sess["sessionId"]
-    # The registry is local trusted state, but a session id feeds a glob —
-    # refuse shapes that could ever mean anything to the filesystem, and
-    # verify containment on what the glob returned.
-    if not _SID_RE.match(sid):
-        return None
-    root = os.path.realpath(projects_dir())
-    hits = []
-    for p in glob.glob(os.path.join(projects_dir(), "*", sid + ".jsonl")):
+    for fn in files:
+        if not fn.endswith(".json"):
+            continue
         try:
-            rp = os.path.realpath(p)
-            if not rp.startswith(root + os.sep):
-                continue
-            hits.append((os.path.getmtime(p), p))
-        except OSError:
-            continue   # vanished between glob and stat
-    if not hits:
-        return None
-    # A session id is unique; multiple hits would be copies — newest wins.
-    hits.sort(reverse=True)
-    return hits[0][1], sess
+            with open(os.path.join(sessions_dir(), fn)) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict) or d.get("version") == "communicate-homi":
+            continue
+        if d.get("name") != name or not d.get("sessionId"):
+            continue
+        cands.append(d)
+    cands.sort(key=lambda dd: dd.get("startedAt") or 0, reverse=True)
+    return cands
+
+
+def find_transcript(name):
+    """(transcript_path, session_record) — the LIVE session when one exists,
+    else the newest dead one THAT HAS a transcript on disk, else None."""
+    live = find_session(name)
+    cands = [live] if live else _find_session_dead(name)
+    root = os.path.realpath(projects_dir())
+    for sess in cands:
+        sid = sess["sessionId"]
+        # The registry is local trusted state, but a session id feeds a
+        # glob — refuse shapes that could ever mean anything to the
+        # filesystem, and verify containment on what the glob returned.
+        if not _SID_RE.match(sid):
+            continue
+        hits = []
+        for p in glob.glob(os.path.join(projects_dir(), "*", sid + ".jsonl")):
+            try:
+                rp = os.path.realpath(p)
+                if not rp.startswith(root + os.sep):
+                    continue
+                hits.append((os.path.getmtime(p), p))
+            except OSError:
+                continue   # vanished between glob and stat
+        if hits:
+            # A session id is unique; multiple hits are copies — newest wins.
+            hits.sort(reverse=True)
+            return hits[0][1], sess
+    return None
 
 
 def _iso_ts(rec):
@@ -257,7 +292,19 @@ def _parse_record(rec):
                 out.append({"role": "assistant", "ts": ts,
                             "text": "\n".join(buf).strip()})
                 buf = []
-            out.append({"role": "tool", "ts": ts, "text": _tool_line(b)})
+            name = b.get("name") or ""
+            inp = b.get("input")
+            # A fabric send carries prose and an address: surface both, so
+            # the timeline can render replies-to-the-viewer as first-class
+            # bubbles (and drop them when mail is authoritative).
+            if ((name == "send" or name.endswith("__send"))
+                    and isinstance(inp, dict)
+                    and isinstance(inp.get("to"), str)
+                    and isinstance(inp.get("text"), str)):
+                out.append({"role": "reply", "ts": ts,
+                            "to": inp["to"], "text": inp["text"]})
+            else:
+                out.append({"role": "tool", "ts": ts, "text": _tool_line(b)})
     if buf:
         out.append({"role": "assistant", "ts": ts, "text": "\n".join(buf).strip()})
     return out
@@ -343,13 +390,17 @@ def turns_for(name, after=None, before=None, n=DEFAULT_N):
     n = max(1, min(int(n or DEFAULT_N), 500))
     found = find_transcript(name)
     if not found:
-        return {"ok": True, "live": False, "turns": [], "total": 0,
-                "truncated": False}
+        return {"ok": True, "live": False, "present": False, "turns": [],
+                "total": 0, "truncated": False}
     path, sess = found
+    # Live means DELIVERABLE: process alive AND its socket file present —
+    # a pid with no socket queues mail like any sleeper and must say so.
+    live = (_pid_alive(sess.get("pid"))
+            and os.path.exists(sess.get("messagingSocketPath") or ""))
     ent = _cache.turns(path)
     if ent is None:
-        return {"ok": True, "live": False, "turns": [], "total": 0,
-                "truncated": False}
+        return {"ok": True, "live": False, "present": False, "turns": [],
+                "total": 0, "truncated": False}
     base, turns = ent["base"], ent["turns"]
     total = base + len(turns)
     if after is not None:
@@ -370,6 +421,9 @@ def turns_for(name, after=None, before=None, n=DEFAULT_N):
              "text": turns[i]["text"]}
         if turns[i].get("who"):
             t["who"] = turns[i]["who"]
+        if turns[i].get("to"):
+            t["to"] = turns[i]["to"]
         out.append(t)
-    return {"ok": True, "live": True, "turns": out, "total": total,
-            "truncated": base > 0, "sid": sess.get("sessionId") or ""}
+    return {"ok": True, "live": live, "present": True, "turns": out,
+            "total": total, "truncated": base > 0,
+            "sid": sess.get("sessionId") or ""}
