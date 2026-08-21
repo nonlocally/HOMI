@@ -102,7 +102,8 @@ r="$(python3 -c "
 import sys; sys.path.insert(0, '$HERE/lib')
 import homi_transcript as ht
 print(ht.find_transcript('ghost'))")"
-if [ "$r" = "None" ]; then ok "dead pid never resolves"; else bad "dead pid (got: $r)"; fi
+if [ "$r" = "None" ]; then ok "dead pid with no transcript on disk resolves to None"
+else bad "dead pid, no transcript (got: $r)"; fi
 r="$(python3 -c "
 import sys; sys.path.insert(0, '$HERE/lib')
 import homi_transcript as ht
@@ -408,6 +409,127 @@ print(missing or 'complete')")"
 if [ "$r" = "complete" ]; then ok "kernel_files + vendor.mjs + cli.ts all carry every board module"
 else bad "distribution lists (missing: $r)"; fi
 
+echo "== reply turns: send-tool calls carry their prose and address"
+r="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+t = ht._parse_record({'type': 'assistant', 'timestamp': '2026-08-21T11:00:00.000Z',
+    'message': {'role': 'assistant', 'content': [
+        {'type': 'tool_use', 'name': 'mcp__homi__send',
+         'input': {'to': 'alice', 'from': 'scout', 'text': 'the answer'}}]}})
+u = ht._parse_record({'type': 'assistant',
+    'message': {'role': 'assistant', 'content': [
+        {'type': 'tool_use', 'name': 'mcp__homi__send', 'input': [1]}]}})
+print(t[0]['role'], t[0].get('to'), t[0]['text'], '/', u[0]['role'])")"
+if [ "$r" = "reply alice the answer / tool" ]; then
+  ok "send tool_use -> reply turn (to+text); malformed input stays a receipt"
+else bad "reply turn parsing (got: $r)"; fi
+
+echo "== a sleeping agent still shows its last session"
+python3 - "$T" <<'PY'
+import json, os, sys
+t = sys.argv[1]
+with open(os.path.join(t, "cc", "sessions", "130.json"), "w") as f:
+    json.dump({"name": "sleeper", "pid": 99999998, "sessionId": "ses-sleeper",
+               "messagingSocketPath": t + "/dummy.sock", "startedAt": 5,
+               "kind": "interactive"}, f)
+proj = os.path.join(t, "cc", "projects", "-fake-proj")
+with open(os.path.join(proj, "ses-sleeper.jsonl"), "w") as f:
+    f.write(json.dumps({"type": "user", "message":
+        {"role": "user", "content": "before the nap"}}) + "\n")
+PY
+r="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE/lib')
+import homi_transcript as ht
+d = ht.turns_for('sleeper')
+print(d.get('live'), d.get('present'), len(d.get('turns') or []))")"
+if [ "$r" = "False True 1" ]; then
+  ok "dead session: live:false present:true, last transcript served"
+else bad "sleeper fallback (got: $r)"; fi
+
+echo "== the merged timeline: mail is authoritative for correspondence"
+python3 - "$T" $$ <<'PY'
+import json, os, sys
+t, pid = sys.argv[1], int(sys.argv[2])
+with open(os.path.join(t, "cc", "sessions", "131.json"), "w") as f:
+    json.dump({"name": "compo", "pid": pid, "sessionId": "ses-compo",
+               "messagingSocketPath": t + "/dummy.sock", "startedAt": 9,
+               "kind": "interactive"}, f)
+proj = os.path.join(t, "cc", "projects", "-fake-proj")
+def rec(ts, **kw):
+    kw["timestamp"] = "2026-08-21T10:%02d:%02d.000Z" % (ts // 60, ts % 60)
+    return json.dumps(kw)
+with open(os.path.join(proj, "ses-compo.jsonl"), "w") as f:
+    f.write(rec(100, type="user", message={"role": "user", "content":
+        '<cross-session-message from="uds:/x" from-name="alice">\n'
+        'ping from phone\n</cross-session-message>'}) + "\n")
+    f.write(rec(105, type="assistant", message={"role": "assistant", "content": [
+        {"type": "text", "text": "working on it"}]}) + "\n")
+    f.write(rec(110, type="assistant", message={"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Bash",
+         "input": {"command": "x", "description": "do thing"}}]}) + "\n")
+    f.write(rec(115, type="assistant", message={"role": "assistant", "content": [
+        {"type": "tool_use", "name": "mcp__homi__send",
+         "input": {"to": "alice", "from": "compo", "text": "done, check it"}}]}) + "\n")
+    f.write(rec(120, type="user", message={"role": "user",
+                                           "content": "terminal instruction"}) + "\n")
+# the journal: one delivered-live out (transcript twin above), one queued
+tk = os.path.join(t, "board", "talk")
+os.makedirs(tk, exist_ok=True)
+import calendar, datetime
+def ep(ts):
+    return calendar.timegm(datetime.datetime(2026, 8, 21, 10, ts // 60, ts % 60).timetuple())
+with open(os.path.join(tk, "compo.jsonl"), "w") as f:
+    f.write(json.dumps({"ts": ep(100), "dir": "out",
+                        "text": "ping from phone", "routed": "live"}) + "\n")
+    f.write(json.dumps({"ts": ep(130), "dir": "out",
+                        "text": "are you there", "routed": "inbox"}) + "\n")
+with open(os.path.join(t, "ep.json"), "w") as f:
+    json.dump({"in_ts": ep(115) + 0.5}, f)
+PY
+r="$(python3 -c "
+import json, sys; sys.path.insert(0, '$HERE/lib')
+import homi_talk, homi_transcript
+ep = json.load(open('$T/ep.json'))
+fake_inbox = lambda name: {'messages': [
+    {'ts': ep['in_ts'], 'from_name': 'compo', 'text': 'done, check it'}]}
+d = homi_talk.timeline('alice', 'compo', inbox=fake_inbox)
+for it in d['items']:
+    print('%s|%s|%s' % (it.get('via'), it['role'], it['text'].replace(chr(10),' ')))
+print('live', d.get('live'), 'present', d.get('present'))")"
+expect="mail|user|ping from phone
+session|assistant|working on it
+session|tool|\$ do thing
+mail|in|done, check it
+session|user|terminal instruction
+mail|user|are you there
+live True present True"
+if [ "$r" = "$expect" ]; then
+  ok "composition exact: twins dropped, mail interleaved by ts, queued shown"
+else bad "timeline composition (got: $r)"; fi
+
+echo "== timeline cursors return only the new"
+r="$(python3 -c "
+import json, sys; sys.path.insert(0, '$HERE/lib')
+import homi_talk, homi_transcript
+ep = json.load(open('$T/ep.json'))
+msgs = [{'ts': ep['in_ts'], 'from_name': 'compo', 'text': 'done, check it'}]
+fake_inbox = lambda name: {'messages': msgs}
+a = homi_talk.timeline('alice', 'compo', inbox=fake_inbox)
+path, _ = homi_transcript.find_transcript('compo')
+with open(path, 'a') as f:
+    f.write(json.dumps({'type': 'assistant',
+        'timestamp': '2026-08-21T10:02:20.000Z',
+        'message': {'role': 'assistant', 'content': [
+            {'type': 'text', 'text': 'later prose'}]}}) + chr(10))
+msgs.append({'ts': ep['in_ts'] + 100, 'from_name': 'compo', 'text': 'late mail'})
+b = homi_talk.timeline('alice', 'compo', inbox=fake_inbox,
+                       t_after=a['t_cursor'], ts_after=a['ts_cursor'])
+print(len(b['items']), '|'.join(i['text'] for i in b['items']))")"
+if [ "$r" = "2 later prose|late mail" ]; then
+  ok "composite cursor (turn index + mail ts): exactly the new items"
+else bad "timeline cursors (got: $r)"; fi
+
 echo "== server: token-gated session API on the talk page"
 "$COMM" homi start >/dev/null 2>&1
 "$COMM" homi init --handle alice >/dev/null 2>&1
@@ -442,6 +564,21 @@ c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "X-Homi-Token: $TOKEN" "http
 if [ "$c" = "400" ]; then ok "invalid name refused (no traversal)"
 else bad "invalid name (got $c)"; fi
 
+echo "== the timeline API"
+c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/timeline/scout")"
+if [ "$c" = "403" ]; then ok "timeline without token refused (403)"
+else bad "timeline no-token (got $c)"; fi
+r="$(curl -s -m 5 -H "X-Homi-Token: $TOKEN" "http://127.0.0.1:$PORT/api/timeline/scout")"
+n="$(printf '%s' "$r" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("ok"), d.get("live"), d.get("present"), len(d.get("items") or []))' 2>/dev/null)"
+if [ "$n" = "True True True 10" ]; then
+  ok "timeline serves the composed items for a live agent"
+else bad "timeline API (got: $n)"; fi
+r="$(curl -s -m 5 -H "X-Homi-Token: $TOKEN" "http://127.0.0.1:$PORT/api/timeline/scout@far")"
+n="$(printf '%s' "$r" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("ok"), d.get("present"), len(d.get("items") or []))' 2>/dev/null)"
+if [ "$n" = "True False 0" ]; then
+  ok "qualified target: timeline degrades honestly to mail-only"
+else bad "qualified timeline (got: $n)"; fi
+
 echo "== a fronting domain can be allowlisted; strangers still cannot"
 c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: agents.example.com" "http://127.0.0.1:$PORT/state.json")"
 if [ "$c" = "200" ]; then ok "HOMI_BOARD_HOSTS host accepted"
@@ -453,13 +590,13 @@ c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: evil.example.com" "ht
 if [ "$c" = "403" ]; then ok "unlisted host still refused"
 else bad "unlisted host (got $c)"; fi
 
-echo "== the talk page grows tabs"
-if printf '%s' "$page" | grep -q 'data-tab="session"' && printf '%s' "$page" | grep -q 'api/session'; then
-  ok "talk page carries the session tab + its poll wiring"
-else bad "talk page tabs"; fi
-if printf '%s' "$page" | grep -q '\[hidden\]' && printf '%s' "$page" | grep -A1 '\[hidden\]' | grep -q 'display: *none'; then
-  ok "hidden panes actually hide (author [hidden] guard beats the flex rule)"
-else bad "hidden guard css"; fi
+echo "== the talk page is ONE timeline (tabs are gone)"
+if ! printf '%s' "$page" | grep -q 'data-tab' && printf '%s' "$page" | grep -q 'api/timeline'; then
+  ok "no tabs; the page polls the merged timeline"
+else bad "merged page shape"; fi
+if printf '%s' "$page" | grep -q 'msgs-only'; then
+  ok "messages-only filter present (chat as a lens, not a tab)"
+else bad "messages filter"; fi
 if printf '%s' "$page" | grep -q 'sSid' && printf '%s' "$page" | grep -q 'session restarted'; then
   ok "client detects a restarted session (sid tracked, pane reset)"
 else bad "sid tracking in page"; fi

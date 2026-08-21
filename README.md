@@ -301,18 +301,24 @@ nothing said who owns an agent. v3 completes `fleet` into a claimed identity.
   `tailscale serve` command that gives a real HTTPS origin (iOS secure
   context, installable PWA).
 
-  The talk page's second tab is the **session view** — a read-only
-  rendering of the agent's live Claude session, straight from its
-  transcript on disk (files-as-API, no daemon involvement): your words and
-  the agent's prose as chat, tool calls as one-line receipts, compactions
-  as dividers; thinking blocks and machine plumbing are filtered out. The
-  name resolves to a live session exactly the way delivery does (registry
-  scan, pid alive, newest wins), then to the transcript by session-id —
-  never by munging cwd, which drifts. Served token-gated at
-  `/api/session/<name>`, last 150 turns with "earlier" paging, at most
-  1000 turns held (a page below the cap says `truncated`, never
-  pretends). Local sessions only — a `name@device` target is refused
-  honestly. **Deployment caveat, stated plainly:** transcripts are the
+  The talk page is **one merged timeline** (`/api/timeline/<target>`):
+  the agent's session is the spine — its prose, tool calls as one-line
+  receipts, compactions as dividers, straight from the transcript on disk
+  (files-as-API; resolution mirrors delivery: registry scan, probe-parity
+  on collision, transcript by session-id) — and the MAIL thread is
+  authoritative for your correspondence, interleaved by timestamp. The
+  transcript's own copies of that correspondence (your delivered turns,
+  the agent's send-replies to you) are dropped unconditionally, which
+  kills every duplication case including queued-then-delivered-on-wake.
+  Your messages show their honest routing (`delivered live` /
+  `queued — delivers on wake`); a sleeping agent shows its LAST session
+  under an "asleep" banner; a remote (`name@device`) or never-run agent
+  degrades to messages-only. The ✉ toggle filters to correspondence.
+  Thinking blocks and machine plumbing never render; foreign senders
+  render under their own names, never as "you". At most 1000 transcript
+  turns held (below the cap says `truncated`, never pretends);
+  `/api/session/<name>` and `/api/conv/<target>` remain as the raw
+  planes. **Deployment caveat, stated plainly:** transcripts are the
   most sensitive read on the board; the board assumes a single-operator
   tailnet. Before this device is ever shared into someone else's tailnet,
   move the board behind `tailscale serve` with identity pinning or ACL

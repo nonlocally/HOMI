@@ -147,6 +147,63 @@ def conversation(handle, target, since=0.0, inbox=None):
     return entries
 
 
+def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
+             n=150, inbox=None):
+    """One merged view of an agent: its session is the spine; the MAIL
+    thread is authoritative for correspondence with the viewer. The
+    transcript's own copies of that correspondence — user turns attributed
+    to the handle, send-replies addressed to it — are dropped
+    UNCONDITIONALLY. That single rule kills every duplication case,
+    including a queued message delivered later on wake (its transcript twin
+    simply never renders). Mark turns carry no timestamp; they inherit the
+    previous turn's so sorting never teleports them.
+
+    Cursors are composite: t_after (transcript turn index) + ts_after (mail
+    ts). t_before pages the transcript back and skips mail entirely (mail is
+    small and fully loaded on the first fetch)."""
+    import homi_transcript
+    base, _, qual = target.partition("@")
+    items, live, present, sid = [], False, False, ""
+    t_cursor = -1 if t_after is None else int(t_after)
+    total = 0
+    truncated = False
+    if not qual:
+        d = homi_transcript.turns_for(base, after=t_after, before=t_before,
+                                      n=n)
+        live, present = d.get("live", False), d.get("present", False)
+        sid = d.get("sid") or ""
+        total = d.get("total") or 0
+        truncated = bool(d.get("truncated"))
+        last_ts = 0.0
+        for t in d.get("turns") or []:
+            if t.get("ts"):
+                last_ts = t["ts"]
+            if t["i"] > t_cursor:
+                t_cursor = t["i"]
+            if t["role"] == "user" and t.get("who") == handle:
+                continue   # the mail thread carries this
+            if t["role"] == "reply" and t.get("to") == handle:
+                continue   # the mail thread carries this
+            it = dict(t)
+            it["via"] = "session"
+            if not it.get("ts"):
+                it["ts"] = last_ts
+            items.append(it)
+    ts_cursor = ts_after
+    if t_before is None:
+        for e in conversation(handle, target, since=ts_after, inbox=inbox):
+            items.append({"via": "mail",
+                          "role": "user" if e.get("dir") == "out" else "in",
+                          "ts": e.get("ts") or 0, "text": e.get("text", ""),
+                          "routed": e.get("routed"), "who": e.get("from")})
+            if (e.get("ts") or 0) > ts_cursor:
+                ts_cursor = e["ts"]
+    items.sort(key=lambda i: i.get("ts") or 0)
+    return {"ok": True, "live": live, "present": present, "sid": sid,
+            "items": items, "t_cursor": t_cursor, "ts_cursor": ts_cursor,
+            "total": total, "truncated": truncated}
+
+
 def render_talk(handle, target, token):
     """The chat page: fixed template, snapshot-free (it polls /api/conv),
     the mutation token injected exactly once."""
@@ -271,14 +328,11 @@ TALK_TEMPLATE = r"""<!doctype html>
 <header>
   <a href="/" id="back">&#9666; board</a>
   <span class="who" id="who"></span>
+  <button id="filt" class="msgs-only" type="button" title="messages only">&#9993;</button>
   <span class="tag" id="stat"></span>
 </header>
-<nav id="tabs">
-  <button class="tab on" data-tab="chat" type="button">chat</button>
-  <button class="tab" data-tab="session" type="button">session</button>
-</nav>
+<div id="note" hidden></div>
 <div id="log" class="composer-log"></div>
-<div id="sess" class="composer-log" hidden></div>
 <form id="composer" class="composer">
   <textarea id="inp" rows="1" placeholder="message" autocomplete="off"></textarea>
   <button id="snd" type="submit">send</button>
@@ -297,9 +351,15 @@ TALK_TEMPLATE = r"""<!doctype html>
   var inp = document.getElementById("inp");
   var snd = document.getElementById("snd");
   var stat = document.getElementById("stat");
-  var lastTs = 0;       // the since-cursor — advanced ONLY by server polls
-  var seen = {};        // ts+dir+text de-dup across polls
-  var inFlight = false; // one send at a time (no Enter-key double-send)
+  var note = document.getElementById("note");
+  var filt = document.getElementById("filt");
+  // Composite cursor: tCur is the transcript turn index, tsCur the mail
+  // timestamp. Both advance ONLY from server responses.
+  var tCur = null, tsCur = 0;
+  var sSid = null;            // transcript identity — a change resets the pane
+  var seen = {};
+  var firstI = null, older = null, olderBusy = false;
+  var inFlight = false;
 
   function el(t, c, x) {
     var n = document.createElement(t);
@@ -316,7 +376,7 @@ TALK_TEMPLATE = r"""<!doctype html>
     return Math.floor(d / 86400) + "d ago";
   }
   // Fenced code renders mono; everything else is textContent — nothing from
-  // the fabric can become markup.
+  // the fabric or a transcript can become markup.
   function renderBody(parent, text) {
     var parts = String(text).split("```");
     for (var i = 0; i < parts.length; i++) {
@@ -325,46 +385,137 @@ TALK_TEMPLATE = r"""<!doctype html>
       else parent.appendChild(document.createTextNode(parts[i]));
     }
   }
-  function addMsg(e) {
-    var key = e.ts + "|" + e.dir + "|" + e.text;
-    if (seen[key]) return;
-    seen[key] = 1;
-    // Autoscroll only if you're already near the bottom — never yank you away
-    // from history you're reading.
-    var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-    var m = el("div", "msg " + (e.dir === "out" ? "out" : "in"));
-    var meta = [];
-    meta.push(e.dir === "out" ? "you" : (e.from || target));
-    meta.push(ago(e.ts));
-    if (e.dir === "out" && e.routed) meta.push(e.routed === "live" ? "delivered live" : e.routed);
+  function key(it) {
+    return it.via === "mail" ? "m|" + it.ts + "|" + it.role + "|" + it.text
+                             : "s|" + it.i;
+  }
+  function bubble(cls, meta, text) {
+    var m = el("div", "msg " + cls);
     m.appendChild(el("div", "meta", meta.join(" · ")));
     var b = el("div", "body");
-    renderBody(b, e.text);
+    renderBody(b, text);
     m.appendChild(b);
-    log.appendChild(m);
-    if (atBottom) log.scrollTop = log.scrollHeight;
+    return m;
   }
-
-  function poll() {
-    if (document.hidden) return;
-    fetch("/api/conv/" + encodeURIComponent(target) + "?since=" + lastTs,
+  function build(it) {
+    if (it.via === "mail") {
+      if (it.role === "user") {
+        var meta = ["you", ago(it.ts)];
+        if (it.routed === "live") meta.push("delivered live");
+        else if (it.routed === "inbox") meta.push("queued — delivers on wake");
+        else if (it.routed) meta.push(it.routed);
+        return bubble("out", meta, it.text);
+      }
+      return bubble("in", ["✉ " + (it.who || target), ago(it.ts)], it.text);
+    }
+    // session items — the agent's working life
+    var n;
+    if (it.role === "tool") n = el("div", "trn-tool sess", it.text);
+    else if (it.role === "mark") n = el("div", "trn-mark sess", it.text);
+    else if (it.role === "reply")
+      n = el("div", "trn-tool sess", "⟶ send " + (it.to || "?"));
+    else if (it.role === "user") {
+      // A foreign sender renders under its own name, never as "you".
+      n = (it.who && it.who !== handle)
+        ? bubble("in", [it.who, ago(it.ts)], it.text)
+        : bubble("out", ["you · term", ago(it.ts)], it.text);
+      n.className += " sess";
+    } else {
+      n = bubble("in", [target, ago(it.ts)], it.text);
+      n.className += " sess";
+    }
+    return n;
+  }
+  function addItem(it, front) {
+    var k = key(it);
+    if (seen[k]) return;
+    seen[k] = 1;
+    var n = build(it);
+    if (front && older) log.insertBefore(n, older.nextSibling);
+    else log.appendChild(n);
+    if (it.via === "session" && typeof it.i === "number"
+        && (firstI === null || it.i < firstI)) firstI = it.i;
+  }
+  function setNote(text) {
+    if (text) { note.textContent = text; note.hidden = false; }
+    else note.hidden = true;
+  }
+  function reset(markText) {
+    log.textContent = "";
+    seen = {}; tCur = null; firstI = null; older = null;
+    if (markText) log.appendChild(el("div", "trn-mark", markText));
+  }
+  function tlFetch(qs, onDone) {
+    // onDone ALWAYS runs (null on failure) so busy-guards release.
+    fetch("/api/timeline/" + encodeURIComponent(target) + qs,
           { headers: { "X-Homi-Token": token }, cache: "no-store" })
       .then(function (r) {
         if (r.status === 403) { stat.textContent = "session expired — reload"; return null; }
         if (!r.ok) { stat.textContent = "server error " + r.status; return null; }
         return r.json();
       })
-      .then(function (d) {
-        if (!d) return;
-        var es = d.entries || [];
-        es.forEach(addMsg);
-        // Advance the cursor ONLY from server data — never from the optimistic
-        // echo, or a reply that arrived just before a send is skipped forever.
-        es.forEach(function (e) { if (e.ts > lastTs) lastTs = e.ts; });
-        stat.textContent = "";
-      })
-      .catch(function () { stat.textContent = "disconnected"; });
+      .then(function (d) { onDone(d || null); },
+            function () { stat.textContent = "disconnected"; onDone(null); });
   }
+  function poll() {
+    if (document.hidden) return;
+    var qs = tCur === null ? "?ts_after=" + tsCur
+                           : "?t_after=" + tCur + "&ts_after=" + tsCur;
+    tlFetch(qs, function (d) {
+      if (!d || !d.ok) return;
+      if (d.sid && sSid && d.sid !== sSid) reset("· session restarted ·");
+      if (d.sid) sSid = d.sid;
+      if (!d.present) setNote("no session on this device — messages only");
+      else if (!d.live) setNote("asleep — messages queue and deliver on wake");
+      else setNote(null);
+      var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      var firstLoad = (tCur === null);
+      if (!firstLoad) {
+        for (var i = 0; i < d.items.length; i++) {
+          var it = d.items[i];
+          if (it.via === "session" && typeof it.i === "number") {
+            if (it.i > tCur + 1)
+              log.appendChild(el("div", "trn-mark", "· gap — turns evicted ·"));
+            break;
+          }
+        }
+      }
+      d.items.forEach(function (it) { addItem(it, false); });
+      if (typeof d.t_cursor === "number" && (tCur === null || d.t_cursor > tCur))
+        tCur = d.t_cursor;
+      if (typeof d.ts_cursor === "number" && d.ts_cursor > tsCur)
+        tsCur = d.ts_cursor;
+      if (older === null && firstI !== null && (firstI > 0 || d.truncated)) {
+        older = el("button", null, "earlier");
+        older.id = "older"; older.type = "button";
+        older.addEventListener("click", loadOlder);
+        log.insertBefore(older, log.firstChild);
+      }
+      stat.textContent = "";
+      if (atBottom || firstLoad) log.scrollTop = log.scrollHeight;
+    });
+  }
+  function loadOlder() {
+    if (olderBusy || firstI === null || firstI <= 0) return;
+    olderBusy = true;
+    tlFetch("?t_before=" + firstI, function (d) {
+      olderBusy = false;
+      if (!d || !d.ok) return;
+      var h0 = log.scrollHeight;
+      (d.items || []).slice().reverse().forEach(function (it) { addItem(it, true); });
+      log.scrollTop += log.scrollHeight - h0;   // keep your place
+      if (firstI <= 0 || !(d.items || []).length) {
+        older.textContent = d.truncated
+          ? "· earlier history trimmed ·" : "· start ·";
+        older.disabled = true;
+      }
+    });
+  }
+  filt.addEventListener("click", function () {
+    document.body.classList.toggle("msgs");
+    filt.classList.toggle("on");
+    log.scrollTop = log.scrollHeight;
+  });
 
   document.getElementById("composer").addEventListener("submit", function (ev) {
     ev.preventDefault();
@@ -382,7 +533,13 @@ TALK_TEMPLATE = r"""<!doctype html>
                              function () { return { ok: r.ok, d: null }; });
       })
       .then(function (res) {
-        if (res.ok && res.d && res.d.entry) { addMsg(res.d.entry); inp.value = ""; }
+        if (res.ok && res.d && res.d.entry) {
+          var e = res.d.entry;
+          addItem({ via: "mail", role: "user", ts: e.ts, text: e.text,
+                    routed: e.routed });
+          inp.value = "";
+          log.scrollTop = log.scrollHeight;
+        }
         else stat.textContent = (res.d && res.d.err) ? res.d.err : "send failed";
       })
       .catch(function () { stat.textContent = "send failed"; })
@@ -395,138 +552,10 @@ TALK_TEMPLATE = r"""<!doctype html>
     }
   });
 
-  // ---- session tab: the read-only observatory over the agent's transcript.
-  var sess = document.getElementById("sess");
-  var sFirst = null, sLast = null;   // absolute turn-index window loaded
-  var sSeen = {};
-  var sTab = "chat";
-  var sNote = null, older = null;
-  var sSid = null;                   // transcript identity — resets the pane
-  var sOlderBusy = false;
-
-  function addTurn(t, front) {
-    if (sSeen[t.i]) return;
-    sSeen[t.i] = 1;
-    var n;
-    if (t.role === "tool") {
-      n = el("div", "trn-tool", t.text);
-    } else if (t.role === "mark") {
-      n = el("div", "trn-mark", t.text);
-    } else {
-      n = el("div", "msg " + (t.role === "user" ? "out" : "in"));
-      // A cross-session record carries its real sender — another agent's
-      // words must never wear the operator's "you" byline.
-      var by = t.role === "user"
-        ? (t.who && t.who !== handle ? t.who : "you") : target;
-      var meta = [by];
-      if (t.ts) meta.push(ago(t.ts));
-      n.appendChild(el("div", "meta", meta.join(" · ")));
-      var b = el("div", "body");
-      renderBody(b, t.text);
-      n.appendChild(b);
-    }
-    if (front && older) sess.insertBefore(n, older.nextSibling);
-    else sess.appendChild(n);
-  }
-  function sessReset(noteText) {
-    sess.textContent = "";
-    sSeen = {}; sFirst = null; sLast = null; older = null; sNote = null;
-    if (noteText) sess.appendChild(el("div", "trn-mark", noteText));
-  }
-  function sessNote(text) {
-    if (sNote) sNote.remove();
-    sNote = el("div", "empty", text);
-    sess.appendChild(sNote);
-  }
-  function sessFetch(qs, onDone) {
-    // onDone ALWAYS runs (with null on failure) so callers' busy-guards
-    // release even when the server errors or the network drops.
-    fetch("/api/session/" + encodeURIComponent(target) + qs,
-          { headers: { "X-Homi-Token": token }, cache: "no-store" })
-      .then(function (r) {
-        if (r.status === 403) { stat.textContent = "session expired — reload"; return null; }
-        if (!r.ok) { return r.json().then(function (d) {
-          sessNote(d && d.err ? d.err : "error " + r.status); return null;
-        }, function () { sessNote("error " + r.status); return null; }); }
-        return r.json();
-      })
-      .then(function (d) { onDone(d || null); },
-            function () { stat.textContent = "disconnected"; onDone(null); });
-  }
-  function sessPoll() {
-    if (sTab !== "session" || document.hidden) return;
-    var qs = sLast === null ? "" : "?after=" + sLast;
-    sessFetch(qs, function (d) {
-      if (!d) return;
-      if (!d.live) {
-        if (sLast === null) sessNote("no live session — mail still delivers on wake");
-        else sessNote("session ended — mail still delivers on wake");
-        return;
-      }
-      if (d.sid && sSid && d.sid !== sSid) {
-        // The agent restarted into a new transcript: stale cursors would
-        // freeze the pane forever. Start over, honestly marked.
-        sessReset("· session restarted ·");
-      }
-      if (d.sid) sSid = d.sid;
-      if (sNote) { sNote.remove(); sNote = null; }
-      var atBottom = sess.scrollHeight - sess.scrollTop - sess.clientHeight < 40;
-      var firstLoad = (sLast === null);
-      var ts = d.turns || [];
-      if (!firstLoad && ts.length && ts[0].i > sLast + 1) {
-        sess.appendChild(el("div", "trn-mark", "· gap — turns evicted ·"));
-      }
-      ts.forEach(function (t) { addTurn(t, false); });
-      ts.forEach(function (t) {
-        if (sLast === null || t.i > sLast) sLast = t.i;
-        if (sFirst === null || t.i < sFirst) sFirst = t.i;
-      });
-      if (older === null && sFirst !== null && sFirst > 0) {
-        older = el("button", null, "earlier");
-        older.id = "older"; older.type = "button";
-        older.addEventListener("click", loadOlder);
-        sess.insertBefore(older, sess.firstChild);
-      }
-      if (atBottom || firstLoad) sess.scrollTop = sess.scrollHeight;
-    });
-  }
-  function loadOlder() {
-    if (sOlderBusy || sFirst === null || sFirst <= 0) return;
-    sOlderBusy = true;
-    sessFetch("?before=" + sFirst, function (d) {
-      sOlderBusy = false;
-      if (!d) return;
-      var h0 = sess.scrollHeight;
-      (d.turns || []).slice().reverse().forEach(function (t) { addTurn(t, true); });
-      (d.turns || []).forEach(function (t) {
-        if (t.i < sFirst) sFirst = t.i;
-      });
-      sess.scrollTop += sess.scrollHeight - h0;   // keep your place
-      if (sFirst <= 0 || !(d.turns || []).length) {
-        older.textContent = d.truncated
-          ? "· earlier history trimmed ·" : "· start ·";
-        older.disabled = true;
-      }
-    });
-  }
-  var tabs = document.getElementById("tabs");
-  tabs.addEventListener("click", function (ev) {
-    var t = ev.target.getAttribute && ev.target.getAttribute("data-tab");
-    if (!t || t === sTab) return;
-    sTab = t;
-    var btns = tabs.querySelectorAll(".tab");
-    for (var i = 0; i < btns.length; i++)
-      btns[i].className = "tab" + (btns[i].getAttribute("data-tab") === t ? " on" : "");
-    log.hidden = (t !== "chat");
-    sess.hidden = (t !== "session");
-    if (t === "session") { sessPoll(); sess.scrollTop = sess.scrollHeight; }
-  });
-
-  function tick() { poll(); sessPoll(); }
-  tick();
-  window.setInterval(tick, 2500);
+  poll();
+  window.setInterval(poll, 2500);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) tick();   // reload-on-foreground: iOS froze us
+    if (!document.hidden) poll();   // reload-on-foreground: iOS froze us
   });
 })();
 </script>
