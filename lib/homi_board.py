@@ -258,16 +258,18 @@ def serve(port, bind, no_remote, ttl=10.0):
     # Short-TTL shared cache of the human's inbox: every /api/conv poll (per
     # tab, every 2.5 s) would otherwise drag the whole mailbox through the
     # daemon. One read serves all pollers within the window.
-    _inbox_cache = {"at": 0.0, "val": None}
-    _inbox_mu = threading.Lock()
+    _inbox_cache = {}   # name -> {"at": ts, "val": inbox} — keyed so no
+    _inbox_mu = threading.Lock()  # caller can ever read another name's mail
 
     def _inbox_cached(name):
         with _inbox_mu:
-            if _inbox_cache["val"] is None or (time.time() - _inbox_cache["at"]) > 1.5:
-                _inbox_cache["val"] = homi._call({"op": "inbox", "name": name,
-                                                  "tail": 500})
-                _inbox_cache["at"] = time.time()
-            return _inbox_cache["val"]
+            ent = _inbox_cache.get(name)
+            if ent is None or (time.time() - ent["at"]) > 1.5:
+                ent = {"at": time.time(),
+                       "val": homi._call({"op": "inbox", "name": name,
+                                          "tail": 500})}
+                _inbox_cache[name] = ent
+            return ent["val"]
     handle = homi_talk.human_handle()
     if handle:
         homi_talk.ensure_human(handle)
