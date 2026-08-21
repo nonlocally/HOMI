@@ -15,6 +15,7 @@ the pinned key, the link's measured state).
 Stdlib only. No daemon ops added, no wire surface — this is a VIEW.
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -22,6 +23,12 @@ import threading
 import time
 
 import homi  # fully loaded before this module is (lazy import in cli_call)
+
+
+class _Handled(Exception):
+    """The handler already wrote a complete response — unwind to _get without
+    a second send. Explicit sentinel (a bare-string return was a trap: any
+    future str body would silently read as 'handled')."""
 
 
 def board_dir():
@@ -231,26 +238,134 @@ class _Cache:
 
 
 def serve(port, bind, no_remote, ttl=10.0):
+    import hmac
     import http.server
+    import urllib.parse
+    import homi_talk
+
     cache = _Cache(no_remote, ttl=ttl)
+    # Write-path defense, honestly named. The AUTHN boundary is tailnet
+    # reachability + the Host allowlist (a loopback bind behind `tailscale
+    # serve` also gives a trustworthy Tailscale-User-Login, logged per send).
+    # The per-serve token is NOT an auth factor — it is served to anyone who
+    # can load /talk. What it buys: (1) a CSRF/cross-origin defense (paired
+    # with the JSON content-type + X-Homi custom header, which force a
+    # preflight no cross-origin page can satisfy — verified: OPTIONS 501, no
+    # CORS), and (2) a session binding — a restart mints a new token, so a
+    # stale tab's writes 403 instead of acting. Injected into served pages
+    # only, never a URL. constant-time compared.
+    token = os.urandom(16).hex()
+    # Short-TTL shared cache of the human's inbox: every /api/conv poll (per
+    # tab, every 2.5 s) would otherwise drag the whole mailbox through the
+    # daemon. One read serves all pollers within the window.
+    _inbox_cache = {}   # name -> {"at": ts, "val": inbox} — keyed so no
+    _inbox_mu = threading.Lock()  # caller can ever read another name's mail
+
+    def _inbox_cached(name):
+        with _inbox_mu:
+            ent = _inbox_cache.get(name)
+            if ent is None or (time.time() - ent["at"]) > 1.5:
+                ent = {"at": time.time(),
+                       "val": homi._call({"op": "inbox", "name": name,
+                                          "tail": 500})}
+                _inbox_cache[name] = ent
+            return ent["val"]
+    handle = homi_talk.human_handle()
+    if handle:
+        homi_talk.ensure_human(handle)
+        homi_talk.ensure_talk_dir()   # once, not per message
+
+    # Host allowlist: the DNS-rebinding pin. A rebinding attack rides the
+    # victim's own browser with an attacker Host name — refuse anything that
+    # isn't one of OUR names for this server.
+    allowed_hosts = {bind, "%s:%d" % (bind, port),
+                     "localhost", "localhost:%d" % port,
+                     "127.0.0.1", "127.0.0.1:%d" % port}
+    ts_ip = homi._tailscale_ip()
+    if ts_ip:
+        allowed_hosts.update({ts_ip, "%s:%d" % (ts_ip, port)})
+    try:
+        out = subprocess.run(["tailscale", "status", "--json"],
+                             capture_output=True, text=True, timeout=5)
+        dns = (json.loads(out.stdout or "{}").get("Self") or {}).get("DNSName", "")
+        dns = dns.rstrip(".")
+        if dns:
+            allowed_hosts.update({dns, "%s:%d" % (dns, port),
+                                  dns.split(".")[0],
+                                  "%s:%d" % (dns.split(".")[0], port)})
+    except Exception as e:
+        sys.stderr.write("board serve: no tailscale DNS names (%s)\n" % e)
+    # Compared case-insensitively (Host header is lowercased on receipt).
+    allowed_hosts = {h.lower() for h in allowed_hosts}
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        def _host_ok(self):
+            return (self.headers.get("Host") or "").lower() in allowed_hosts
+
+        def _token_ok(self):
+            got = self.headers.get("X-Homi-Token") or ""
+            return hmac.compare_digest(got, token)
+
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
         def _body(self):
             path = self.path.split("?", 1)[0]   # cache-busters must not 404
             if path in ("/", "/index.html"):
                 return render_html(cache.get()).encode(), "text/html; charset=utf-8"
             if path == "/state.json":
                 return json.dumps(cache.get()).encode(), "application/json"
+            if path.startswith("/talk/"):
+                target = urllib.parse.unquote(path[len("/talk/"):])
+                if not handle:
+                    return (b"claim a handle first: communicate homi init",
+                            "text/plain; charset=utf-8")
+                if not homi_talk.valid_target(target):
+                    return None, None
+                return (homi_talk.render_talk(handle, target, token).encode(),
+                        "text/html; charset=utf-8")
+            if path.startswith("/api/conv/"):
+                if not self._token_ok():
+                    self._json(403, {"ok": False, "err": "token"})
+                    raise _Handled
+                target = urllib.parse.unquote(path[len("/api/conv/"):])
+                if not handle or not homi_talk.valid_target(target):
+                    return None, None
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query)
+                try:
+                    since = float((q.get("since") or ["0"])[0])
+                except ValueError:
+                    since = 0.0
+                if not math.isfinite(since):   # nan/inf would poison the cursor
+                    since = 0.0
+                entries = homi_talk.conversation(handle, target, since=since,
+                                                 inbox=_inbox_cached)
+                return (json.dumps({"ok": True, "entries": entries}).encode(),
+                        "application/json")
             return None, None
 
         def _get(self, send_body):
+            if not self._host_ok():
+                self.send_error(403, "host")
+                return
             # homi._call sys.exit()s when the daemon is down — SystemExit is a
             # BaseException, so a bare `except Exception` provably let it
             # escape the handler and the client saw an EMPTY REPLY instead of
             # a 500. Catch both; the detail goes to stderr, never the status
-            # line (which BaseHTTPRequestHandler emits unescaped).
+            # line (which BaseHTTPRequestHandler emits unescaped). _Handled is
+            # the explicit sentinel — the handler already wrote its response.
             try:
                 body, ctype = self._body()
+            except _Handled:
+                return
             except (Exception, SystemExit) as e:
                 sys.stderr.write("board serve: collect failed: %s\n" % e)
                 self.send_error(500, "collect failed")
@@ -272,12 +387,79 @@ def serve(port, bind, no_remote, ttl=10.0):
         def do_HEAD(self):
             self._get(False)
 
+        def do_POST(self):
+            # Write path: every layer must hold. Host pin; JSON content type +
+            # custom header (cross-origin forms can't send either without a
+            # failing preflight); same-origin Sec-Fetch when the browser sends
+            # it; and the page-injected mutation token, constant-time.
+            if not self._host_ok():
+                self.send_error(403, "host")
+                return
+            path = self.path.split("?", 1)[0]
+            if path != "/api/send":
+                self.send_error(404)
+                return
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            sfs = self.headers.get("Sec-Fetch-Site")
+            if (ctype != "application/json"
+                    or self.headers.get("X-Homi") != "1"
+                    or (sfs is not None and sfs != "same-origin")):
+                self._json(403, {"ok": False, "err": "headers"})
+                return
+            if not self._token_ok():
+                self._json(403, {"ok": False, "err": "token"})
+                return
+            if not handle:
+                self._json(403, {"ok": False, "err": "claim a handle first"})
+                return
+            try:
+                # Floor at 0: a negative Content-Length would become
+                # rfile.read(-1) = read-to-EOF, pinning the thread.
+                n = max(0, min(int(self.headers.get("Content-Length") or 0), 65536))
+                req = json.loads(self.rfile.read(n).decode("utf-8"))
+                target = req.get("to") or ""
+                text = (req.get("text") or "").strip()
+            except (ValueError, UnicodeDecodeError):
+                self._json(400, {"ok": False, "err": "bad json"})
+                return
+            if not homi_talk.valid_target(target) or not text:
+                self._json(400, {"ok": False, "err": "bad target or empty text"})
+                return
+            who = self.headers.get("Tailscale-User-Login")
+            try:
+                entry = homi_talk.send(handle, target, text)
+            except homi_talk.SendRefused as e:
+                # A daemon refusal is a CLIENT error — surface the honest reason.
+                self._json(400, {"ok": False, "err": str(e)})
+                return
+            except (Exception, SystemExit) as e:
+                sys.stderr.write("board serve: send failed: %s\n" % e)
+                self._json(500, {"ok": False, "err": "send failed"})
+                return
+            sys.stderr.write("talk: %s -> %s (%d chars, routed %s%s)\n"
+                             % (handle, target, len(text), entry.get("routed"),
+                                (", ts-user " + who) if who else ""))
+            body = json.dumps({"ok": True, "routed": entry.get("routed"),
+                               "entry": entry}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *a):
             pass
 
     srv = http.server.ThreadingHTTPServer((bind, port), Handler)
     sys.stdout.write("homi board -> http://%s:%d/   (Ctrl-C to stop)\n"
                      % (bind, port))
+    if handle:
+        sys.stdout.write("talk: click any agent, or /talk/<name> — sends go "
+                         "out as @%s\n" % handle)
+    else:
+        sys.stdout.write("talk: disabled (claim a handle first: "
+                         "communicate homi init)\n")
     sys.stdout.flush()
     try:
         srv.serve_forever()
@@ -307,13 +489,29 @@ def main(argv):
             bind = argv[argv.index("--bind") + 1]
             if bind.startswith("--"):   # a flag is not an address
                 bind = None
+        if not bind and "--ts" in argv:
+            # The phone path: loopback behind `tailscale serve` — a real
+            # HTTPS origin (secure context on iOS) + trustworthy identity
+            # headers, exactly because nothing else can reach a loopback bind.
+            bind = "127.0.0.1"
+            sys.stdout.write("front it for HTTPS:  tailscale serve --bg %d\n"
+                             % port)
+            try:
+                out = subprocess.run(["tailscale", "status", "--json"],
+                                     capture_output=True, text=True, timeout=5)
+                dns = (json.loads(out.stdout or "{}").get("Self")
+                       or {}).get("DNSName", "").rstrip(".")
+                if dns:
+                    sys.stdout.write("then open:           https://%s/\n" % dns)
+            except Exception:
+                pass
         if not bind:
             # Tailnet-only by construction: bind the device's Tailscale IP,
             # never 0.0.0.0 (the docs/site/serve.sh idiom).
             bind = homi._tailscale_ip()
         if not bind:
             sys.stderr.write("no tailscale IP (is tailscale up?) — "
-                             "pass --bind 127.0.0.1 for loopback\n")
+                             "pass --bind 127.0.0.1 or --ts for loopback\n")
             return 1
         return serve(port, bind, no_remote)
 
@@ -432,6 +630,8 @@ TEMPLATE = r"""<!doctype html>
   .grouprow + .row, .head + .row { border-top: 0; }
   .row:hover { background: var(--surface-2); }
   .row .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .name a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--baseline); }
+  .row .name a:hover { color: var(--ink); border-bottom-color: var(--ink); }
   .row .st { font-size: 12.5px; }
   .st.t-live { color: var(--ink); font-weight: 500; }
   .st.t-stored { color: var(--muted); }
@@ -626,7 +826,18 @@ TEMPLATE = r"""<!doctype html>
         total += 1;
         var r = add(host, "div", "row");
         add(r, "span", dotClass(a));
-        add(r, "span", "name", a.name || "?");
+        // Served pages link each agent to its talk surface; a file:// open
+        // stays a static snapshot (nothing to talk to).
+        var nm = add(r, "span", "name");
+        if (a.name && window.location.protocol.indexOf("http") === 0
+            && (d.self || d.device)) {
+          var link = el("a", null, a.name);
+          link.href = "/talk/" + encodeURIComponent(
+            d.self ? a.name : a.name + "@" + d.device);
+          nm.appendChild(link);
+        } else {
+          nm.textContent = a.name || "?";
+        }
         var st = add(r, "span", stClass(a.state));
         st.textContent = a.state || "?";
         if (a.provenance && a.provenance !== "probed") st.textContent += " · " + a.provenance;

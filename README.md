@@ -286,6 +286,21 @@ nothing said who owns an agent. v3 completes `fleet` into a claimed identity.
   minting is capped per user (`HOMI_PROXY_CAP`). Trust verbs (`init`, `pair`,
   `connect`, `grant`, `federate`, `link`) remain human-only CLI — never MCP.
 
+- **talk — converse with agents from any device** (a surface on the served
+  board, not a separate verb). Every agent row is a link: `/talk/<name>`
+  opens a phone-friendly chat over the fabric's own planes — your sends go
+  out as `@<handle>` (honest attribution), replies land in YOUR durable
+  mailbox, and store→wake means you can message a sleeping agent at night
+  and read its answer in the morning. The write boundary is tailnet
+  reachability + a Host-header allowlist (DNS-rebinding defense); a
+  JSON-only, custom-header (`X-Homi`) requirement plus a per-serve token
+  injected into the page defend against cross-origin forgery; behind
+  `tailscale serve` the `Tailscale-User-Login` identity is logged per send.
+  The conversation is fabric state, not a web session. For the phone:
+  `communicate homi board --serve --ts` binds loopback and prints the one
+  `tailscale serve` command that gives a real HTTPS origin (iOS secure
+  context, installable PWA).
+
 - **`homi board` — the fabric's front end.** One self-contained page:
   every device's roster with measured liveness, links with live round-trip
   numbers, queue depths, and the People section (granted names, pinned keys,
