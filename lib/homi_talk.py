@@ -200,15 +200,31 @@ def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
         sid = d.get("sid") or ""
         total = d.get("total") or 0
         truncated = bool(d.get("truncated"))
-        # Twin sets, consume-once. A drop needs PROOF a mail copy renders:
-        # sends made outside this page (CLI --from, another device) have no
-        # journal twin, and a REFUSED send has no inbox twin — dropping
-        # those made real content invisible. (Residual: a later no-journal
-        # send with the exact text of an earlier page send can consume the
-        # stale twin — same words, still visible once, accepted.)
-        out_twins = [e.get("text", "") for e in journal
+        # Twin sets, consume-once, WINDOWED. A drop needs proof a mail copy
+        # renders (sends made outside this page and refused sends have no
+        # twin), and the window must encode delivery semantics: a
+        # live-routed send delivered within seconds, so its twin can only
+        # explain a turn within minutes — text-forever matching let any old
+        # "hi" in the journal eat every future same-text send. A QUEUED
+        # send legitimately delivers whenever the agent next wakes.
+        out_twins = [{"text": e.get("text", ""), "ts": e.get("ts") or 0,
+                      "routed": e.get("routed")} for e in journal
                      if e.get("dir") == "out"]
-        in_twins = [m.get("text", "") for m in inmsgs]
+        in_twins = [{"text": m.get("text", ""), "ts": m.get("ts") or 0}
+                    for m in inmsgs]
+
+        def _consume(twins, text, tts, queued_any_later):
+            for tw in twins:
+                if tw["text"] != text:
+                    continue
+                if (queued_any_later and tw.get("routed") != "live"):
+                    hit = tts >= tw["ts"] - 5
+                else:
+                    hit = abs(tts - tw["ts"]) <= 300
+                if hit:
+                    twins.remove(tw)
+                    return True
+            return False
         turns = d.get("turns") or []
         last_ts = next((t["ts"] for t in turns if t.get("ts")), 0.0)
         for t in turns:
@@ -218,13 +234,12 @@ def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
                 t_cursor = t["i"]
             if t_min is None or t["i"] < t_min:
                 t_min = t["i"]
+            tts = t.get("ts") or last_ts
             if (t["role"] == "user" and t.get("who") == handle
-                    and t["text"] in out_twins):
-                out_twins.remove(t["text"])
+                    and _consume(out_twins, t["text"], tts, True)):
                 continue   # the mail thread renders this
             if (t["role"] == "reply" and t.get("to") == handle
-                    and t["text"] in in_twins):
-                in_twins.remove(t["text"])
+                    and _consume(in_twins, t["text"], tts, False)):
                 continue   # the mail thread renders this
             it = dict(t)
             it["via"] = "session"
@@ -522,7 +537,15 @@ TALK_TEMPLATE = r"""<!doctype html>
                            : "?t_after=" + tCur + "&ts_after=" + tsCur;
     tlFetch(qs, function (d) {
       if (!d || !d.ok) return;
-      if (d.sid && sSid && d.sid !== sSid) reset("· session restarted ·");
+      if (d.sid && sSid && d.sid !== sSid) {
+        // This response was fetched with PRE-restart cursors — applying any
+        // of it (items OR cursors) would clobber the reset. Discard it,
+        // rebuild the pane, and refetch the world from zero.
+        reset("· session restarted ·");
+        sSid = d.sid;
+        poll();
+        return;
+      }
       if (d.sid) sSid = d.sid;
       if (!d.present) setNote("no session on this device — messages only");
       else if (!d.live) setNote("asleep — messages queue and deliver on wake");

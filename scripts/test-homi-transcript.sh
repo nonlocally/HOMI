@@ -544,6 +544,49 @@ if [ "$r" = "True True 1" ]; then
   ok "no-twin turns kept (CLI send, refused reply); twinned ones still single"
 else bad "twin-gated drops (got: $r)"; fi
 
+echo "== twin windows encode delivery semantics (stale text never eats new sends)"
+python3 - "$T" <<'PY'
+import calendar, datetime, json, os, sys
+t = sys.argv[1]
+def ep(m, s):
+    return calendar.timegm(datetime.datetime(2026, 8, 21, 10, m, s).timetuple())
+with open(os.path.join(t, "board", "talk", "compo.jsonl"), "a") as f:
+    # a live-routed send from long ago; its delivery happened THEN, so it can
+    # never explain a much-later same-text arrival
+    f.write(json.dumps({"ts": ep(1, 40) + 0.0, "dir": "out",
+                        "text": "hi", "routed": "live"}) + "\n")
+    # a QUEUED send legitimately delivers on wake — any later time matches
+    f.write(json.dumps({"ts": ep(1, 41) + 0.0, "dir": "out",
+                        "text": "wake order", "routed": "inbox"}) + "\n")
+proj = os.path.join(t, "cc", "projects", "-fake-proj")
+with open(os.path.join(proj, "ses-compo.jsonl"), "a") as f:
+    f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:09:00.000Z",
+        "message": {"role": "user", "content":
+            '<cross-session-message from="uds:/x" from-name="alice">\n'
+            'hi\n</cross-session-message>'}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": "2026-08-21T10:05:00.000Z",
+        "message": {"role": "user", "content":
+            '<cross-session-message from="uds:/x" from-name="alice">\n'
+            'wake order\n</cross-session-message>'}}) + "\n")
+PY
+r="$(python3 -c "
+import json, sys; sys.path.insert(0, '$HERE/lib')
+import homi_talk
+ep = json.load(open('$T/ep.json'))
+fake_inbox = lambda name: {'messages': [
+    {'ts': ep['in_ts'], 'from_name': 'compo', 'text': 'done, check it'}]}
+d = homi_talk.timeline('alice', 'compo', inbox=fake_inbox)
+sess = ['%s|%s' % (i['role'], i['text']) for i in d['items']
+        if i.get('via') == 'session']
+kept_hi = 'user|hi' in sess                 # stale live twin must NOT match
+dropped_wake = 'user|wake order' not in sess  # queued twin legitimately does
+mail_wake = sum(1 for i in d['items']
+                if i.get('via') == 'mail' and i['text'] == 'wake order')
+print(kept_hi, dropped_wake, mail_wake)")"
+if [ "$r" = "True True 1" ]; then
+  ok "live twins match within minutes only; queued twins match on wake"
+else bad "twin windows (got: $r)"; fi
+
 echo "== timeline cursors return only the new"
 r="$(python3 -c "
 import json, sys; sys.path.insert(0, '$HERE/lib')
@@ -645,6 +688,11 @@ else bad "sid tracking in page"; fi
 if printf '%s' "$page" | grep -q 't.who'; then
   ok "client renders foreign senders by name, not as you"
 else bad "who byline in page"; fi
+
+echo "== the page's behavior, EXECUTED (grep lied twice; the harness cannot)"
+if node "$HERE/scripts/test-timeline-dom.js" >/dev/null 2>&1; then
+  ok "restart replays the whole pane from zero (real JS under a DOM shim)"
+else bad "DOM behavioral contract (run: node scripts/test-timeline-dom.js)"; fi
 if [ "$(printf '%s' "$page" | grep -c -e 'https\?://' -e 'url(' -e '@import' -e '<link' -e 'src=')" = "0" ]; then
   ok "talk page still self-contained"
 else bad "talk page self-contained"; fi
