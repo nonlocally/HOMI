@@ -183,6 +183,13 @@ if tmux -L "$TMUXSOCK" capture-pane -t "$CSEAT" -p 2>/dev/null | grep -q "should
   bad "typed into a non-idle agent seat (state gate bypassed)"
 else ok "opted-in agent that is not idle holds its mail (state gate)"; fi
 
+# the opt-in must SURVIVE a daemon restart (persistence, not just memory)
+"$COMM" homi stop >/dev/null 2>&1; sleep 1
+"$COMM" homi start >/dev/null 2>&1; sleep 2
+if python3 -c "import json,sys; d=json.load(open('$COMM_STATE/homi/identities.json')); sys.exit(0 if d.get('relaybot',{}).get('seat_relay') is True else 1)"; then
+  ok "seat_relay opt-in persists across a daemon restart"
+else bad "seat_relay lost on restart (persistence gap)"; fi
+
 "$COMM" homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

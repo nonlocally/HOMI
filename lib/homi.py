@@ -434,6 +434,7 @@ class Homi:
                         "kind": e.get("kind", "local"),
                         "home": e.get("home"),
                         "seat": e.get("seat"),
+                        "seat_relay": e.get("seat_relay", False),
                         "boxed": e.get("boxed", False),
                         "aliases": e.get("aliases") or [],
                         "workspace": e.get("workspace"),
@@ -1750,8 +1751,9 @@ class Homi:
                     # claimed_at first: _do_claim above stamped a fresh
                     # time.time(), so without restoring it every daemon restart
                     # reset the age of every address to zero.
-                    for k in ("claimed_at", "seat", "aliases", "workspace",
-                              "place", "surface", "card", "supervision"):
+                    for k in ("claimed_at", "seat", "seat_relay", "aliases",
+                              "workspace", "place", "surface", "card",
+                              "supervision"):
                         if e.get(k) is not None:
                             self.identities[name][k] = e[k]
         self._persist_identities()
