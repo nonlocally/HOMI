@@ -147,6 +147,50 @@ def conversation(handle, target, since=0.0, inbox=None):
     return entries
 
 
+_seat_cache = {"at": 0.0, "map": {}}
+
+
+def _seat_for(name, inbox=None):
+    """The seat a local identity is bound to (or None), from the daemon
+    roster. Cached ~3s — the timeline polls every 2.5s and this only decides
+    whether to consult the codex adapter."""
+    now = time.time()
+    if now - _seat_cache["at"] > 3.0:
+        try:
+            r = homi._call({"op": "agents"})
+        except (Exception, SystemExit):
+            r = {}
+        rows = r.get("agents") if isinstance(r, dict) else r
+        m = {}
+        for a in (rows or []):
+            if isinstance(a, dict) and a.get("name") and a.get("seat"):
+                m[a["name"]] = a["seat"]
+        _seat_cache["at"] = now
+        _seat_cache["map"] = m
+    return _seat_cache["map"].get(name)
+
+
+def _session_source(base, t_after, t_before, n):
+    """The session spine for the timeline: a live Claude transcript if there
+    is one, else the codex rollout of a codex-bound seat, else the honest
+    empty (messages-only). Both adapters return the same shape, so the caller
+    treats the result uniformly."""
+    import homi_transcript
+    d = homi_transcript.turns_for(base, after=t_after, before=t_before, n=n)
+    if d.get("present"):
+        return d
+    seat = _seat_for(base)
+    if seat:
+        try:
+            import homi_codex
+            cd = homi_codex.turns_for(seat, after=t_after, before=t_before, n=n)
+            if cd.get("present"):
+                return cd
+        except Exception:
+            pass
+    return d
+
+
 def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
              n=150, inbox=None):
     """One merged view of an agent: its session is the spine; the MAIL
@@ -194,8 +238,7 @@ def timeline(handle, target, t_after=None, ts_after=0.0, t_before=None,
         inmsgs = [m for m in (r.get("messages") or [])
                   if _matches(m, base, qual)]
     if not qual:
-        d = homi_transcript.turns_for(base, after=t_after, before=t_before,
-                                      n=n)
+        d = _session_source(base, t_after, t_before, n)
         live, present = d.get("live", False), d.get("present", False)
         sid = d.get("sid") or ""
         total = d.get("total") or 0
