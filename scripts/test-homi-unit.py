@@ -225,5 +225,20 @@ if (homi.Homi._safe_sender("librarian") == "librarian"
 else:
     bad("_safe_sender normalization")
 
+# -- _seat_wrap: keyboard-surface mail carries attribution and teaches the
+# reply path exactly once (ask tokens already embed their own).
+w = homi.Homi._seat_wrap({"from_name": "alice", "text": "hi there"}, "relaybot")
+w2 = homi.Homi._seat_wrap(
+    {"from_name": "alice",
+     "text": 'q [reply with: communicate homi reply alice@dev~ab12 "<answer>" --from relaybot]'},
+    "relaybot")
+if (w.startswith("[homi mail from @alice] hi there")
+        and 'communicate homi send alice' in w
+        and "communicate homi send alice" not in w2
+        and "communicate homi reply" in w2):
+    ok("_seat_wrap: attribution + reply path, never doubled over ask tokens")
+else:
+    bad("_seat_wrap shape (w=%r w2=%r)" % (w[:80], w2[:80]))
+
 print("\npass=%d fail=%d" % (pass_[0], fail_[0]))
 sys.exit(1 if fail_[0] else 0)

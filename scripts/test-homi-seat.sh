@@ -115,6 +115,74 @@ s=a["surf"]["surface"]
 assert s["state"]=="dead", s
 ' && ok "a dead seat reports dead, not a stale handle" || bad "dead surface honesty"
 
+echo "== the seat relay: opt-in per binding is the boundary"
+"$COMM" homi claim tester >/dev/null 2>&1
+"$COMM" homi claim relaybot >/dev/null 2>&1
+"$COMM" homi claim shellbot >/dev/null 2>&1
+"$COMM" homi claim bootbot >/dev/null 2>&1
+"$COMM" homi claim quietbot >/dev/null 2>&1
+"$COMM" homi claim spoofbot >/dev/null 2>&1
+# a fake agent by NAME only: a real shell copied to a file literally named
+# "node" — the reviewer's spoof. pane_current_command reads "node", so any
+# surface-sniffing gate is fooled; only the opt-in stops it.
+mkdir -p "$T/fakebin"; cp "$(command -v bash)" "$T/fakebin/node"
+ASEAT="$("$COMM" homi seat spawn 'node -e "process.stdin.resume()"' --name relayagent 2>/dev/null)"
+BSEAT="$("$COMM" homi seat spawn 'bash --norc --noprofile' --name relayshell 2>/dev/null)"
+CSEAT="$("$COMM" homi seat spawn 'node -i' --name relaybooting 2>/dev/null)"
+QSEAT="$("$COMM" homi seat spawn 'node -e "process.stdin.resume()"' --name relayquiet 2>/dev/null)"
+SSEAT="$("$COMM" homi seat spawn "$T/fakebin/node --norc --noprofile" --name relayspoof 2>/dev/null)"
+sleep 2
+# opted IN: agent, shell, booting-agent
+"$COMM" homi seat bind "$ASEAT" relaybot --relay >/dev/null 2>&1
+"$COMM" homi seat bind "$BSEAT" shellbot --relay >/dev/null 2>&1
+"$COMM" homi seat bind "$CSEAT" bootbot --relay >/dev/null 2>&1
+# opted OUT (default): a real agent, and the spoofed-node shell
+"$COMM" homi seat bind "$QSEAT" quietbot >/dev/null 2>&1
+"$COMM" homi seat bind "$SSEAT" spoofbot >/dev/null 2>&1
+
+# THE boundary: a binding NOT opted in never receives typed mail, even on a
+# real agent surface, even when the surface spoofs an agent name.
+"$COMM" homi send quietbot "hello you should not see this" --from tester >/dev/null 2>&1
+"$COMM" homi send spoofbot "touch $T/SPOOF_PWNED #" --from tester >/dev/null 2>&1
+sleep 6
+if tmux -L "$TMUXSOCK" capture-pane -t "$QSEAT" -p 2>/dev/null | grep -q "should not see this"; then
+  bad "typed into a NON-opted-in agent seat (opt-in gate bypassed)"
+else ok "no --relay: agent seat holds its mail (opt-in is the gate)"; fi
+if [ -f "$T/SPOOF_PWNED" ]; then
+  bad "SPOOFED-NODE SHELL EXECUTED MAIL (the reviewer exploit, no opt-in)"
+else ok "no --relay: a shell spoofing 'node' cannot be driven by mail"; fi
+
+# opted-in shell: the agent-surface guard still holds it (defense in depth)
+"$COMM" homi send shellbot "touch $T/SHELL_PWNED #" --from tester >/dev/null 2>&1
+sleep 5
+if [ -f "$T/SHELL_PWNED" ]; then bad "opted-in bare shell executed mail"
+else ok "opted-in bare shell still held (agent-surface guard)"; fi
+
+# opted-in agent, idle: delivered, with attribution + reply path
+"$COMM" homi send relaybot "hello from the mail plane" --from tester >/dev/null 2>&1
+typed=""
+for i in $(seq 1 12); do
+  tmux -L "$TMUXSOCK" capture-pane -t "$ASEAT" -p 2>/dev/null | grep -q "hello from the mail plane" && { typed=1; break; }
+  sleep 1
+done
+if [ -n "$typed" ]; then ok "opted-in agent seat receives typed mail"; else bad "agent seat relay typing"; fi
+cap="$(tmux -L "$TMUXSOCK" capture-pane -t "$ASEAT" -p 2>/dev/null)"
+if printf '%s' "$cap" | grep -q "from @tester"; then ok "typed mail carries attribution"
+else bad "typed attribution"; fi
+if printf '%s' "$cap" | grep -q "communicate homi send tester"; then ok "typed mail teaches the reply path"
+else bad "typed reply instruction"; fi
+sleep 3
+n="$(tmux -L "$TMUXSOCK" capture-pane -t "$ASEAT" -p 2>/dev/null | grep -c "hello from the mail plane")"
+if [ "$n" = "1" ]; then ok "cursor advanced: delivered once, never retyped"
+else bad "retype guard (copies=$n)"; fi
+
+# opted-in agent, NOT idle (node -i banner reads booting): state gate holds
+"$COMM" homi send bootbot "should wait for idle" --from tester >/dev/null 2>&1
+sleep 5
+if tmux -L "$TMUXSOCK" capture-pane -t "$CSEAT" -p 2>/dev/null | grep -q "should wait for idle"; then
+  bad "typed into a non-idle agent seat (state gate bypassed)"
+else ok "opted-in agent that is not idle holds its mail (state gate)"; fi
+
 "$COMM" homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

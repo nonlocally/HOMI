@@ -687,6 +687,10 @@ class Homi:
             if sess is None:
                 sess = self._choose_session(self._scan_sidecars().get(name) or [])
             if not sess:
+                # The seat relay: a surface that cannot be mailboxed (codex,
+                # a REPL) still has a KEYBOARD. If this identity is bound to
+                # a live local seat, deliver by typing.
+                self._deliver_via_seat(name, ent, lines, cur)
                 return
             to_sock = sess.get("messagingSocketPath")
             for i in range(cur, len(lines)):
@@ -920,12 +924,13 @@ class Homi:
             if sub == "kill":
                 return drv.kill(req.get("seat", ""))
             if sub == "bind":
-                return self._do_seat_bind(req.get("seat", ""), req.get("name", ""))
+                return self._do_seat_bind(req.get("seat", ""), req.get("name", ""),
+                                          relay=bool(req.get("relay")))
             return {"ok": False, "err": "unknown seat op: %s" % sub}
         except homi_seat.SeatError as e:
             return {"ok": False, "err": str(e)}
 
-    def _do_seat_bind(self, seat, name):
+    def _do_seat_bind(self, seat, name, relay=False):
         if not seat or not name:
             return {"ok": False, "err": "seat bind needs <seat> <name>"}
         with self.mu:
@@ -933,6 +938,14 @@ class Homi:
             if not ent or ent.get("kind") != "local":
                 return {"ok": False, "err": "claim %s first (local identity)" % name}
             ent["seat"] = seat
+            # The mail->seat relay is OFF unless the OWNER opts this binding
+            # in. Typing mail into a seat presses Enter; on any surface that
+            # executes input (a shell), that is command execution — so the
+            # gate must be an explicit human decision, never an auto-guess
+            # about the surface (a process basename is trivially spoofable).
+            # Opting in accepts that mail senders granted this name may drive
+            # the seat, exactly like allow_seats.
+            ent["seat_relay"] = bool(relay)
         self._persist_identities()
         self.log("bound seat", seat, "->", name)
         return {"ok": True, "seat": seat, "name": name}
@@ -2517,6 +2530,75 @@ class Homi:
         return {"ok": True, "ack": mid}
 
     @staticmethod
+    def _seat_wrap(obj, name):
+        """Mail rendered for a KEYBOARD surface: attribution up front, and —
+        unless the ask machinery already embedded a reply token — the generic
+        reply path, so any agent with a shell answers through the fabric
+        natively (no screen-scraping, ever)."""
+        frm = obj.get("from_name") or "unknown"
+        text = obj.get("text") or ""
+        out = "[homi mail from @%s] %s" % (frm, text)
+        if "communicate homi reply" not in text:
+            out += (' [reply by running: communicate homi send %s '
+                    '"<your reply>" --from %s]' % (frm, name))
+        return out
+
+    def _deliver_via_seat(self, name, ent, lines, cur):
+        """The mail↔seat last mile: type held mail into the identity's bound
+        seat. Only an IDLE pane is typed into — a busy agent is never poked
+        mid-stream; mail holds for the next tick. The cursor advances only
+        after a confirmed submit (at-least-once, same as the socket path).
+        Caller holds the per-name deliver lock."""
+        seat = ent.get("seat")
+        if not seat or not str(seat).startswith("%"):
+            return   # no seat, or a remote seat handle — not ours to type
+        if not ent.get("seat_relay"):
+            return   # THE gate: relay is opt-in per binding (homi seat bind
+                     # --relay). Without the owner's explicit consent, mail is
+                     # never typed — it just holds, as if no session existed.
+        try:
+            drv = self._seat_drv()
+            # Operational guards on top of the opt-in (not the security
+            # boundary — that is the opt-in above): never type into a
+            # non-idle pane (mid-stream), and skip a surface that does not
+            # currently read as an agent CLI, so an opted-in binding whose
+            # pane is momentarily a raw shell still isn't fed a command.
+            if not drv.is_agent_seat(seat):
+                return
+            if drv.state(seat) != "idle":
+                return   # busy / booting / approval / dead: hold
+        except Exception:
+            return
+        typed = 0
+        for i in range(cur, len(lines)):
+            try:
+                obj = json.loads(lines[i])
+            except Exception:
+                obj = {"text": lines[i].strip()}
+            if not (obj.get("text") or "").strip():
+                with self.mail_mu:
+                    if i + 1 > self._read_cursor(name):
+                        self._write_cursor(name, i + 1)
+                continue
+            try:
+                res = drv.send(seat, self._seat_wrap(obj, name))
+            except Exception as e:
+                self.log("seat deliver to", name, "failed (hold):", e)
+                break
+            if not (isinstance(res, dict) and res.get("ok")):
+                # Staged but not confirmed submitted (composer still holds it):
+                # hold the whole rest and retry next tick — never advance the
+                # cursor past mail we cannot prove landed.
+                self.log("seat submit unconfirmed for", name, "- holding")
+                break
+            with self.mail_mu:
+                if i + 1 > self._read_cursor(name):
+                    self._write_cursor(name, i + 1)
+            typed += 1
+        if typed:
+            self.log("typed", typed, "message(s) into seat", seat, "for", name)
+
+    @staticmethod
     def _safe_sender(frm):
         """Sender names cross the link trust boundary attacker-controlled
         and historically unvalidated (the recipient is checked; the sender
@@ -3055,6 +3137,14 @@ class Homi:
                 except Exception as e:
                     self.log("drain failed:", name, e)
             else:
+                if (self.identities.get(name) or {}).get("seat"):
+                    # No live session — but a bound seat can still take the
+                    # keyboard. Backgrounded: the relay makes multi-second tmux
+                    # calls, and reconcile()'s per-name loop must not block on
+                    # one wedged pane (the per-name deliver lock still
+                    # serializes drains for this name).
+                    threading.Thread(target=self._safe_deliver,
+                                     args=(name,), daemon=True).start()
                 try:
                     self._plant(name)
                 except Exception as e:
@@ -4865,12 +4955,16 @@ def cli_call(argv):
             print(r.get("responded") if r.get("ok") else (r.get("err") or "failed"))
             return 0 if r.get("ok") else 1
         if sub == "bind":
-            if len(sargs) < 2:
-                sys.stderr.write("usage: communicate homi seat bind <seat> <name>\n")
+            relay = "--relay" in sargs
+            pos = [a for a in sargs if a != "--relay"]
+            if len(pos) < 2:
+                sys.stderr.write("usage: communicate homi seat bind <seat> <name> "
+                                 "[--relay]\n")
                 return 1
-            req.update({"seat": sargs[0], "name": sargs[1]})
+            req.update({"seat": pos[0], "name": pos[1], "relay": relay})
             r = _call(req)
-            print("bound" if r.get("ok") else (r.get("err") or "failed"))
+            print(("bound (mail relay ON)" if relay else "bound")
+                  if r.get("ok") else (r.get("err") or "failed"))
             return 0 if r.get("ok") else 1
         if sub in ("kill", "interrupt"):
             req["seat"] = sargs[0] if sargs else ""
