@@ -339,9 +339,10 @@ class _Cache:
     means replacement and forces a full reparse. Only complete lines are
     consumed — a partial trailing line stays for the next read."""
 
-    def __init__(self):
+    def __init__(self, parser=None):
         self.mu = threading.Lock()
         self.by_path = {}   # path -> {size, offset, base, turns}
+        self.parse = parser or _parse_record
 
     def turns(self, path):
         with self.mu:
@@ -388,7 +389,7 @@ class _Cache:
                         # and no exception escapes with turns half-applied.
                         try:
                             rec = json.loads(line.decode("utf-8", "replace"))
-                            new = _parse_record(rec) if isinstance(rec, dict) \
+                            new = self.parse(rec) if isinstance(rec, dict) \
                                 else []
                         except Exception:
                             continue
@@ -407,24 +408,11 @@ class _Cache:
 _cache = _Cache()
 
 
-def turns_for(name, after=None, before=None, n=DEFAULT_N):
-    """The API response for /api/session/<name>. after=i -> turns newer
-    than absolute index i (polling). before=i -> the n turns just below i
-    (paging back). Neither -> the newest n."""
+def window(ent, after=None, before=None, n=DEFAULT_N):
+    """Slice a parsed cache entry into the API window. Shared by the Claude
+    and codex adapters so both page/poll identically. Returns
+    (out, total, truncated)."""
     n = max(1, min(int(n or DEFAULT_N), 500))
-    found = find_transcript(name)
-    if not found:
-        return {"ok": True, "live": False, "present": False, "turns": [],
-                "total": 0, "truncated": False}
-    path, sess = found
-    # Live means DELIVERABLE: process alive AND its socket file present —
-    # a pid with no socket queues mail like any sleeper and must say so.
-    live = (_pid_alive(sess.get("pid"))
-            and os.path.exists(sess.get("messagingSocketPath") or ""))
-    ent = _cache.turns(path)
-    if ent is None:
-        return {"ok": True, "live": False, "present": False, "turns": [],
-                "total": 0, "truncated": False}
     base, turns = ent["base"], ent["turns"]
     total = base + len(turns)
     if after is not None:
@@ -448,6 +436,32 @@ def turns_for(name, after=None, before=None, n=DEFAULT_N):
         if turns[i].get("to"):
             t["to"] = turns[i]["to"]
         out.append(t)
+    return out, total, truncated_flag(base)
+
+
+def truncated_flag(base):
+    return base > 0
+
+
+def turns_for(name, after=None, before=None, n=DEFAULT_N):
+    """The API response for /api/session/<name>. after=i -> turns newer
+    than absolute index i (polling). before=i -> the n turns just below i
+    (paging back). Neither -> the newest n."""
+    n = max(1, min(int(n or DEFAULT_N), 500))
+    found = find_transcript(name)
+    if not found:
+        return {"ok": True, "live": False, "present": False, "turns": [],
+                "total": 0, "truncated": False}
+    path, sess = found
+    # Live means DELIVERABLE: process alive AND its socket file present —
+    # a pid with no socket queues mail like any sleeper and must say so.
+    live = (_pid_alive(sess.get("pid"))
+            and os.path.exists(sess.get("messagingSocketPath") or ""))
+    ent = _cache.turns(path)
+    if ent is None:
+        return {"ok": True, "live": False, "present": False, "turns": [],
+                "total": 0, "truncated": False}
+    out, total, truncated = window(ent, after, before, n)
     return {"ok": True, "live": live, "present": True, "turns": out,
-            "total": total, "truncated": base > 0,
+            "total": total, "truncated": truncated,
             "sid": sess.get("sessionId") or ""}
