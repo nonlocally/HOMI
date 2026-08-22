@@ -115,6 +115,46 @@ s=a["surf"]["surface"]
 assert s["state"]=="dead", s
 ' && ok "a dead seat reports dead, not a stale handle" || bad "dead surface honesty"
 
+echo "== the seat relay: mail types into a bound non-claude seat"
+"$COMM" homi claim tester >/dev/null 2>&1
+"$COMM" homi claim relaybot >/dev/null 2>&1
+RSEAT="$("$COMM" homi seat spawn 'bash --norc --noprofile' --name relaytest 2>/dev/null)"
+sleep 1.2
+"$COMM" homi seat bind "$RSEAT" relaybot >/dev/null 2>&1
+"$COMM" homi send relaybot "hello from the mail plane" --from tester >/dev/null 2>&1
+typed=""
+for i in $(seq 1 12); do
+  tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -q "hello from the mail plane" && { typed=1; break; }
+  sleep 1
+done
+if [ -n "$typed" ]; then ok "mail typed into the bound seat"; else bad "seat relay typing"; fi
+cap="$(tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null)"
+if printf '%s' "$cap" | grep -q "from @tester"; then ok "typed mail carries attribution"
+else bad "typed attribution"; fi
+if printf '%s' "$cap" | grep -q "communicate homi send tester"; then ok "typed mail teaches the reply path"
+else bad "typed reply instruction"; fi
+sleep 3
+n="$(tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -c "hello from the mail plane")"
+if [ "$n" = "1" ]; then ok "cursor advanced: delivered once, never retyped"
+else bad "retype guard (copies=$n)"; fi
+
+echo "== a busy seat holds mail; idle delivers it"
+tmux -L "$TMUXSOCK" send-keys -t "$RSEAT" "sleep 30" Enter
+sleep 1.5
+"$COMM" homi send relaybot "while you were busy" --from tester >/dev/null 2>&1
+sleep 4
+if tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -q "while you were busy"; then
+  bad "typed into a BUSY seat"
+else ok "busy seat holds mail (never poked mid-stream)"; fi
+tmux -L "$TMUXSOCK" send-keys -t "$RSEAT" C-c
+held=""
+for i in $(seq 1 12); do
+  tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -q "while you were busy" && { held=1; break; }
+  sleep 1
+done
+if [ -n "$held" ]; then ok "held mail delivered once the seat went idle"
+else bad "held mail never delivered"; fi
+
 "$COMM" homi stop >/dev/null 2>&1
 echo
 echo "pass=$pass fail=$fail"

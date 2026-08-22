@@ -687,6 +687,10 @@ class Homi:
             if sess is None:
                 sess = self._choose_session(self._scan_sidecars().get(name) or [])
             if not sess:
+                # The seat relay: a surface that cannot be mailboxed (codex,
+                # a REPL) still has a KEYBOARD. If this identity is bound to
+                # a live local seat, deliver by typing.
+                self._deliver_via_seat(name, ent, lines, cur)
                 return
             to_sock = sess.get("messagingSocketPath")
             for i in range(cur, len(lines)):
@@ -2517,6 +2521,58 @@ class Homi:
         return {"ok": True, "ack": mid}
 
     @staticmethod
+    def _seat_wrap(obj, name):
+        """Mail rendered for a KEYBOARD surface: attribution up front, and —
+        unless the ask machinery already embedded a reply token — the generic
+        reply path, so any agent with a shell answers through the fabric
+        natively (no screen-scraping, ever)."""
+        frm = obj.get("from_name") or "unknown"
+        text = obj.get("text") or ""
+        out = "[homi mail from @%s] %s" % (frm, text)
+        if "communicate homi reply" not in text:
+            out += (' [reply by running: communicate homi send %s '
+                    '"<your reply>" --from %s]' % (frm, name))
+        return out
+
+    def _deliver_via_seat(self, name, ent, lines, cur):
+        """The mail↔seat last mile: type held mail into the identity's bound
+        seat. Only an IDLE pane is typed into — a busy agent is never poked
+        mid-stream; mail holds for the next tick. The cursor advances only
+        after a confirmed submit (at-least-once, same as the socket path).
+        Caller holds the per-name deliver lock."""
+        seat = ent.get("seat")
+        if not seat or not str(seat).startswith("%"):
+            return   # no seat, or a remote seat handle — not ours to type
+        try:
+            drv = self._seat_drv()
+            if drv.state(seat) != "idle":
+                return   # busy / booting / approval / dead: hold
+        except Exception:
+            return
+        typed = 0
+        for i in range(cur, len(lines)):
+            try:
+                obj = json.loads(lines[i])
+            except Exception:
+                obj = {"text": lines[i].strip()}
+            if not (obj.get("text") or "").strip():
+                with self.mail_mu:
+                    if i + 1 > self._read_cursor(name):
+                        self._write_cursor(name, i + 1)
+                continue
+            try:
+                drv.send(seat, self._seat_wrap(obj, name))
+            except Exception as e:
+                self.log("seat deliver to", name, "failed (hold):", e)
+                break
+            with self.mail_mu:
+                if i + 1 > self._read_cursor(name):
+                    self._write_cursor(name, i + 1)
+            typed += 1
+        if typed:
+            self.log("typed", typed, "message(s) into seat", seat, "for", name)
+
+    @staticmethod
     def _safe_sender(frm):
         """Sender names cross the link trust boundary attacker-controlled
         and historically unvalidated (the recipient is checked; the sender
@@ -3055,6 +3111,12 @@ class Homi:
                 except Exception as e:
                     self.log("drain failed:", name, e)
             else:
+                try:
+                    # No live session — but a bound seat can still take the
+                    # keyboard (the seat relay path inside _deliver_pending).
+                    self._deliver_pending(name)
+                except Exception as e:
+                    self.log("seat drain failed:", name, e)
                 try:
                     self._plant(name)
                 except Exception as e:
