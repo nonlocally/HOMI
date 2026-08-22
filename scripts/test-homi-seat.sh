@@ -115,45 +115,58 @@ s=a["surf"]["surface"]
 assert s["state"]=="dead", s
 ' && ok "a dead seat reports dead, not a stale handle" || bad "dead surface honesty"
 
-echo "== the seat relay: mail types into a bound non-claude seat"
+echo "== the seat relay: mail types into an AGENT seat, never a shell"
 "$COMM" homi claim tester >/dev/null 2>&1
 "$COMM" homi claim relaybot >/dev/null 2>&1
-RSEAT="$("$COMM" homi seat spawn 'bash --norc --noprofile' --name relaytest 2>/dev/null)"
-sleep 1.2
-"$COMM" homi seat bind "$RSEAT" relaybot >/dev/null 2>&1
+"$COMM" homi claim shellbot >/dev/null 2>&1
+# agent surface: a real node REPL (pane_current_command == node -> is_agent)
+ASEAT="$("$COMM" homi seat spawn 'node -e "process.stdin.resume()"' --name relayagent 2>/dev/null)"
+# non-agent surface: a bare shell
+BSEAT="$("$COMM" homi seat spawn 'bash --norc --noprofile' --name relayshell 2>/dev/null)"
+# an agent surface that is NOT idle (node -i shows the "Welcome to" banner ->
+# reads booting) — proves the state gate holds even on a real agent seat
+"$COMM" homi claim bootbot >/dev/null 2>&1
+CSEAT="$("$COMM" homi seat spawn 'node -i' --name relaybooting 2>/dev/null)"
+sleep 2
+"$COMM" homi seat bind "$ASEAT" relaybot >/dev/null 2>&1
+"$COMM" homi seat bind "$BSEAT" shellbot >/dev/null 2>&1
+"$COMM" homi seat bind "$CSEAT" bootbot >/dev/null 2>&1
+
+# CRITICAL: a shell seat must NEVER receive typed mail (mail-send is not
+# command execution). Send, wait past several ticks, assert absence.
+"$COMM" homi send shellbot "touch /tmp/homi-relay-should-never-run-$$" --from tester >/dev/null 2>&1
+sleep 6
+if [ -f "/tmp/homi-relay-should-never-run-$$" ]; then
+  bad "SHELL SEAT EXECUTED RELAYED MAIL (critical)"; rm -f "/tmp/homi-relay-should-never-run-$$"
+else ok "shell seat never typed into (mail-send stays mail-send)"; fi
+if tmux -L "$TMUXSOCK" capture-pane -t "$BSEAT" -p 2>/dev/null | grep -q "homi-relay-should-never-run"; then
+  bad "mail text reached the shell composer"
+else ok "shell seat held its mail (not an agent surface)"; fi
+
+# the agent seat DOES receive it, typed with attribution + reply path
 "$COMM" homi send relaybot "hello from the mail plane" --from tester >/dev/null 2>&1
 typed=""
 for i in $(seq 1 12); do
-  tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -q "hello from the mail plane" && { typed=1; break; }
+  tmux -L "$TMUXSOCK" capture-pane -t "$ASEAT" -p 2>/dev/null | grep -q "hello from the mail plane" && { typed=1; break; }
   sleep 1
 done
-if [ -n "$typed" ]; then ok "mail typed into the bound seat"; else bad "seat relay typing"; fi
-cap="$(tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null)"
+if [ -n "$typed" ]; then ok "mail typed into the bound AGENT seat"; else bad "agent seat relay typing"; fi
+cap="$(tmux -L "$TMUXSOCK" capture-pane -t "$ASEAT" -p 2>/dev/null)"
 if printf '%s' "$cap" | grep -q "from @tester"; then ok "typed mail carries attribution"
 else bad "typed attribution"; fi
 if printf '%s' "$cap" | grep -q "communicate homi send tester"; then ok "typed mail teaches the reply path"
 else bad "typed reply instruction"; fi
 sleep 3
-n="$(tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -c "hello from the mail plane")"
+n="$(tmux -L "$TMUXSOCK" capture-pane -t "$ASEAT" -p 2>/dev/null | grep -c "hello from the mail plane")"
 if [ "$n" = "1" ]; then ok "cursor advanced: delivered once, never retyped"
 else bad "retype guard (copies=$n)"; fi
 
-echo "== a busy seat holds mail; idle delivers it"
-tmux -L "$TMUXSOCK" send-keys -t "$RSEAT" "sleep 30" Enter
-sleep 1.5
-"$COMM" homi send relaybot "while you were busy" --from tester >/dev/null 2>&1
-sleep 4
-if tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -q "while you were busy"; then
-  bad "typed into a BUSY seat"
-else ok "busy seat holds mail (never poked mid-stream)"; fi
-tmux -L "$TMUXSOCK" send-keys -t "$RSEAT" C-c
-held=""
-for i in $(seq 1 12); do
-  tmux -L "$TMUXSOCK" capture-pane -t "$RSEAT" -p 2>/dev/null | grep -q "while you were busy" && { held=1; break; }
-  sleep 1
-done
-if [ -n "$held" ]; then ok "held mail delivered once the seat went idle"
-else bad "held mail never delivered"; fi
+"$COMM" homi send bootbot "should wait for idle" --from tester >/dev/null 2>&1
+sleep 5
+if tmux -L "$TMUXSOCK" capture-pane -t "$CSEAT" -p 2>/dev/null | grep -q "should wait for idle"; then
+  bad "typed into a non-idle AGENT seat (state gate bypassed)"
+else ok "agent seat that is not idle holds its mail (state gate)"; fi
+
 
 "$COMM" homi stop >/dev/null 2>&1
 echo

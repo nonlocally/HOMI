@@ -2545,6 +2545,12 @@ class Homi:
             return   # no seat, or a remote seat handle — not ours to type
         try:
             drv = self._seat_drv()
+            # Only AGENT surfaces (codex/claude/node): a prompt is safe — the
+            # agent's own autonomy governs it. Typing mail into a bare shell
+            # would silently promote mail-send into command execution, so a
+            # shell/REPL/transport seat holds its mail, exactly like a busy one.
+            if not drv.is_agent_seat(seat):
+                return
             if drv.state(seat) != "idle":
                 return   # busy / booting / approval / dead: hold
         except Exception:
@@ -2561,9 +2567,15 @@ class Homi:
                         self._write_cursor(name, i + 1)
                 continue
             try:
-                drv.send(seat, self._seat_wrap(obj, name))
+                res = drv.send(seat, self._seat_wrap(obj, name))
             except Exception as e:
                 self.log("seat deliver to", name, "failed (hold):", e)
+                break
+            if not (isinstance(res, dict) and res.get("ok")):
+                # Staged but not confirmed submitted (composer still holds it):
+                # hold the whole rest and retry next tick — never advance the
+                # cursor past mail we cannot prove landed.
+                self.log("seat submit unconfirmed for", name, "- holding")
                 break
             with self.mail_mu:
                 if i + 1 > self._read_cursor(name):
@@ -3111,12 +3123,14 @@ class Homi:
                 except Exception as e:
                     self.log("drain failed:", name, e)
             else:
-                try:
+                if (self.identities.get(name) or {}).get("seat"):
                     # No live session — but a bound seat can still take the
-                    # keyboard (the seat relay path inside _deliver_pending).
-                    self._deliver_pending(name)
-                except Exception as e:
-                    self.log("seat drain failed:", name, e)
+                    # keyboard. Backgrounded: the relay makes multi-second tmux
+                    # calls, and reconcile()'s per-name loop must not block on
+                    # one wedged pane (the per-name deliver lock still
+                    # serializes drains for this name).
+                    threading.Thread(target=self._safe_deliver,
+                                     args=(name,), daemon=True).start()
                 try:
                     self._plant(name)
                 except Exception as e:

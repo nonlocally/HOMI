@@ -130,6 +130,25 @@ class SeatDriver:
         return text
 
     # -- classifier: dead > approval > busy > booting > idle -------------------
+    @staticmethod
+    def _cmd_is_agent(cmd):
+        """An agent CLI treats typed input as a PROMPT (the agent's own
+        autonomy governs what it does with it); a shell/REPL/transport treats
+        it as a COMMAND. The seat relay types mail only into the former."""
+        return (cmd == "codex" or bool(_VERSION_CMD.match(cmd or ""))
+                or cmd in ("node", "claude"))
+
+    def is_agent_seat(self, seat):
+        """True only if the pane's foreground is an agent CLI. The mail→seat
+        relay gates on this: typing into a bare shell would turn mail-send
+        into command execution. A dead/unreachable pane is not an agent."""
+        if not self._pane_exists(seat):
+            return False
+        try:
+            return self._cmd_is_agent(self._field(seat, "#{pane_current_command}"))
+        except Exception:
+            return False
+
     def state(self, seat):
         if not self._pane_exists(seat):
             return "dead"
@@ -137,8 +156,7 @@ class SeatDriver:
         bottom = "\n".join(self._capture(seat, 14))
         if _PERM_ASK.search(bottom) and _AFFORD.search(bottom):
             return "approval"
-        is_agent = (cmd == "codex" or bool(_VERSION_CMD.match(cmd))
-                    or cmd in ("node", "claude"))
+        is_agent = self._cmd_is_agent(cmd)
         if _BUSY_HINT.search(bottom):
             return "busy"
         if is_agent:
