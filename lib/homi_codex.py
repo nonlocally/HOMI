@@ -28,6 +28,21 @@ def codex_home():
     return os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
 
 
+def _within_home(path):
+    """A resolved rollout MUST live under $CODEX_HOME. lsof reports every
+    rollout-named file a process holds open; without this a file named
+    rollout-*.jsonl anywhere else would be parsed and its content leaked as
+    a transcript (mirrors the Claude adapter's projects-dir containment)."""
+    if not path:
+        return False
+    try:
+        root = os.path.realpath(codex_home())
+        rp = os.path.realpath(path)
+        return rp == root or rp.startswith(root + os.sep)
+    except OSError:
+        return False
+
+
 def _iso(ts):
     if not isinstance(ts, str):
         return None
@@ -52,9 +67,15 @@ def _text_of(content):
     return ""
 
 
-_TOOL_KINDS = ("custom_tool_call", "function_call", "local_shell_call",
-               "shell_call", "tool_call", "exec_command")
+# Any codex response_item whose payload type ends in "_call" is a tool call
+# (custom_tool_call, function_call, local_shell_call, web_search_call,
+# tool_search_call, ...); the paired results end in "_output" and are dropped.
+# A suffix rule beats an enumerated list - it can't silently miss a new kind.
 _SHELLY = ("shell", "local_shell", "bash", "exec", "exec_command")
+
+
+def _is_tool(pt):
+    return isinstance(pt, str) and pt.endswith("_call")
 
 
 def _tool_line(p):
@@ -101,7 +122,7 @@ def _parse_record(rec):
         if not text:
             return []
         return [{"role": role, "ts": ts, "text": text}]
-    if pt in _TOOL_KINDS:
+    if _is_tool(pt):
         return [{"role": "tool", "ts": ts, "text": _tool_line(p)}]
     return []   # reasoning, *_output, and anything else: plumbing
 
@@ -131,16 +152,29 @@ def _session_meta(path):
     return (None, None, None)
 
 
+def _norm(pth):
+    if not pth:
+        return ""
+    try:
+        return os.path.realpath(pth)
+    except OSError:
+        return pth.rstrip("/")
+
+
 def _pick_main(cands, cwd):
     """The pane's MAIN session among the rollouts its codex process holds
     open. cands = [(path, start_ts, cwd)]. Prefer the earliest-started one
-    whose cwd matches the pane's; sub-agents spawn later. Falls back to the
-    earliest overall if none match the cwd."""
+    whose cwd matches the pane's (normalized, so a worktree vs trailing-slash
+    difference doesn't miss it); sub-agents spawn later. Ties (or all-unknown
+    starts) break on path so the choice is deterministic, never
+    enumeration-order dependent."""
     if not cands:
         return None
-    same = [c for c in cands if cwd and c[2] == cwd]
+    ncwd = _norm(cwd)
+    same = [c for c in cands if ncwd and _norm(c[2]) == ncwd]
     pool = same or cands
-    pool = sorted(pool, key=lambda c: (c[1] if c[1] is not None else 1e18))
+    pool = sorted(pool, key=lambda c: (c[1] if c[1] is not None else 1e18,
+                                       c[0]))
     return pool[0][0]
 
 
@@ -180,7 +214,8 @@ def _open_rollouts(pid):
         if i < 0:
             continue
         path = line[i:].strip()
-        if "rollout-" in path and path.endswith(".jsonl"):
+        if ("rollout-" in path and path.endswith(".jsonl")
+                and _within_home(path)):
             paths.append(path)
     return paths
 
@@ -236,15 +271,18 @@ def turns_for(seat, after=None, before=None, n=None, _rollout=False):
     return shape. `_rollout` is a test/override seam: False resolves via
     lsof; None forces the no-rollout path; a path uses it directly."""
     path = rollout_for_seat(seat) if _rollout is False else _rollout
-    if not path:
-        return {"ok": True, "live": False, "present": False, "turns": [],
-                "total": 0, "truncated": False}
+    empty = {"ok": True, "live": False, "present": False, "turns": [],
+             "total": 0, "truncated": False}
+    if not path or not _within_home(path):
+        return empty   # no rollout, or one outside $CODEX_HOME: never parse it
     ent = _cache.turns(path)
     if ent is None:
-        return {"ok": True, "live": False, "present": False, "turns": [],
-                "total": 0, "truncated": False}
+        return empty
     sid, _cwd, _start = _session_meta(path)
     out, total, truncated = _ht.window(ent, after, before,
                                        n or _ht.DEFAULT_N)
-    return {"ok": True, "live": True, "present": True, "turns": out,
+    # live is measured every call (not trusted from the resolver cache): the
+    # codex agent is live only while its pane still exists.
+    live = bool(_pane_pid(seat))
+    return {"ok": True, "live": live, "present": True, "turns": out,
             "total": total, "truncated": truncated, "sid": sid or ""}
