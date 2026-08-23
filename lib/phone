@@ -76,13 +76,51 @@ def is_url(s):
     return "://" in s or s.startswith("www.")
 
 
+_PKGS = None
+
+
+def installed_packages():
+    """Every third-party package on the device, cached per process."""
+    global _PKGS
+    if _PKGS is None:
+        rc, out = dev_shell("pm list packages -3", timeout=40)
+        _PKGS = sorted(l.replace("package:", "").strip()
+                       for l in (out or "").splitlines() if l.strip()) \
+            if rc == 0 else []
+    return _PKGS
+
+
 def pkg_of(name):
+    """Resolve a friendly name to a package that is ACTUALLY on this device.
+
+    The hardcoded table was written from habit, not from the phone: it mapped
+    whatsapp/gmail/slack (none installed here) and knew nothing about Keep or
+    Docs (both installed). So `open keep` failed while `open whatsapp`
+    pretended to work. The table is now only a set of aliases — the device's
+    own package list is the authority.
+    """
     if not name:
         return None
     n = name.strip().lower()
-    if n in APPS:
-        return APPS[n]
-    return name if "." in name else None
+    if "." in name:
+        return name
+    pkgs = installed_packages()
+    if not pkgs:                       # no shell — fall back to the aliases
+        return APPS.get(n)
+    alias = APPS.get(n)
+    if alias and alias in pkgs:
+        return alias
+    # last path segment match: com.google.android.keep -> "keep"
+    exact = [p for p in pkgs if p.rsplit(".", 1)[-1].lower() == n]
+    if len(exact) == 1:
+        return exact[0]
+    hits = [p for p in pkgs if n in p.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        # prefer the shortest — com.google.android.keep over ...keep.something
+        return sorted(hits, key=len)[0]
+    return None
 
 
 def die(msg, code=2):
@@ -827,9 +865,12 @@ def cmd_notify(args):
 
 def cmd_tap(args):
     need_shell()
-    dev_shell("input tap %d %d" % (args.x, args.y))
-    record("tap", "%d,%d" % (args.x, args.y), "act")
-    return 0
+    rc, _ = dev_shell("input tap %d %d" % (args.x, args.y))
+    # `input tap` exits 0 whether or not anything handled the event, so the
+    # record says what we actually know: it was dispatched.
+    record("tap", "%d,%d" % (args.x, args.y), "act",
+           "dispatched" if rc == 0 else "failed")
+    return 0 if rc == 0 else 1
 
 
 def cmd_type(args):
@@ -866,9 +907,9 @@ def cmd_key(args):
         k = "KEYCODE_" + k
     if not re.match(r"^KEYCODE_[A-Z0-9_]+$", k):
         die("bad keycode %r" % args.key, 2)
-    dev_shell("input keyevent %s" % k)
-    record("key", k, "act")
-    return 0
+    rc, _ = dev_shell("input keyevent %s" % k)
+    record("key", k, "act", "dispatched" if rc == 0 else "failed")
+    return 0 if rc == 0 else 1
 
 
 def launch(url, print_only=False):
@@ -903,9 +944,31 @@ def cmd_open(args):
     if p and have_shell():
         if args.print_url:
             die("%r launches as an app, not a link" % target, 2)
-        dev_shell("monkey -p %s -c android.intent.category.LAUNCHER 1" % p,
-                  timeout=30)
-        record("open", target, "act")
+        # Resolve first. `monkey` prints "No activities found to run" for an
+        # uninstalled package and still exits 0, so `open whatsapp` reported
+        # success on a phone with no WhatsApp — the most common first step of
+        # any task, lying. (monkey also injects a random event, which is
+        # reason enough to drop it.)
+        rc, out = dev_shell(
+            "cmd package resolve-activity --brief -c "
+            "android.intent.category.LAUNCHER %s | tail -1" % p, timeout=30)
+        comp = (out or "").strip().splitlines()[-1].strip() if out else ""
+        if rc != 0 or "/" not in comp:
+            record("open", target, "act", "failed: not installed")
+            die("%s is not installed on this device" % target, 4)
+        dev_shell("am start -n %s" % comp, timeout=30)
+        # Verify it actually came forward rather than assuming.
+        landed = False
+        for _ in range(8):
+            time.sleep(0.5)
+            _rc, fg = dev_shell("dumpsys activity activities | grep -m1 "
+                                "ResumedActivity", timeout=20)
+            if p in (fg or ""):
+                landed = True
+                break
+        record("open", target, "act", "opened" if landed else "did not open")
+        if not landed:
+            die("%s did not come to the foreground" % target, 4)
         return 0
     if key in LINKS:
         rc = launch(LINKS[key].replace("{q}", ""), args.print_url)
@@ -913,7 +976,12 @@ def cmd_open(args):
             record("open", target, "act", "via link")
         return rc
     if not p:
-        die("unknown app %r (known: %s)" % (target, ", ".join(sorted(APPS))), 2)
+        pkgs = installed_packages()
+        if pkgs:
+            near = [x.rsplit(".", 1)[-1] for x in pkgs][:14]
+            die("no app matching %r on this device. installed: %s"
+                % (target, ", ".join(sorted(set(near)))), 4)
+        die("unknown app %r and no device shell to check against" % target, 3)
     die("cannot launch %r: no device shell (start Shizuku)" % target, 3)
 
 
@@ -960,13 +1028,12 @@ def cmd_msg(args):
         return rc
 
     # --send needs to TOUCH the screen, which only the adb tier can do.
-    if os.environ.get("PHONE_NO_DEVICE") or not shutil.which("adb") \
-            or not adb_ready():
+    if not have_shell():
         record("msg", {"app": app, "to": num, "text": args.text,
-                       "sent": False}, "act", "failed: no adb")
-        die("cannot send: adb is down, so the send button cannot be pressed. "
-            "Run `adb-heal`. (Refusing to report a send that did not happen.)",
-            3)
+                       "sent": False}, "act", "failed: no device shell")
+        die("cannot send: no device shell, so the send button cannot be "
+            "pressed. Start Shizuku. (Refusing to report a send that did not "
+            "happen.)", 3)
     launch(url, False)
     import time as _t
     deadline = _t.time() + 25
@@ -1035,9 +1102,10 @@ def cmd_media(args):
     keys = {"pause": "KEYCODE_MEDIA_PAUSE", "play": "KEYCODE_MEDIA_PLAY",
             "next": "KEYCODE_MEDIA_NEXT", "prev": "KEYCODE_MEDIA_PREVIOUS",
             "stop": "KEYCODE_MEDIA_STOP"}
-    dev_shell("input keyevent %s" % keys[args.action])
-    record("media", args.action, "act")
-    return 0
+    rc, _ = dev_shell("input keyevent %s" % keys[args.action])
+    record("media", args.action, "act",
+           "dispatched" if rc == 0 else "failed")
+    return 0 if rc == 0 else 1
 
 
 def cmd_screen(args):

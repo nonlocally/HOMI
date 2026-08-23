@@ -336,9 +336,26 @@ if grep -q "def have_rish" "$HERE/lib/phone" && grep -q "def dev_shell" "$HERE/l
 else bad "no dev_shell/have_rish abstraction"; fi
 
 # every place that used to hard-require adb must now accept either tier
-if ! grep -nE "^\s+need_adb\(\)" "$HERE/lib/phone" | grep -q .; then
-  ok "no verb hard-requires adb any more"
-else bad "still calling need_adb(): $(grep -nE '^\s+need_adb\(\)' "$HERE/lib/phone" | head -3)"; fi
+# Grep for adb_ready()/need_adb() OUTSIDE the functions allowed to fall back
+# to adb. The old assertion looked only for need_adb() and passed vacuously
+# while cmd_msg spelled the same check out inline — a test weaker than its
+# own headline, which is how the contradiction survived.
+stray="$(python3 -c "
+import re
+src = open('$HERE/lib/phone').read()
+allowed = ('dev_shell', 'have_shell', '_probe_shell', 'cmd_screen', 'launch',
+           'adb', 'adb_ready', 'need_adb')
+bad = []
+for m in re.finditer(r'^def (\w+)\(.*?(?=^def |\Z)', src, re.S|re.M):
+    name, body = m.group(1), m.group(0)
+    if name in allowed:
+        continue
+    if 'adb_ready(' in body or 'need_adb()' in body:
+        bad.append(name)
+print(' '.join(bad))
+")"
+if [ -z "$stray" ]; then ok "no verb hard-requires adb any more"
+else bad "verbs still requiring adb directly:$stray"; fi
 
 out="$(PHONE_NO_DEVICE=1 "$PHONE" tap 10 10 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "shizuku"; then
