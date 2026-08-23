@@ -78,12 +78,16 @@ def parse_facts(out):
         if k.isupper() and k.replace("_", "").isalnum():
             kv[k] = v.strip()
     owner, uid = kv.get("CCOWNER", ""), kv.get("UID_", "")
+    import re as _re
+    ip = kv.get("SSHIP", "")
+    if not _re.match(r"[0-9A-Fa-f:.]+\Z", ip):
+        ip = ""   # an address, or nothing — never shell metacharacters
     return {
         "os": kv.get("OS", ""),
         "home": kv.get("HOMEDIR", ""),
         "login_shell": kv.get("SHELL_", ""),
         "xdg": kv.get("XDG", ""),
-        "ssh_ip": kv.get("SSHIP", ""),
+        "ssh_ip": ip,
         "cc_collision": bool(owner) and bool(uid) and owner != uid,
         "own_key": kv.get("OWNKEY") == "1",
         "py3": kv.get("PY3") == "1",
@@ -96,6 +100,28 @@ def parse_facts(out):
 
 
 # ----------------------------------------------------------------- plan
+
+def parse_args(argv):
+    """(addr, spawn_name, error) — strict: exactly one positional, --spawn
+    requires a value, anything else is an error (a typo must never silently
+    retarget another device)."""
+    addr = spawn = None
+    it = iter(argv)
+    for a in it:
+        if a == "--spawn":
+            spawn = next(it, None)
+            if not spawn or spawn.startswith("-"):
+                return None, None, "--spawn requires an agent name"
+        elif a.startswith("-"):
+            return None, None, "unknown flag %r" % a
+        elif addr is None:
+            addr = a
+        else:
+            return None, None, "unexpected extra argument %r" % a
+    if not addr:
+        return None, None, "usage: homi adopt <user@host> [--spawn <name>]"
+    return addr, spawn, None
+
 
 def _profile_files(login_shell):
     sh = os.path.basename(login_shell or "")
@@ -125,14 +151,15 @@ def plan(facts, local):
                 "SSH_CONNECTION — on the device, make `ssh %s` work "
                 "(alias or DNS), then re-run adopt" % local.get("my_addr"))
 
-    if facts.get("os") == "Darwin" and not facts.get("xdg"):
-        # No systemd runtime dirs on macOS: provision before the first
-        # collision, not after live delivery silently dies.
+    provisioned_rt = False
+    if not facts.get("xdg"):
+        # No runtime dir in the probe env (macOS always; Termux): provision
+        # before the first collision, not after live delivery silently dies.
         acts.append({"step": "runtime_dir",
-                     "profiles": _profile_files(facts.get("login_shell"))})
-    elif facts.get("os") != "Darwin" and not facts.get("xdg"):
-        acts.append({"step": "runtime_dir",
-                     "profiles": _profile_files(facts.get("login_shell"))})
+                     "profiles": _profile_files(facts.get("login_shell")),
+                     "reason": ("collision" if facts.get("cc_collision")
+                                else "preemptive")})
+        provisioned_rt = True
 
     if not facts.get("shim"):
         acts.append({"step": "shim"})
@@ -147,16 +174,32 @@ def plan(facts, local):
         acts.append({"step": "install_claude"})
 
     far, mine = facts.get("kernel_hash"), local.get("kernel_hash")
+    need_restart = False
     if far and mine and far != mine:
         # A staged-but-stale kernel: refresh bytes AND restart the daemon
         # that loaded the old ones. An ABSENT kernel is pair's own step.
         acts.append({"step": "kernel_refresh"})
-        acts.append({"step": "restart_daemon"})
+        need_restart = True
+    if provisioned_rt:
+        # The daemon must resolve the SAME cc-socks dir claude will use —
+        # a daemon without the env delivers into /tmp/cc-socks while claude
+        # listens in ~/.local/run/cc-socks (the split-brain, proven live).
+        need_restart = True
+    if need_restart:
+        acts.append({"step": "restart_daemon"})   # always LAST: post-pair
 
     return acts, checklist
 
 
 # ------------------------------------------------------------ executors
+
+def runtime_profile_lines():
+    """Profile text for the per-user runtime dir. ${XDG_RUNTIME_DIR:-...}
+    preserves a systemd-provided value — never shadow the real one."""
+    return ('export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/run}"\n'
+            '[ -d "$XDG_RUNTIME_DIR" ] || mkdir -p "$XDG_RUNTIME_DIR"\n'
+            'chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null\n')
+
 
 def settings_file_cmd():
     """Shell line writing ~/.homi-settings.json — printf-encoded so the
@@ -204,22 +247,38 @@ def _local_kernel_hash(here_dir):
     return h.hexdigest()
 
 
+_PUBKEY_RE = None
+
+
 def _authorize_here(pubkey, tag):
-    """Append a far device's pubkey to ~/.ssh/authorized_keys, deduped on
-    the key material itself."""
-    pubkey = (pubkey or "").strip()
-    if not pubkey.startswith("ssh-"):
+    """Append a far device's pubkey to ~/.ssh/authorized_keys. The fetch
+    output is UNTRUSTED (a compromised device could answer anything): only
+    the FIRST line is considered, it must be exactly `type material
+    [comment]` with a plausible key type and base64 material — never an
+    options prefix, never extra lines. Deduped on the exact material token.
+    Exactly one clean line is ever written; anything else returns False."""
+    import re as _re
+    global _PUBKEY_RE
+    if _PUBKEY_RE is None:
+        _PUBKEY_RE = _re.compile(
+            r"(ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-[a-z0-9-]+|"
+            r"sk-[a-z0-9@.-]+)\s+([A-Za-z0-9+/=]{16,})(?:\s+\S.*)?\Z")
+    stripped = (pubkey or "").strip()
+    first = stripped.splitlines()[0].strip() if stripped else ""
+    m = _PUBKEY_RE.match(first)
+    if not m:
         return False
-    material = pubkey.split()[1] if len(pubkey.split()) > 1 else ""
+    ktype, material = m.group(1), m.group(2)
     ak = os.path.expanduser("~/.ssh/authorized_keys")
     try:
-        existing = open(ak).read()
+        lines = open(ak).read().splitlines()
     except OSError:
-        existing = ""
-    if material and material in existing:
-        return True
+        lines = []
+    for line in lines:
+        if material in line.split():
+            return True
     with open(ak, "a") as f:
-        f.write("%s %s %s\n" % (pubkey.split()[0], material, tag))
+        f.write("%s %s %s\n" % (ktype, material, tag))
     os.chmod(ak, 0o600)
     return True
 
@@ -252,24 +311,26 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
             say("  provision: dial alias    %s -> %s (%s)"
                 % (host, a["ip"], "verified" if rc == 0 else "NOT VERIFIED"))
         elif step == "runtime_dir":
-            lines = ("export XDG_RUNTIME_DIR=\\\"\\$HOME/.local/run\\\"\\n"
-                     "[ -d \\\"\\$XDG_RUNTIME_DIR\\\" ] || "
-                     "mkdir -p \\\"\\$XDG_RUNTIME_DIR\\\"\\n"
-                     "chmod 700 \\\"\\$XDG_RUNTIME_DIR\\\" 2>/dev/null\\n")
+            payload = runtime_profile_lines().replace("\n", "\\n")
+            rcs = []
             for prof in a["profiles"]:
-                ssh(addr, "grep -q XDG_RUNTIME_DIR %s 2>/dev/null || "
-                          "printf \"%s\" >> %s" % (prof, lines, prof))
-            ssh(addr, "mkdir -p ~/.local/run && chmod 700 ~/.local/run")
-            say("  provision: runtime dir   ~/.local/run (%s)"
-                % ", ".join(a["profiles"]))
+                rc, _ = ssh(addr, "grep -q XDG_RUNTIME_DIR %s 2>/dev/null || "
+                            "printf '%s' >> %s" % (prof, payload, prof))
+                rcs.append(rc)
+            rc2, _ = ssh(addr, "mkdir -p ~/.local/run && chmod 700 ~/.local/run")
+            rcs.append(rc2)
+            ok = all(r == 0 for r in rcs)
+            say("  provision: runtime dir   %s (%s)"
+                % ("~/.local/run" if ok else "FAILED", ", ".join(a["profiles"])))
         elif step == "shim":
-            ssh(addr, "mkdir -p ~/.local/bin; "
-                      "printf '#!/bin/sh\\n[ \"$1\" = homi ] && shift\\n"
-                      "exec python3 \"$HOME/.local/share/homi/daemon/current/"
-                      "homi.py\" call \"$@\"\\n' > ~/.local/bin/communicate; "
-                      "chmod +x ~/.local/bin/communicate; "
-                      "ln -sf ~/.local/bin/communicate ~/.local/bin/homi")
-            say("  provision: CLI shim      ~/.local/bin/{communicate,homi}")
+            rc, _ = ssh(addr, "mkdir -p ~/.local/bin; "
+                        "printf '#!/bin/sh\\n[ \"$1\" = homi ] && shift\\n"
+                        "exec python3 \"$HOME/.local/share/homi/daemon/current/"
+                        "homi.py\" call \"$@\"\\n' > ~/.local/bin/communicate; "
+                        "chmod +x ~/.local/bin/communicate; "
+                        "ln -sf ~/.local/bin/communicate ~/.local/bin/homi")
+            say("  provision: CLI shim      %s"
+                % ("~/.local/bin/{communicate,homi}" if rc == 0 else "FAILED"))
         elif step == "install_tmux_static":
             rc, _ = ssh(addr, "mkdir -p ~/.local/bin && curl -fsSL -o /tmp/tmux.gz "
                         "https://github.com/mjakob-gh/build-static-tmux/releases/"
@@ -295,11 +356,22 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
                 % ("refreshed (hash mismatch)" if r.returncode == 0
                    else "REFRESH FAILED"))
         elif step == "restart_daemon":
-            ssh(addr, "pkill -f 'homi.py daemon' 2>/dev/null; sleep 1; "
-                      "nohup python3 ~/.local/share/homi/daemon/current/homi.py "
-                      "daemon >> ~/.local/state/communicate/homi/daemon.log "
-                      "2>&1 & sleep 2; pgrep -f 'homi.py daemon' | head -1")
-            say("  provision: daemon        restarted on the new kernel")
+            # macOS non-interactive ssh sources no profile, so bake the
+            # runtime dir into the command itself — otherwise the daemon
+            # resolves /tmp/cc-socks while claude (launched WITH the export)
+            # listens in ~/.local/run/cc-socks: the split-brain, proven live.
+            env = ('XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/run}" '
+                   if facts.get("os") == "Darwin" else "")
+            rc, out = ssh(addr,
+                          "pkill -f 'homi.py daemon' 2>/dev/null; sleep 1; "
+                          "%snohup python3 "
+                          "~/.local/share/homi/daemon/current/homi.py daemon "
+                          ">> ~/.local/state/communicate/homi/daemon.log 2>&1 "
+                          "& sleep 2; pgrep -f 'homi.py daemon' | head -1"
+                          % env)
+            say("  provision: daemon        %s"
+                % ("restarted on the new kernel" if (rc == 0 and out.strip())
+                   else "RESTART UNCONFIRMED"))
 
 
 def spawn(addr, name, facts, fardev, ssh=_run_ssh, say=print, ask=None):

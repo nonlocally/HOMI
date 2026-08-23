@@ -176,6 +176,99 @@ r="$(grep -c 'op == "adopt"' "$HERE/lib/homi.py")"
 if [ "$r" -ge 1 ]; then ok "adopt op wired into the CLI"
 else bad "cli wiring (got: $r)"; fi
 
+echo "== C2: arg parsing is strict — extras error, bare --spawn errors, order-free"
+r="$(PY "
+print(ha.parse_args(['u@h']),
+      ha.parse_args(['--spawn','lathe','u@h'])[:2],
+      ha.parse_args(['u@h','oops'])[2] is not None,
+      ha.parse_args(['u@h','--spawn'])[2] is not None,
+      ha.parse_args([])[2] is not None)")"
+if [ "$r" = "('u@h', None, None) ('u@h', 'lathe') True True True" ]; then
+  ok "one addr only; trailing junk and bare --spawn are errors, not silent"
+else bad "arg parsing (got: $r)"; fi
+
+echo "== I1/M1: hostile pubkey fetch never corrupts authorized_keys"
+r="$(PY "
+import tempfile, os
+d = tempfile.mkdtemp(); os.environ['HOME'] = d; os.makedirs(d + '/.ssh')
+ak = d + '/.ssh/authorized_keys'
+bad1 = ha._authorize_here('ssh-', 't')                      # truncated
+bad2 = ha._authorize_here('command=\"evil\" ssh-ed25519 AAAA x', 't')
+bad3 = ha._authorize_here('ssh-ed25519 AAAAgood x\nssh-ed25519 AAAAevil y', 't')
+content = open(ak).read() if os.path.exists(ak) else ''
+ok1 = ha._authorize_here('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample0 dev', 't')
+again = ha._authorize_here('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample0 dev', 't')
+lines = [l for l in open(ak).read().splitlines() if l.strip()]
+print(bad1, bad2, bad3, 'evil' in content, ok1, again, len(lines))")"
+if [ "$r" = "False False False False True True 1" ]; then
+  ok "truncated/option-prefixed/multiline keys refused; one clean line, deduped"
+else bad "authorize hostile (got: $r)"; fi
+
+echo "== I2: execute() reports FAILED honestly when the far ssh fails"
+r="$(PY "
+said = []
+def deadssh(addr, cmd, timeout=60): return (1, 'boom')
+acts = [{'step':'runtime_dir','profiles':['~/.zshenv']},{'step':'shim'},
+        {'step':'restart_daemon'}]
+f = dict(os='Darwin', home='/Users/a')
+ha.execute('u@h', acts, f, dict(my_addr='a@m', here_dir='/tmp'),
+           ssh=deadssh, say=said.append)
+print(sum(('FAILED' in l or 'UNCONFIRMED' in l) for l in said), len(said))")"
+if [ "$r" = "3 3" ]; then ok "every failed step says FAILED — no false success lines"
+else bad "execute honesty (got: $r)"; fi
+
+echo "== C1: restart_daemon carries the runtime dir INLINE on darwin (no profile trust)"
+r="$(PY "
+seen = []
+def okssh(addr, cmd, timeout=60): seen.append(cmd); return (0, '42')
+ha.execute('u@h', [{'step':'restart_daemon'}], dict(os='Darwin'),
+           dict(my_addr='a@m', here_dir='/tmp'), ssh=okssh, say=lambda s: None)
+darwin = 'XDG_RUNTIME_DIR' in seen[0]
+seen2 = []
+def okssh2(addr, cmd, timeout=60): seen2.append(cmd); return (0, '42')
+ha.execute('u@h', [{'step':'restart_daemon'}], dict(os='Linux'),
+           dict(my_addr='a@m', here_dir='/tmp'), ssh=okssh2, say=lambda s: None)
+print(darwin, 'XDG_RUNTIME_DIR' not in seen2[0])")"
+if [ "$r" = "True True" ]; then
+  ok "darwin daemon restarts WITH the env claude uses; linux trusts systemd"
+else bad "restart env (got: $r)"; fi
+
+echo "== C1: plan() restarts the daemon whenever the runtime dir was provisioned on darwin"
+r="$(PY "
+f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
+         ssh_ip='10.0.0.9', cc_collision=False, own_key=True, reverse_ok=True,
+         shim=True, tmux_bin='/x/tmux', claude_bin='/x/claude',
+         kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m'))
+steps = [a['step'] for a in acts]
+print('restart_daemon' in steps, steps[-1] if steps else '-')")"
+if [ "$r" = "True restart_daemon" ]; then
+  ok "runtime-dir provisioning implies a daemon restart, ordered last (post-pair)"
+else bad "plan restart coupling (got: $r)"; fi
+
+echo "== I4: kernel hashes are per-file name-tagged — a missing file can't mask"
+r="$(PY "
+import tempfile, os
+a = tempfile.mkdtemp(); b = tempfile.mkdtemp()
+for d in (a, b):
+    for fn in ha.KERNEL_FILES:
+        open(os.path.join(d, fn), 'w').write('same')
+os.remove(os.path.join(b, ha.KERNEL_FILES[0]))
+print(ha._local_kernel_hash(a) != ha._local_kernel_hash(b),
+      ha._local_kernel_hash(a) == ha._local_kernel_hash(a))")"
+if [ "$r" = "True True" ]; then ok "presence is part of the hash; equal trees still equal"
+else bad "kernel hash presence (got: $r)"; fi
+
+echo "== I5/M2: profile export preserves a systemd value; junk ssh_ip is rejected"
+r="$(PY "
+line = ha.runtime_profile_lines()
+f = ha.parse_facts('SSHIP=1.2.3.4\n')
+g = ha.parse_facts('SSHIP=1.2.3.4\'\ninjected\n')
+print(':-' in line, f['ssh_ip'], g['ssh_ip'] == '')")"
+if [ "$r" = "True 1.2.3.4 True" ]; then
+  ok "\${XDG_RUNTIME_DIR:-...} guard; ssh_ip must be address-shaped"
+else bad "profile guard / ip validation (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
