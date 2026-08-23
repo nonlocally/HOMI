@@ -48,6 +48,44 @@ if [ "$(printf '%s' "$r" | head -1)" = "True True True" ] && \
   ok "read/touch verbs allowed; msg and voice are NOT exposed over HTTP"
 else bad "verb allowlist (got: $r)"; fi
 
+echo "== a value containing a space cannot become a NEW REMOTE FLAG"
+# The bug this catches: ssh joins its trailing argv with spaces into ONE
+# string and the REMOTE shell re-splits it. Local list-form argv proves
+# nothing about the far side. A value like "5 --from /etc/passwd" therefore
+# arrived on the phone as a separate --from flag, turning a read-only verb
+# into arbitrary file read over HTTP. The remote command must be ONE
+# pre-quoted argument.
+r="$(py "
+import homi_device as d, shlex
+argv = d.build('aadarshs-pixel-10', 'notifs', ['--limit', '5 --from /etc/passwd'])
+# everything after the destination must be exactly ONE element
+remote = argv[-1]
+print('single-remote-arg', argv.count(remote) == 1 and ' ' in remote)
+# and re-splitting it the way a remote shell would must NOT yield a bare --from
+words = shlex.split(remote)
+print('no-injected-flag', '--from' not in words[2:] or words.count('--from') == 0)
+print('value-intact', '5 --from /etc/passwd' in words)
+")"
+if [ "$(printf '%s' "$r" | sed -n 1p)" = "single-remote-arg True" ] && \
+   [ "$(printf '%s' "$r" | sed -n 2p)" = "no-injected-flag True" ] && \
+   [ "$(printf '%s' "$r" | sed -n 3p)" = "value-intact True" ]; then
+  ok "a spaced value stays ONE argument through ssh (no flag smuggling)"
+else bad "REMOTE ARG BOUNDARY (got: $r)"; fi
+
+echo "== shell metacharacters in a value cannot reach the remote shell"
+r="$(py "
+import homi_device as d, shlex
+try:
+    argv = d.build('aadarshs-pixel-10', 'notifs', ['--app', 'x\$(id)\`id\`;id'])
+    w = shlex.split(argv[-1])
+    print('contained', w[-1] == 'x\$(id)\`id\`;id' or 'x' in w[-1])
+except ValueError:
+    print('contained refused')
+")"
+if printf '%s' "$r" | grep -qE "contained (True|refused)"; then
+  ok "metacharacters are quoted or refused, never re-parsed remotely"
+else bad "remote metacharacter handling (got: $r)"; fi
+
 echo "== the ssh command is built as ARGUMENTS, never a shell string"
 r="$(py "
 import homi_device as d
@@ -101,7 +139,8 @@ echo "== \"-\" is the stdout convention, not a rogue option"
 r="$(py "
 import homi_device as d
 argv = d.build('aadarshs-pixel-10', 'screen', ['--out', '-'])
-print(argv[-1] == '-')
+import shlex
+print(shlex.split(argv[-1])[-1] == '-')
 try:
     d.build('aadarshs-pixel-10', 'screen', ['--out', '-x; id'])
     print('LEAK')

@@ -307,6 +307,26 @@ if printf '%s' "$out" | grep -q -- "--persisted true"; then
   ok "the job is persisted, so it survives a reboot too"
 else bad "watchdog not persisted (got: $out)"; fi
 
+echo "== the ledger's integrity claim must hold for EVERY sensitive verb"
+# The claim in lib/phone is that an agent cannot act on the phone without
+# leaving a trace. That was false: camera capture, GPS, clipboard, mic and
+# key-events all recorded nothing — and `where` (location) was listed in the
+# policy comment as a logged read while its own function never called record().
+missing="$(python3 -c "
+import re
+src = open('$HERE/lib/phone').read()
+bad = []
+for v in ('cmd_key','cmd_open','cmd_media','cmd_photo','cmd_notify',
+          'cmd_clip','cmd_listen','cmd_where','cmd_tap','cmd_type','cmd_say'):
+    m = re.search(r'^def %s\(.*?(?=^def |\Z)' % v, src, re.S|re.M)
+    if not m or 'record(' not in m.group(0):
+        bad.append(v)
+print(' '.join(bad))
+")"
+if [ -z "$missing" ]; then
+  ok "every sensitive verb records (camera, gps, clipboard, mic, keys, launches)"
+else bad "verbs act with NO ledger entry:$missing"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

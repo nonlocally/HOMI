@@ -396,6 +396,9 @@ def cmd_listen(args):
     need_termux()
     rc, out = termux("termux-speech-to-text", timeout=args.timeout)
     text = (out or "").strip()
+    # The microphone captured someone's voice; that is a personal read
+    # whether or not anything was recognised.
+    record("listen", {"heard": bool(text)}, "read")
     if not text:
         sys.stderr.write("phone: heard nothing\n")
         return 1
@@ -406,6 +409,7 @@ def cmd_listen(args):
 def cmd_notify(args):
     rc, _ = termux("termux-notification", "--title", args.title,
                    "--content", args.content, "--id", str(args.id))
+    record("notify", args.title, "act")
     return 0 if rc == 0 else 1
 
 
@@ -436,6 +440,7 @@ def cmd_key(args):
     if not re.match(r"^KEYCODE_[A-Z0-9_]+$", k):
         die("bad keycode %r" % args.key, 2)
     adb("shell", "input keyevent %s" % k)
+    record("key", k, "act")
     return 0
 
 
@@ -474,6 +479,7 @@ def cmd_open(args):
     need_adb()
     adb("shell", "monkey -p %s -c android.intent.category.LAUNCHER 1" % p,
         timeout=30)
+    record("open", target, "act")
     return 0
 
 
@@ -530,6 +536,22 @@ def cmd_msg(args):
     launch(url, False)
     import time as _t
     deadline = _t.time() + 25
+    # Only ever press send while WhatsApp is actually in front. The
+    # content-desc fallback below ("Send") is not namespaced to any app, so
+    # without this a stray overlay, another chat app, or a share sheet could
+    # supply the button we tap.
+    fg_ok = False
+    while _t.time() < deadline and not fg_ok:
+        rc, out = adb("shell", "dumpsys activity activities", timeout=30)
+        if "com.whatsapp" in (out or ""):
+            fg_ok = True
+            break
+        _t.sleep(1.0)
+    if not fg_ok:
+        record("msg", {"app": app, "to": num, "text": args.text,
+                       "sent": False}, "act", "failed: chat never opened")
+        die("cannot send: WhatsApp never came to the foreground. "
+            "Nothing was sent.", 4)
     coords = None
     while _t.time() < deadline:
         _t.sleep(1.5)
@@ -580,6 +602,7 @@ def cmd_media(args):
             "next": "KEYCODE_MEDIA_NEXT", "prev": "KEYCODE_MEDIA_PREVIOUS",
             "stop": "KEYCODE_MEDIA_STOP"}
     adb("shell", "input keyevent %s" % keys[args.action])
+    record("media", args.action, "act")
     return 0
 
 
@@ -606,6 +629,10 @@ def cmd_screen(args):
 def cmd_photo(args):
     rc, _ = termux("termux-camera-photo", "-c", str(args.cam), args.out,
                    timeout=60)
+    # The camera is the most invasive thing here. It records whether it
+    # succeeded or not.
+    record("photo", {"cam": args.cam, "out": args.out}, "act",
+           "captured" if rc == 0 else "failed")
     if rc != 0:
         return 1
     print(args.out)
@@ -634,6 +661,9 @@ def cmd_battery(args):
 def cmd_where(args):
     rc, out = termux("termux-location", "-p",
                      args.provider, timeout=60)
+    # Location is named in the policy above as a logged read. It was not
+    # logged at all — the single sharpest contradiction in this file.
+    record("where", args.provider, "read")
     print((out or "").strip())
     return 0 if rc == 0 else 1
 
@@ -641,9 +671,11 @@ def cmd_where(args):
 def cmd_clip(args):
     if args.action == "get":
         rc, out = termux("termux-clipboard-get")
+        record("clip", "get", "read")       # the clipboard is personal
         print((out or "").rstrip("\n"))
         return 0 if rc == 0 else 1
     rc, _ = termux("termux-clipboard-set", " ".join(args.text))
+    record("clip", "set", "act")
     return 0 if rc == 0 else 1
 
 
