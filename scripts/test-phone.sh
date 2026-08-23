@@ -542,6 +542,125 @@ if grep -q "tier_notice\|termux-notification.*shizuku\|notify_tier" "$HERE/lib/p
   ok "a lost shell tier raises a notification the human can act on"
 else bad "a lost tier is silent"; fi
 
+echo "== the lease: only one driver may act on the phone at a time"
+# Two agents interleaving taps is not a race that produces a wrong pixel; it
+# is one agent typing into another's chat. The lease lives in shelld because
+# its accept loop is single-threaded, which makes check-and-set atomic for
+# free, and because it arbitrates local, remote and cockpit callers alike.
+SOCK5="$T/lease.sock"
+PHONE_SHELL_SOCK="$SOCK5" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK5" ] && break; sleep 0.4; done
+export PHONE_SHELL_SOCK="$SOCK5"
+
+out="$("$PHONE" lease acquire --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "a free phone can be leased"
+else bad "acquire failed (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" lease acquire --as intruder 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "tongs"; then
+  ok "a second driver is refused, and told who holds it"
+else bad "second acquire should fail naming the holder (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" lease acquire --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "the holder may re-acquire (renew) its own lease"
+else bad "holder re-acquire failed (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" lease status 2>&1)"
+if printf '%s' "$out" | grep -q "tongs"; then ok "status names the holder"
+else bad "status (got: $out)"; fi
+
+# A mutating verb from a NON-holder must refuse rather than interleave.
+out="$(PHONE_ACTOR=intruder "$PHONE" key HOME 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "lease\|held by"; then
+  ok "a mutating verb from a non-holder is refused"
+else bad "non-holder was allowed to act (rc=$rc out=$out)"; fi
+
+# Reads stay free: watching must never require taking the wheel.
+out="$(PHONE_ACTOR=onlooker "$PHONE" notifs --from "$T/notifs.json" 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "reads are not gated by the lease"
+else bad "a read was blocked by the lease (rc=$rc)"; fi
+
+out="$("$PHONE" lease release --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "the holder can release"
+else bad "release failed (rc=$rc out=$out)"; fi
+out="$("$PHONE" lease acquire --as intruder 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "and the phone is free again"
+else bad "still held after release (rc=$rc out=$out)"; fi
+
+# A crashed holder must not lock the phone forever.
+"$PHONE" lease release --as intruder >/dev/null 2>&1
+"$PHONE" lease acquire --as ghost --ttl 1 >/dev/null 2>&1
+sleep 2
+out="$("$PHONE" lease acquire --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "an expired lease is reclaimable (a crashed holder does not brick the phone)"
+else bad "expired lease still held (rc=$rc out=$out)"; fi
+"$PHONE" lease release --as tongs >/dev/null 2>&1
+"$PHONE" shelld --stop >/dev/null 2>&1
+unset PHONE_SHELL_SOCK
+
+echo "== the ledger must be a TRACE, not a list of claims"
+# "open keep -> opened" says what was attempted and asserted. It does not say
+# WHO asked, whether the underlying command actually succeeded, or how long
+# it took — so a slow tap and a failed one read identically, and a request
+# cannot be followed back to its requester.
+LED2="$T/trace.jsonl"
+PHONE_LEDGER="$LED2" PHONE_ACTOR=tongs PHONE_NO_DEVICE=1 "$PHONE" msg whatsapp \
+  --to "+16175551234" --text "trace me" --send >/dev/null 2>&1
+if python3 -c "
+import json
+rows=[json.loads(l) for l in open('$LED2') if l.strip()]
+a=rows[-1]
+assert a.get('actor')=='tongs', 'actor missing: %r' % a
+assert isinstance(a.get('ms'), (int,float)), 'ms missing: %r' % a
+assert 'rc' in a, 'rc missing: %r' % a
+print('ok')" 2>/dev/null | grep -q ok; then
+  ok "an entry carries actor, elapsed ms, and an exit code"
+else bad "ledger is not a trace (got: $(tail -1 "$LED2" 2>/dev/null))"; fi
+
+out="$(PHONE_LEDGER="$LED2" "$PHONE" log --limit 3 --actor tongs 2>&1)"
+if printf '%s' "$out" | grep -q "tongs"; then
+  ok "log can be filtered to one actor (who did this?)"
+else bad "log --actor (got: $out)"; fi
+
+echo "== look: the screen an agent can actually afford to read"
+# `ui` dumps every node with text — hundreds of lines on a real app, most of
+# it container ids the agent can do nothing with. A model paying that on
+# every step burns its context on scaffolding. `look` is the same screen,
+# summarised: what app, and the things that can actually be acted on.
+out="$("$PHONE" look --from "$T/ui.xml" 2>&1)"
+if printf '%s' "$out" | grep -qi "whatsapp"; then
+  ok "look names the app in the foreground"
+else bad "look should name the app (got: $out)"; fi
+if printf '%s' "$out" | grep -q "peer peer-user" && printf '%s' "$out" | grep -q "Send"; then
+  ok "look keeps the things you can act on"
+else bad "look dropped actionable elements (got: $out)"; fi
+if printf '%s' "$out" | grep -qE "^\s*[0-9]+,[0-9]+"; then
+  ok "look keeps coordinates so a tap needs no second call"
+else bad "look has no coordinates (got: $out)"; fi
+# The container ids ui emits (conversation, drag_layer, scrim_view) are
+# scaffolding — an agent can do nothing with them and they dominate the dump.
+if ! printf '%s' "$out" | grep -q "scrim_view"; then
+  ok "look drops container scaffolding"
+else bad "look kept scaffolding"; fi
+ui_lines=$("$PHONE" ui --from "$T/ui.xml" 2>/dev/null | wc -l | tr -d ' ')
+look_lines=$("$PHONE" look --from "$T/ui.xml" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$look_lines" -le "$ui_lines" ]; then
+  ok "look is no larger than ui ($look_lines vs $ui_lines lines)"
+else bad "look is bigger than ui ($look_lines vs $ui_lines)"; fi
+
+echo "== the skill and the CLI must agree"
+r="$(python3 "$HERE/scripts/check-skill-verbs.py" 2>&1)"
+if [ "$r" = "agree" ]; then
+  ok "every verb the skill teaches exists in the CLI"
+else bad "$r"; fi
+
+echo "== the skill states the habits that keep an agent honest"
+for must in "look" "lease" "Never guess" "SPOKEN"; do
+  if grep -qi -- "$must" "$HERE/docs/phone-skill.md"; then
+    ok "skill covers: $must"
+  else bad "skill missing: $must"; fi
+done
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
