@@ -188,6 +188,31 @@ if curl -sf -m 5 "http://127.0.0.1:$PORT/?cachebust=1" >/dev/null 2>&1; then
 else bad "query string handling"; fi
 kill_server
 
+echo "== the live-dot reflects a seat surface, not just the mail plane"
+if command -v node >/dev/null 2>&1; then
+  R="$(node -e '
+    const fs=require("fs");
+    const py=fs.readFileSync(process.argv[1],"utf8");
+    const m=py.match(/function effState\(a\)[\s\S]*?\n  }\n  function stClass[\s\S]*?\n  }\n  function dotClass\(a\)[\s\S]*?\n  }/);
+    if(!m){console.log("NOFUNCS");process.exit(0);}
+    eval(m[0]);
+    const codex={state:"stored",surface_state:"busy"};
+    const sleeping={state:"stored",surface_state:null};
+    const claude={state:"live"};
+    const dead={state:"stored",surface_state:"dead"};
+    const g=a=>/\blive\b/.test(dotClass(a));
+    console.log((g(codex)&&effState(codex)==="busy")?"1":"0",
+                (!g(sleeping)&&effState(sleeping)==="stored")?"1":"0",
+                (g(claude))?"1":"0",
+                (!g(dead)&&effState(dead)==="dead")?"1":"0");
+  ' "$HERE/lib/homi_board.py")"
+  if [ "$R" = "1 1 1 1" ]; then
+    ok "codex seat (stored+busy) reads live; sleeping stays stored; claude/dead unchanged"
+  else bad "board live-dot surface awareness (got: $R)"; fi
+else
+  ok "skip dot test (no node)"
+fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
