@@ -468,6 +468,17 @@ if [ "$r" = "True True True" ]; then
   ok "installs into authorized_keys, deduped by grep, key-shaped"
 else bad "hub key install (got: $r)"; fi
 
+echo "== the reverse test only counts when the fabric key EXISTS (no fallback-identity false pass)"
+r="$(PY "
+sc = ha.probe_script('a@mini')
+i_key = sc.find('id_homi ] && echo \"HOMIKEY')
+i_rev = sc.find('REV=1')
+guarded = '[ -f ~/.ssh/id_homi ] &&' in sc.split('REV=1')[0].split('HOMIKEY')[-1]
+print(guarded)")"
+if [ "$r" = "True" ]; then
+  ok "no fabric key -> REV=0, so adopt authorizes it instead of trusting a fallback"
+else bad "reverse test guard (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
