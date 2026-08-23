@@ -648,6 +648,19 @@ if [ "$look_lines" -le "$ui_lines" ]; then
   ok "look is no larger than ui ($look_lines vs $ui_lines lines)"
 else bad "look is bigger than ui ($look_lines vs $ui_lines)"; fi
 
+echo "== the skill and the CLI must agree"
+r="$(python3 "$HERE/scripts/check-skill-verbs.py" 2>&1)"
+if [ "$r" = "agree" ]; then
+  ok "every verb the skill teaches exists in the CLI"
+else bad "$r"; fi
+
+echo "== the skill states the habits that keep an agent honest"
+for must in "look" "lease" "Never guess" "SPOKEN"; do
+  if grep -qi -- "$must" "$HERE/docs/phone-skill.md"; then
+    ok "skill covers: $must"
+  else bad "skill missing: $must"; fi
+done
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
