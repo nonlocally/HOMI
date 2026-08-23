@@ -2194,10 +2194,14 @@ class Homi:
         cmd += ["-L", "%s:%s" % (lsock, rin), addr]
         return cmd
 
-    def _remote_home(self, addr):
+    def _remote_home(self, addr, identity_file=None):
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+        if identity_file and os.path.exists(identity_file):
+            # Same identity the forward will use — otherwise this probe rests
+            # on an ssh agent the daemon does not have under launchd/systemd.
+            cmd += ["-i", identity_file, "-o", "IdentitiesOnly=yes"]
         try:
-            out = subprocess.run(["ssh", "-o", "BatchMode=yes",
-                                  "-o", "ConnectTimeout=8", addr, "echo $HOME"],
+            out = subprocess.run(cmd + [addr, "echo $HOME"],
                                  capture_output=True, text=True, timeout=15)
             home = (out.stdout or "").strip().splitlines()
             return home[-1] if home and out.returncode == 0 else None
@@ -2224,7 +2228,7 @@ class Homi:
         # never probe $HOME (the forward-only key forbids exec). Only device
         # links (full trust, same operator) resolve the home.
         if not rhome and not ent.get("remote_in"):
-            rhome = self._remote_home(addr)
+            rhome = self._remote_home(addr, ent.get("identity_file"))
             if not rhome:
                 raise OSError("cannot resolve remote $HOME on %s" % addr)
             with self.mu:
@@ -3408,11 +3412,33 @@ def _cli_adopt(args):
               "is incomplete; adopt cannot deploy or hash-compare them. Fix "
               "the hub first." % ", ".join(missing))
         return 1
+    # The hub's OWN passphrase-free key. A daemon started by launchd/systemd
+    # has no ssh agent, so every outbound dial must rest on this, and the
+    # device has to trust it (installed below).
+    hub_priv = os.path.join(state_root(), "keys", "fleet_ed25519")
+    hub_pub = ""
+    if not os.path.exists(hub_priv):
+        try:
+            os.makedirs(os.path.dirname(hub_priv), exist_ok=True)
+            subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q",
+                            "-f", hub_priv, "-C", "homi-hub/%s" % mydev],
+                           check=True, capture_output=True, timeout=30)
+        except Exception:
+            pass
+    try:
+        with open(hub_priv + ".pub") as f:
+            hub_pub = f.read().strip()
+    except OSError:
+        hub_pub = ""
+    hub_material = hub_pub.split()[1] if len(hub_pub.split()) > 1 else ""
+
     local = {"kernel_hash": ha._local_kernel_hash(here_dir),
-             "my_addr": my_addr, "here_dir": here_dir}
+             "my_addr": my_addr, "here_dir": here_dir,
+             "hub_pubkey": hub_pub}
 
     print("adopt: onboarding %s" % addr)
-    rc, out = ha._run_ssh(addr, ha.probe_script(my_addr), timeout=45)
+    rc, out = ha._run_ssh(addr, ha.probe_script(my_addr, hub_material),
+                          timeout=45)
     if rc != 0 and "=" not in out:
         print("  probe                    FAILED (%s)" % out.strip()[:120])
         print("  fix: make `ssh %s true` work, then re-run." % addr)
@@ -3437,6 +3463,20 @@ def _cli_adopt(args):
     rc = _cli_pair([addr])
     if rc != 0:
         checklist.append("pair did not fully verify — see its output above")
+
+    # Pin the hub->device link to the hub's own key: without this the dial
+    # inherits whatever agent the operator's shell had, and dies the moment
+    # the daemon is restarted by launchd (mini-1/peer-device/mw83, live).
+    if hub_pub and os.path.exists(hub_priv):
+        links_now = _read_json(os.path.join(state_root(), "links.json"), {})
+        for dev, ent in (links_now or {}).items():
+            if isinstance(ent, dict) and ent.get("addr") == addr:
+                r = _call({"op": "link", "device": dev, "addr": addr,
+                           "identity_file": hub_priv})
+                if r.get("ok"):
+                    print("  link: identity           pinned to the hub key "
+                          "(agent-free)")
+                break
 
     if spawn_name and rc == 0:
         far = _call({"op": "status"})

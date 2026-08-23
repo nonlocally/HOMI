@@ -41,9 +41,11 @@ _FAR_PATH = "/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
 # ---------------------------------------------------------------- probe
 
-def probe_script(my_addr):
+def probe_script(my_addr, hub_key_material=""):
     """One remote sh script emitting KEY=VALUE lines — a single round-trip.
-    my_addr: how the far side would dial the hub (user@devname)."""
+    my_addr: how the far side would dial the hub (user@devname).
+    hub_key_material: the hub's own fleet pubkey material, so the probe can
+    report whether this device already trusts the hub for outbound dials."""
     kf = " ".join("~/.local/share/homi/daemon/current/%s" % f
                   for f in KERNEL_FILES)
     return (
@@ -55,6 +57,7 @@ def probe_script(my_addr):
         'echo "CCOWNER=$o"; echo "UID_=$(id -u)"; '
         '[ -f ~/.ssh/id_ed25519.pub ] && echo "OWNKEY=1" || echo "OWNKEY=0"; '
         '[ -f ~/.ssh/id_homi ] && echo "HOMIKEY=1" || echo "HOMIKEY=0"; '
+        '%(hubk)s'
         'command -v python3 >/dev/null && echo "PY3=1" || echo "PY3=0"; '
         'echo "TMUX_BIN=$(PATH=%(p)s command -v tmux)"; '
         'echo "CLAUDE_BIN=$(PATH=%(p)s command -v claude)"; '
@@ -66,7 +69,11 @@ def probe_script(my_addr):
         'ssh -o BatchMode=yes -o ConnectTimeout=6 -i ~/.ssh/id_homi '
         '-o IdentitiesOnly=yes %(me)s true 2>/dev/null '
         '&& echo "REV=1" || echo "REV=0"'
-        % {"p": _FAR_PATH, "kf": kf, "me": shlex.quote(my_addr)}
+        % {"p": _FAR_PATH, "kf": kf, "me": shlex.quote(my_addr),
+           "hubk": ('grep -q %s ~/.ssh/authorized_keys 2>/dev/null '
+                    '&& echo "HUBKEY=1" || echo "HUBKEY=0"; '
+                    % shlex.quote(hub_key_material))
+           if hub_key_material else 'echo "HUBKEY=1"; '}
     )
 
 
@@ -95,6 +102,7 @@ def parse_facts(out):
         "cc_collision": bool(owner) and bool(uid) and owner != uid,
         "own_key": kv.get("OWNKEY") == "1",
         "fabric_key": kv.get("HOMIKEY") == "1",
+        "hub_key_there": kv.get("HUBKEY") == "1",
         "py3": kv.get("PY3") == "1",
         "tmux_bin": kv.get("TMUX_BIN", ""),
         "claude_bin": kv.get("CLAUDE_BIN", ""),
@@ -210,6 +218,13 @@ def plan(facts, local):
 
     steer = bool(facts.get("cc_collision")) or (
         facts.get("os") != "Darwin" and not facts.get("xdg"))
+    if not facts.get("hub_key_there", True):
+        # The MIRROR of the device's fabric key: a hub daemon started by
+        # launchd/systemd has NO ssh agent, so its outbound dial must rest on
+        # the hub's own passphrase-free fleet key — which this device has to
+        # trust. Installed now, over the channel the operator already holds.
+        acts.append({"step": "authorize_hub_key_there"})
+
     provisioned_rt = False
     if steer:
         # Move BOTH the daemon (pair steers its plist/unit to the same
@@ -386,6 +401,24 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
             done = rc == 0 and _authorize_here(out, devtag)
             say("  provision: reverse key   %s" %
                 ("authorized on this hub" if done else "FAILED to fetch"))
+        elif step == "authorize_hub_key_there":
+            pub = (local.get("hub_pubkey") or "").strip()
+            parts = pub.split()
+            if len(parts) >= 2 and parts[0].startswith(("ssh-", "ecdsa-")):
+                rc, _ = ssh(addr,
+                            "mkdir -p ~/.ssh && chmod 700 ~/.ssh; "
+                            "touch ~/.ssh/authorized_keys; "
+                            "grep -q %s ~/.ssh/authorized_keys || "
+                            "printf '%%s %%s homi-hub\\n' %s %s "
+                            ">> ~/.ssh/authorized_keys; "
+                            "chmod 600 ~/.ssh/authorized_keys"
+                            % (shlex.quote(parts[1]), shlex.quote(parts[0]),
+                               shlex.quote(parts[1])))
+                say("  provision: hub key       %s"
+                    % ("trusted by this device (agent-free dialing)"
+                       if rc == 0 else "INSTALL FAILED"))
+            else:
+                say("  provision: hub key       SKIPPED (no hub fleet key)")
         elif step == "reverse_alias":
             host = local["my_addr"].split("@")[-1]
             user = local["my_addr"].split("@")[0]
