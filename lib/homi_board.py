@@ -842,15 +842,26 @@ TEMPLATE = r"""<!doctype html>
     if (a) h.appendChild(document.createTextNode(" · generated " + a));
   }
 
+  function effState(a) {
+    // A seat-bound agent (codex, a REPL) has mail-state "stored" - no Claude
+    // mailbox session - but its SEAT is a real measured surface. If the seat
+    // is alive, the agent is alive, whatever the mail plane says; show the
+    // surface state so the board doesn't read a running agent as idle.
+    if (a.surface_state === "busy" || a.surface_state === "idle")
+      return a.surface_state;
+    if (a.surface_state === "dead" && a.state !== "live") return "dead";
+    return a.state || "?";
+  }
   function stClass(st) {
-    if (st === "live") return "st t-live";
+    if (st === "live" || st === "busy" || st === "idle") return "st t-live";
     if (st === "dead") return "st t-dead";
     return "st t-stored";
   }
   function dotClass(a) {
     var c = "dot";
-    if (a.state === "live") c += " live";
-    if (a.state === "dead") c += " dead";
+    var es = effState(a);
+    if (es === "live" || es === "busy" || es === "idle") c += " live";
+    if (es === "dead") c += " dead";
     if (a.surface_state === "busy") c += " busy";
     return c;
   }
@@ -905,8 +916,8 @@ TEMPLATE = r"""<!doctype html>
         } else {
           nm.textContent = a.name || "?";
         }
-        var st = add(r, "span", stClass(a.state));
-        st.textContent = a.state || "?";
+        var st = add(r, "span", stClass(effState(a)));
+        st.textContent = effState(a);
         if (a.provenance && a.provenance !== "probed") st.textContent += " · " + a.provenance;
         add(r, "span", "held", a.undelivered ? String(a.undelivered) : "");
         add(r, "span", "seat", a.seat || "");
