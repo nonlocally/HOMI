@@ -1515,6 +1515,17 @@ WATCHDOG_STEPS = (
     ("shizuku", "test -x $HOME/rish && RISH_APPLICATION_ID=com.termux "
                 "timeout 20 $HOME/rish -c true >/dev/null 2>&1",
      "shizuku is the shell tier; check it still answers"),
+    # The fleet stages this CLI into the daemon directory (it is in
+    # KERNEL_FILES, so it is hash-compared and refreshed like any module).
+    # Putting it on PATH is the activation half: distribution by the kernel,
+    # activation by the watchdog, so a refreshed device runs the new one
+    # without anyone scp-ing it by hand.
+    ("cli", 'K="$HOME/.local/share/homi/daemon/current/phone"; '
+            'if [ -f "$K" ]; then chmod +x "$K" 2>/dev/null; '
+            '[ "$(readlink "$HOME/.local/bin/phone")" = "$K" ] || '
+            'ln -sf "$K" "$HOME/.local/bin/phone"; '
+            'ln -sf "$K" "$PREFIX/bin/phone" 2>/dev/null; fi',
+     "the staged CLI is the one on PATH"),
 )
 
 
