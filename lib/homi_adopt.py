@@ -66,8 +66,13 @@ def probe_script(my_addr, hub_key_material=""):
         'echo "KHASH=$(cat %(kf)s 2>/dev/null | md5 -q 2>/dev/null || '
         'cat %(kf)s 2>/dev/null | md5sum 2>/dev/null | cut -d" " -f1)"; '
         'else echo "KHASH="; fi; '
-        'ssh -o BatchMode=yes -o ConnectTimeout=6 -i ~/.ssh/id_homi '
-        '-o IdentitiesOnly=yes %(me)s true 2>/dev/null '
+        # REV counts ONLY when the fabric key exists: `-i <missing>` does not
+        # force a failure, so ssh falls through to an agent or another
+        # identity and reports a reverse leg the DAEMON will not have
+        # (mini-1, live: adopt skipped authorizing the key, and pair then
+        # found the reverse leg dead).
+        '[ -f ~/.ssh/id_homi ] && ssh -o BatchMode=yes -o ConnectTimeout=6 '
+        '-i ~/.ssh/id_homi -o IdentitiesOnly=yes %(me)s true 2>/dev/null '
         '&& echo "REV=1" || echo "REV=0"'
         % {"p": _FAR_PATH, "kf": kf, "me": shlex.quote(my_addr),
            "hubk": ('grep -q %s ~/.ssh/authorized_keys 2>/dev/null '
