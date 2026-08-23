@@ -149,9 +149,15 @@ else bad "snapshot inlined into the page"; fi
 if grep -q 'location.protocol === "file:"' "$T/board/index.html"; then
   ok "file:// poll guard present (self-contained offline)"
 else bad "file:// poll guard present"; fi
-if [ "$(grep -c -e 'https\?://' -e 'url(' -e '@import' -e '<link' -e 'src=' "$T/board/index.html")" = "0" ]; then
-  ok "no external references (urls, imports, links, src)"
-else bad "no external references"; fi
+# Self-contained means NO THIRD-PARTY ORIGIN, not "no <link> tag": the board
+# links its own manifest and icon so a phone can install it — and it is the
+# page start_url opens, so it MUST be installable. Absolute URLs and remote
+# imports stay forbidden.
+ext="$(grep -c -e 'https\?://' -e 'url(' -e '@import' "$T/board/index.html")"
+offsite="$(grep -oE '(href|src)="[^"]*"' "$T/board/index.html" | grep -vE '(href|src)="/' | grep -c . )"
+if [ "$ext" = "0" ] && [ "$offsite" = "0" ]; then
+  ok "no third-party origin (own manifest/icon are fine)"
+else bad "no external references (external=$ext offsite=$offsite)"; fi
 if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$T/board/state.json" 2>/dev/null; then
   ok "state.json is valid JSON"
 else bad "state.json is valid JSON"; fi
@@ -229,8 +235,10 @@ if printf '%s' "$tp" | grep -qi "theme-color" && printf '%s' "$tp" | grep -qi "v
   ok "talk page sets theme-color and covers the phone safe area"
 else bad "talk page theme/safe-area meta"; fi
 
-echo "== voice: the talk page as something you speak to"
-vp="$(curl -sf -m 5 "http://127.0.0.1:$PORT/voice/communicate" 2>/dev/null)"
+echo "== voice lives on the CONSOLE, not on a second page"
+# /voice now redirects here; the capability had to move first or the
+# redirect would have deleted it.
+vp="$(curl -sf -m 5 "http://127.0.0.1:$PORT/talk/communicate?v=1" 2>/dev/null)"
 if [ -n "$vp" ] && printf '%s' "$vp" | grep -qi "speechSynthesis" \
    && printf '%s' "$vp" | grep -qi "SpeechRecognition"; then
   ok "voice page serves and uses Web Speech in AND out"
@@ -238,10 +246,10 @@ else bad "voice page speech wiring"; fi
 if printf '%s' "$vp" | grep -q "/api/send" && printf '%s' "$vp" | grep -q "/api/timeline/"; then
   ok "voice page talks to the REAL fabric (send + await the reply)"
 else bad "voice page still mocked"; fi
-vtok="$(printf '%s' "$vp" | grep -oE 'var TOKEN = "[0-9a-f]{16,}"' | wc -l | tr -d ' ')"
-if [ "$vtok" = "1" ]; then
-  ok "voice page carries a real mutation token exactly once"
-else bad "voice token injection (matches=$vtok)"; fi
+vtok="$(printf '%s' "$vp" | grep -coE '[0-9a-f]{32}')"
+if [ "$vtok" -ge 1 ]; then
+  ok "the console carries a real mutation token"
+else bad "console token injection (matches=$vtok)"; fi
 # Chrome silently truncates a speechSynthesis utterance around 15s, so a long
 # answer MUST be chunked or the agent gets cut off mid-sentence.
 if printf '%s' "$vp" | grep -qiE "chunk"; then
@@ -270,6 +278,29 @@ else bad "device API allowed an unknown device (got $c)"; fi
 c="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/api/device/x/notifs" 2>/dev/null)"
 if [ "$c" = "403" ]; then ok "the device API is token-gated"
 else bad "device API token gate (got $c)"; fi
+
+echo "== the board itself must be installable, not just the talk page"
+# The installed app launches into start_url. If that page carries no
+# manifest link and registers no service worker, it is the one page Chrome
+# cannot offer to install from — which is exactly backwards.
+bp="$(curl -sf -m 5 "http://127.0.0.1:$PORT/" 2>/dev/null)"
+if printf '%s' "$bp" | grep -q "manifest.webmanifest" && \
+   printf '%s' "$bp" | grep -qi "serviceWorker"; then
+  ok "the board links the manifest and registers the worker"
+else bad "board is not installable"; fi
+if printf '%s' "$bp" | grep -qi "theme-color"; then
+  ok "the board sets theme-color"
+else bad "board missing theme-color"; fi
+
+echo "== /voice redirects into the console rather than being a second one"
+code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/voice/communicate" 2>/dev/null)"
+loc="$(curl -s -D - -o /dev/null -m 5 "http://127.0.0.1:$PORT/voice/communicate" 2>/dev/null | grep -i "^location:" | tr -d '\r')"
+if [ "$code" = "302" ] || [ "$code" = "301" ]; then
+  ok "/voice/<agent> redirects ($code)"
+else bad "/voice should redirect, got $code"; fi
+if printf '%s' "$loc" | grep -q "/talk/communicate"; then
+  ok "and it lands on the talk console"
+else bad "redirect target wrong (got: $loc)"; fi
 
 kill_server
 

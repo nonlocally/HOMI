@@ -517,6 +517,30 @@ TALK_TEMPLATE = r"""<!doctype html>
   }
   #snd:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
   #snd:disabled { opacity: 0.55; cursor: default; }
+
+/* The voice key. An instrument face, not a round mic bubble: state reads
+   from the WORD and the border weight, never from colour alone, so it is
+   legible in grayscale and to anyone who cannot pick the accent out. */
+.composer .mic{
+  flex:0 0 auto; min-width:62px; padding:0 10px;
+  font:500 10px/1 var(--font-mono); letter-spacing:.1em; text-transform:uppercase;
+  color:var(--ink-2); background:var(--surface); border:1px solid var(--border);
+  cursor:pointer; -webkit-tap-highlight-color:transparent;
+}
+.composer .mic:hover{ color:var(--ink); background:var(--surface-2); }
+.composer .mic[data-state="listening"]{
+  color:var(--ink); border-color:var(--status-good); border-width:2px;
+}
+.composer .mic[data-state="thinking"]{ color:var(--muted); }
+.composer .mic[data-state="speaking"]{
+  color:var(--ink); border-color:var(--status-warn); border-width:2px;
+}
+.composer .mic[disabled]{ opacity:.4; cursor:default; }
+/* Live input level — real microphone amplitude, so a dead mic looks dead
+   rather than animating reassuringly at nothing. */
+.miclvl{ height:2px; background:var(--grid); margin:0 0 4px; }
+.miclvl > i{ display:block; height:100%; width:0; background:var(--status-good); }
+@media (prefers-reduced-motion:reduce){ .miclvl > i{ transition:none; } }
 </style>
 </head>
 <body>
@@ -532,6 +556,8 @@ TALK_TEMPLATE = r"""<!doctype html>
 <div id="log" class="composer-log"></div>
 <button id="pill" type="button" hidden>new &#8595;</button>
 <form id="composer" class="composer">
+  <button id="mic" type="button" class="mic" title="hold to talk"
+          aria-label="press to talk">talk</button>
   <textarea id="inp" rows="1" placeholder="message" autocomplete="off"></textarea>
   <button id="snd" type="submit">send</button>
 </form>
@@ -694,6 +720,13 @@ TALK_TEMPLATE = r"""<!doctype html>
     var k = key(it);
     if (seen[k]) return false;
     seen[k] = 1;
+    // A voice turn is answered out loud. Only fresh MAIL from the agent —
+    // never our own message, never session receipts, and never history
+    // being paged in behind us.
+    if (window.__voice && !front && it.via === "mail"
+        && it.role !== "user" && it.text) {
+      window.__voice.speak(it.text);
+    }
     trackFirstI(it);
     // The work ledger: consecutive receipts (tool lines, sends to third
     // parties) fold into one collapsible record; anything else closes it.
@@ -884,6 +917,192 @@ if ("serviceWorker" in navigator) {
     });
   });
 }
+
+// ---------------------------------------------------------------- voice
+// The console answers out loud when asked out loud. This is the whole of
+// homi_voice.py's working half, folded into the one surface that already
+// has history, paging, the work fold and the restart guard — rather than a
+// second page that re-implemented the timeline and lost all four.
+(function () {
+  "use strict";
+  var mic = document.getElementById("mic");
+  var inp = document.getElementById("inp");
+  if (!mic) return;
+
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var synthOK = "speechSynthesis" in window;
+  // Chrome silently truncates an utterance at roughly 15 seconds, so a long
+  // reply must be broken into sentence-sized pieces and queued; otherwise
+  // the agent is cut off mid-thought with no error anywhere.
+  var CHUNK_MAX = 170;
+  var gen = 0;                 // bumps on every interrupt or new turn
+  var earOn = /[?&]v=1\b/.test(location.search);
+  var rec = null, level = null, audioCtx = null, stream = null;
+
+  function setState(st) {
+    mic.setAttribute("data-state", st);
+    mic.textContent = st === "listening" ? "listening"
+                    : st === "thinking" ? "thinking"
+                    : st === "speaking" ? "speaking" : "talk";
+  }
+  setState("idle");
+  if (!SR) { mic.disabled = true; mic.title = "no speech recognition here"; }
+
+  function chunkText(text) {
+    var raw = String(text || "").trim();
+    if (!raw) return [];
+    var sentences = raw.match(/[^.!?]+[.!?]+(\s+|$)|[^.!?]+$/g) || [raw];
+    var out = [];
+    sentences.forEach(function (sen) {
+      sen = sen.trim();
+      if (!sen) return;
+      if (sen.length <= CHUNK_MAX) { out.push(sen); return; }
+      var parts = sen.split(/,\s+/), buf = "";
+      parts.forEach(function (p, i) {
+        var piece = p + (i < parts.length - 1 ? "," : "");
+        if ((buf + " " + piece).trim().length > CHUNK_MAX && buf) {
+          out.push(buf.trim()); buf = piece;
+        } else { buf = (buf + " " + piece).trim(); }
+      });
+      if (buf) {
+        while (buf.length > CHUNK_MAX) {
+          var cut = buf.lastIndexOf(" ", CHUNK_MAX);
+          if (cut <= 0) cut = CHUNK_MAX;
+          out.push(buf.slice(0, cut).trim());
+          buf = buf.slice(cut).trim();
+        }
+        if (buf) out.push(buf);
+      }
+    });
+    return out;
+  }
+
+  function speakChunks(chunks, myGen) {
+    if (!synthOK || !chunks.length) { setState("idle"); return; }
+    setState("speaking");
+    var i = 0;
+    (function next() {
+      if (myGen !== gen) return;              // interrupted, or a newer turn
+      if (i >= chunks.length) { setState("idle"); return; }
+      var u = new SpeechSynthesisUtterance(chunks[i]);
+      u.lang = "en-US";                        // Android reports en_US; be explicit
+      u.onend = function () { i++; next(); };
+      // One bad chunk must not strand the rest of the answer unsaid.
+      u.onerror = function () { i++; next(); };
+      window.speechSynthesis.speak(u);
+    })();
+  }
+
+  function mapSpeechError(code) {
+    switch (code) {
+      case "no-speech": return "no speech detected — tap talk to retry";
+      case "aborted": return "listening stopped";
+      case "audio-capture": return "no microphone found";
+      case "not-allowed": return "microphone permission denied";
+      case "network": return "speech service unreachable";
+      case "service-not-allowed": return "speech service blocked";
+      default: return "speech error: " + code;
+    }
+  }
+
+  function stopMeter() {
+    if (level) { level.parentNode && level.parentNode.remove(); level = null; }
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+    if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+  }
+
+  function startMeter() {
+    // Real amplitude, best-effort. If permission is refused the bar simply
+    // never moves, which is the honest picture of a mic that is not working.
+    if (!navigator.mediaDevices || !window.AudioContext) return;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (st) {
+      stream = st;
+      var wrap = document.createElement("div");
+      wrap.className = "miclvl";
+      level = document.createElement("i");
+      wrap.appendChild(level);
+      inp.parentNode.insertBefore(wrap, inp.parentNode.firstChild);
+      audioCtx = new AudioContext();
+      var an = audioCtx.createAnalyser();
+      an.fftSize = 512;
+      audioCtx.createMediaStreamSource(st).connect(an);
+      var buf = new Uint8Array(an.frequencyBinCount);
+      (function tick() {
+        if (!level) return;
+        an.getByteTimeDomainData(buf);
+        var sum = 0;
+        for (var j = 0; j < buf.length; j++) { var v = (buf[j] - 128) / 128; sum += v * v; }
+        var rms = Math.sqrt(sum / buf.length);
+        level.style.width = Math.min(100, Math.round(rms * 320)) + "%";
+        requestAnimationFrame(tick);
+      })();
+    }).catch(function () { /* no meter; recognition may still work */ });
+  }
+
+  function note(msg) {
+    var n = document.getElementById("note") || document.getElementById("stat");
+    if (n) n.textContent = msg || "";
+  }
+
+  function listen() {
+    if (!SR) return;
+    gen++;                                   // any new turn cancels speech
+    if (synthOK) window.speechSynthesis.cancel();
+    rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    // continuous is unreliable on Android Chrome; one utterance per press.
+    rec.continuous = false;
+    var finalText = "";
+    setState("listening");
+    startMeter();
+    rec.onresult = function (e) {
+      var interim = "";
+      for (var i = e.resultIndex; i < e.results.length; i++) {
+        var t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += t; else interim += t;
+      }
+      inp.value = (finalText + interim).trim();
+    };
+    rec.onerror = function (e) { note(mapSpeechError(e.error)); };
+    rec.onend = function () {
+      stopMeter();
+      setState("idle");
+      rec = null;
+      var text = inp.value.trim();
+      if (!text) return;
+      earOn = true;                          // spoke to it, so answer aloud
+      setState("thinking");
+      // Submit through the page's own send path so the message, its routing
+      // tag and the ledger all behave exactly as a typed one.
+      var f = document.getElementById("composer");
+      if (f) f.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    };
+    try { rec.start(); } catch (e) { setState("idle"); note("could not start listening"); }
+  }
+
+  mic.addEventListener("click", function () {
+    if (rec) { try { rec.stop(); } catch (e) {} return; }
+    if (window.speechSynthesis && window.speechSynthesis.speaking) {
+      // Tapping while it talks is the interrupt.
+      gen++;
+      window.speechSynthesis.cancel();
+      setState("idle");
+      return;
+    }
+    listen();                                 // start() inside a tap handler
+  });
+
+  window.__voice = {
+    speak: function (text) {
+      if (!earOn || !synthOK) return;
+      gen++;
+      window.speechSynthesis.cancel();
+      speakChunks(chunkText(text), gen);
+    },
+    chunkText: chunkText
+  };
+})();
 </script>
 </body>
 </html>
