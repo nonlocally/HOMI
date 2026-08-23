@@ -489,6 +489,59 @@ if printf '%s' "$out" | grep -q "input text"; then
   ok "--print-only shows the exact input text argv"
 else bad "--print-only should show the argv (got: $out)"; fi
 
+echo "== output with NO trailing newline must not hang the shell daemon"
+# The sentinel is emitted on its own line after the command. If the command's
+# output does not end in a newline, the sentinel lands on the SAME line and
+# the startswith() check never matches — so the daemon waited the full
+# deadline on every such command. Measured: `head -c 100 file` took 75.20s
+# and returned rc=124, with the data present the whole time.
+SOCK4="$T/nonl.sock"
+PHONE_SHELL_SOCK="$SOCK4" PHONE_SHELL_ARGV=sh PHONE_SHELL_DEADLINE=8 \
+  "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK4" ] && break; sleep 0.4; done
+st=$(date +%s)
+out="$(PHONE_SHELL_SOCK="$SOCK4" "$PHONE" sh "printf 'no-trailing-newline'" 2>&1)"; rc=$?
+el=$(( $(date +%s) - st ))
+if [ "$rc" = "0" ] && [ $el -le 5 ]; then
+  ok "a command with no trailing newline returns immediately (${el}s)"
+else bad "no-newline output hung or failed (rc=$rc ${el}s out=$out)"; fi
+if printf '%s' "$out" | grep -q "no-trailing-newline"; then
+  ok "and its output is intact"
+else bad "no-newline output lost (got: $out)"; fi
+# and a normal newline-terminated command must not gain a spurious blank line
+out="$(PHONE_SHELL_SOCK="$SOCK4" "$PHONE" sh "echo one; echo two" 2>&1 | tr '\n' ',')"
+if [ "$out" = "one,two," ] || [ "$out" = "one,two" ]; then
+  ok "newline-terminated output is unchanged (no injected blank line)"
+else bad "newline handling changed output (got: $out)"; fi
+PHONE_SHELL_SOCK="$SOCK4" "$PHONE" shelld --stop >/dev/null 2>&1
+
+echo "== launching an app needs no shell tier (am start works as the app UID)"
+# Measured on the device: `am start -n <component>` succeeds from Termux with
+# shizuku down and adb off. So losing the shell tier must not cost app
+# launching — it is the first step of most tasks.
+if grep -q "am start -n" "$HERE/lib/phone" && \
+   grep -B6 "am start -n" "$HERE/lib/phone" | grep -qiE "level 1|no shell|without a shell"; then
+  ok "open has a level-1 launch path documented at the call site"
+else bad "open still requires a shell to launch an app"; fi
+
+echo "== the watchdog must REPORT a lost tier, not just degrade silently"
+# Shizuku's service can stop while the phone stays up (observed: up 2 days,
+# service gone). Level 1 keeps working, which is by design — but if nobody is
+# told, the phone quietly loses half its capability and the agent starts
+# refusing things for reasons the human cannot see.
+if python3 -c "
+import re
+src = open('$HERE/lib/phone').read()
+m = re.search(r'WATCHDOG_STEPS = \((.*?)\n\)', src, re.S)
+import sys
+sys.exit(0 if (m and 'shizuku' in m.group(1)) else 1)
+"; then
+  ok "the watchdog checks the shell tier"
+else bad "watchdog does not check shizuku"; fi
+if grep -q "tier_notice\|termux-notification.*shizuku\|notify_tier" "$HERE/lib/phone"; then
+  ok "a lost shell tier raises a notification the human can act on"
+else bad "a lost tier is silent"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -511,7 +511,13 @@ def cmd_shelld(args):
         wd.daemon = True
         wd.start()
         proc.stdin.write("%s\n" % cmd)
-        proc.stdin.write('printf "%%s %%s\\n" %s "$?"\n' % SENTINEL)
+        # A LEADING newline: without it, a command whose output does not end
+        # in one leaves the sentinel on that same line, the startswith()
+        # check never matches, and the daemon waits out the full deadline —
+        # measured at 75.20s for `head -c 100`, with the data already there.
+        # The extra newline is removed from the result below, so output is
+        # byte-identical either way.
+        proc.stdin.write('printf "\\n%%s %%s\\n" %s "$?"\n' % SENTINEL)
         proc.stdin.flush()
         lines = []
         while True:
@@ -532,7 +538,12 @@ def cmd_shelld(args):
                     rc = int(rc_s)
                 except ValueError:
                     rc = 0
-                return rc, "".join(lines)
+                body = "".join(lines)
+                # Drop exactly the newline we injected, so a command that
+                # ended with one keeps it and one that did not stays bare.
+                if body.endswith("\n"):
+                    body = body[:-1]
+                return rc, body
             lines.append(line)
 
     try:
@@ -970,6 +981,26 @@ def cmd_open(args):
     # LAUNCH the app when we can. The deep link is a fallback for when there
     # is no device shell — asking for "whatsapp" and getting a browser open
     # on wa.me is not what anyone means.
+    if p and not have_shell():
+        # LEVEL 1 LAUNCH. Measured on-device: `am start -n <component>`
+        # succeeds from Termux with shizuku down and adb off, because
+        # launching an activity does not need shell UID. Losing the shell
+        # tier must not cost app launching — it is the first step of most
+        # tasks, and the whole tier design is that level 1 keeps working.
+        rc, out = run(["am", "start", "-n", "%s/.MainActivity" % p],
+                      timeout=25)
+        if rc != 0:
+            # Without a shell we cannot resolve the real launcher activity,
+            # so fall back to the monitor-free intent form.
+            rc, out = run(["am", "start", "-a",
+                           "android.intent.action.MAIN", "-c",
+                           "android.intent.category.LAUNCHER", "-n", p],
+                          timeout=25)
+        if rc == 0:
+            record("open", target, "act", "opened (level 1, no shell)")
+            return 0
+        # fall through to the link path below
+
     if p and have_shell():
         if args.print_url:
             die("%r launches as an app, not a link" % target, 2)
@@ -1483,8 +1514,34 @@ WATCHDOG_STEPS = (
      "adb is pinned to 5555, so reconnecting is a single dial"),
     ("shizuku", "test -x $HOME/rish && RISH_APPLICATION_ID=com.termux "
                 "timeout 20 $HOME/rish -c true >/dev/null 2>&1",
-     "shizuku is the shell tier that survives everything; check it answers"),
+     "shizuku is the shell tier; check it still answers"),
 )
+
+
+def tier_notice(alive):
+    """Tell the human when the shell tier is gone.
+
+    Shizuku's service can stop while the phone stays up — observed with an
+    uptime of two days — and Level 1 keeps working, which is by design. But
+    a silent loss means the phone quietly sheds half its capability and the
+    agent starts refusing things for reasons nobody can see. So it says so,
+    on the device, with the fix in the notification.
+    """
+    if not have_termux():
+        return
+    if alive:
+        run([shutil.which("termux-notification-remove") or "true",
+             "phone-tier"], timeout=15)
+        return
+    run([shutil.which("termux-notification") or "true",
+         "--title", "phone: shell tier down",
+         "--content", "Shizuku stopped. Screen/tap unavailable; inbox and "
+                      "voice still work. Open Shizuku and start it.",
+         "--id", "phone-tier", "--priority", "high",
+         "--button1", "Open Shizuku",
+         "--button1-action",
+         "am start -n moe.shizuku.privileged.api/"
+         "moe.shizuku.manager.MainActivity"], timeout=20)
 
 
 def cmd_watchdog(args):
@@ -1542,6 +1599,9 @@ def cmd_watchdog(args):
     # writes a line every 15 minutes buries the entries that matter.
     if any(h.endswith("!") for h in healed):
         record("watchdog", " ".join(healed), "act", "healed")
+    # Raise or clear the tier notice based on what we just measured.
+    tier_notice(not any(h.startswith("shizuku") and h.endswith("!")
+                        for h in healed))
     print(" ".join(healed))
     return 0
 
