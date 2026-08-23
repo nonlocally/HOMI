@@ -748,12 +748,27 @@ def cmd_tap(args):
 def cmd_type(args):
     need_shell()
     text = " ".join(args.text)
-    # `input text` is space-separated-token hostile; %s is the documented
-    # escape, and quoting keeps the rest of the shell out of it.
-    safe = text.replace("%", "%%").replace(" ", "%s")
-    safe = re.sub(r"[^\w%@.,:;!?'\"/+()\[\]#&*-]", "", safe)
-    dev_shell("input text '%s'" % safe.replace("'", ""))
-    record("type", text[:200], "act")
+    # `input text` mangles multi-word strings: the documented %s-for-space
+    # escape silently dropped most of a sentence on this device (measured —
+    # "Written by an AI agent over Shizuku" arrived as "iuku"). Typing word
+    # by word with an explicit SPACE keyevent is slower and correct.
+    words = text.split(" ")
+    typed = 0
+    for i, w in enumerate(words):
+        if i:
+            dev_shell("input keyevent 62")      # KEYCODE_SPACE
+        if not w:
+            continue
+        # Keep the word out of the shell's way; input text takes one token.
+        safe = w.replace("'", "")
+        safe = re.sub(r"[^\w@.,:;!?\"/+()\[\]#&*%-]", "", safe)
+        if not safe:
+            continue
+        rc, _ = dev_shell("input text '%s'" % safe)
+        if rc == 0:
+            typed += 1
+    record("type", text[:200], "act",
+           "typed %d/%d words" % (typed, len([w for w in words if w])))
     return 0
 
 
