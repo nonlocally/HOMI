@@ -589,6 +589,13 @@ def cmd_screen(args):
     rc, data = adb("exec-out", "screencap -p", timeout=60, want_bytes=True)
     if rc != 0 or not data:
         die("screenshot failed (screen off or secure surface)", 4)
+    if out_path == "-":
+        # Straight to stdout so the cockpit can stream it over ssh without
+        # leaving a picture of someone's phone lying around on disk.
+        record("screen", "stdout", "read")
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        return 0
     with open(out_path, "wb") as f:
         f.write(data)
     record("screen", out_path, "read")

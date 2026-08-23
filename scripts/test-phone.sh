@@ -278,6 +278,12 @@ if printf '%s' "$out" | grep -q "950" && printf '%s' "$out" | grep -q "2050"; th
   ok "find --id resolves a resource-id to coordinates"
 else bad "find --id (got: $out)"; fi
 
+echo "== screen --out - streams to stdout (no picture left on disk)"
+if grep -q 'out_path == "-"' "$HERE/lib/phone" && \
+   grep -q "stdout.buffer.write" "$HERE/lib/phone"; then
+  ok "screen supports streaming to stdout for the cockpit"
+else bad "screen --out - missing"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

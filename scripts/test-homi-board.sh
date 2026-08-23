@@ -254,6 +254,23 @@ vbad="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/voic
 if [ "$vbad" != "200" ]; then ok "voice rejects a non-conforming target"
 else bad "voice accepted a bad target"; fi
 
+echo "== cockpit: the device as an operable surface"
+# The board's own roster gates this, so an unknown device must 404 rather
+# than becoming an ssh attempt.
+c="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/device/not-a-real-device" 2>/dev/null)"
+if [ "$c" != "200" ]; then ok "an unknown device has no cockpit (no blind ssh)"
+else bad "unknown device served a cockpit"; fi
+
+c="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/api/device/not-a-real-device/notifs" 2>/dev/null)"
+if [ "$c" = "403" ] || [ "$c" = "404" ]; then
+  ok "the device API refuses an unknown device"
+else bad "device API allowed an unknown device (got $c)"; fi
+
+# Token first, before anything else is even considered.
+c="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/api/device/x/notifs" 2>/dev/null)"
+if [ "$c" = "403" ]; then ok "the device API is token-gated"
+else bad "device API token gate (got $c)"; fi
+
 kill_server
 
 echo "== the live-dot reflects a seat surface, not just the mail plane"
