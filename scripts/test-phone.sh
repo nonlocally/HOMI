@@ -34,7 +34,8 @@ cat > "$T/notifs.json" <<'JSON'
   {"id":1,"tag":"","key":"0|com.whatsapp|1|null|10123","group":"","packageName":"com.whatsapp","title":"peer peer-user","content":"see you at 3","when":"2026-08-23 09:15:00"},
   {"id":2,"tag":"","key":"0|com.google.android.gm|2|null|10200","group":"","packageName":"com.google.android.gm","title":"MIT Payroll","content":"Your statement is ready","when":"2026-08-23 08:00:00"},
   {"id":3,"tag":"","key":"0|com.google.android.apps.turbo|3|null|10300","group":"","packageName":"com.google.android.apps.turbo","title":"Reduce screen timeout","content":"Long screen timeout consumes battery","when":"2026-08-22 23:00:00"},
-  {"id":4,"tag":"","key":"0|com.whatsapp|4|null|10123","group":"","packageName":"com.whatsapp","title":"Mom","content":"call me when free","when":"2026-08-23 10:02:00"}
+  {"id":4,"tag":"","key":"0|com.whatsapp|4|null|10123","group":"","packageName":"com.whatsapp","title":"Mom","content":"call me when free","when":"2026-08-23 10:02:00"},
+  {"id":5,"tag":"","key":"0|com.whatsapp|5|null|10123","group":"","packageName":"com.whatsapp","title":"Lab group","content":"","lines":["Ravi: pushed the fix","Sara: running it now"],"when":"2026-08-23 10:05:00"}
 ]
 JSON
 
@@ -151,6 +152,47 @@ out="$("$PHONE" msg whatsapp --to "+16175551234" --text "on my way" --print-url 
 if printf '%s' "$out" | grep -q "16175551234" && printf '%s' "$out" | grep -q "on%20my%20way"; then
   ok "msg builds a wa.me link with encoded text"
 else bad "msg wa.me link (got: $out)"; fi
+
+echo "== voice: one turn = capture -> hand to a brain -> the brain speaks back"
+# --text injects a transcript, so the turn is testable without a microphone
+# (and lets the human type instead of talk).
+out="$("$PHONE" voice --text "what are my messages" --to ember --print-only 2>&1)"
+if printf '%s' "$out" | grep -q "ember" && printf '%s' "$out" | grep -q "what are my messages"; then
+  ok "voice routes a transcript to the named agent"
+else bad "voice routing (got: $out)"; fi
+
+out="$("$PHONE" voice --text "   " --print-only 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then ok "an empty transcript is refused, never sent as a blank prompt"
+else bad "voice empty transcript (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" voice --text "hi" --print-only 2>&1)"
+if printf '%s' "$out" | grep -qiE "voice|spoken|phone say"; then
+  ok "the delivered prompt tells the brain it is a SPOKEN turn (answer via phone say)"
+else bad "voice prompt framing (got: $out)"; fi
+
+echo "== multiline messages are NOT lost (the known termux-api empty-content bug)"
+# termux-notification-list returns content:"" for MessagingStyle notifications
+# — exactly the WhatsApp/group-chat case — but still fills `lines`. Dropping
+# those would silently hide the most important messages on the phone.
+out="$("$PHONE" notifs --from "$T/notifs.json" --app whatsapp 2>&1)"
+if printf '%s' "$out" | grep -q "Lab group" && printf '%s' "$out" | grep -q "pushed the fix"; then
+  ok "a group chat with empty content still shows its message lines"
+else bad "multiline recovery (got: $out)"; fi
+
+echo "== ptt: a persistent notification whose buttons ARE the agent's front door"
+# termux-notification --buttonN-action runs a shell command inside Termux, and
+# an action containing $REPLY gets a RemoteInput text box. So the lock-screen
+# notification becomes both press-to-talk AND type-to-agent — no adb involved.
+out="$("$PHONE" ptt --to ember --print-only 2>&1)"
+if printf '%s' "$out" | grep -q -- "--button1" && printf '%s' "$out" | grep -q "voice"; then
+  ok "ptt wires a Talk button to a voice turn"
+else bad "ptt talk button (got: $out)"; fi
+if printf '%s' "$out" | grep -q 'REPLY'; then
+  ok "ptt wires a typed-reply button via RemoteInput (\$REPLY)"
+else bad "ptt reply button (got: $out)"; fi
+if printf '%s' "$out" | grep -q -- "--ongoing"; then
+  ok "ptt is ongoing so it stays pinned"
+else bad "ptt not ongoing (got: $out)"; fi
 
 echo
 echo "pass=$pass fail=$fail"

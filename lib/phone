@@ -318,6 +318,26 @@ def get_notifs(from_file=None):
     return data if isinstance(data, list) else []
 
 
+def body_of(n):
+    """The readable text of a notification.
+
+    termux-notification-list has a long-standing bug where MessagingStyle
+    notifications — group chats, i.e. exactly the messages that matter most —
+    come back with content:"" while the actual text sits in `lines`. Taking
+    `content` alone silently hides them, so fall through the alternatives.
+    """
+    for key in ("content", "bigText", "text"):
+        v = n.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.replace("\n", " ").strip()
+    lines = n.get("lines")
+    if isinstance(lines, list):
+        joined = " / ".join(str(x).strip() for x in lines if str(x).strip())
+        if joined:
+            return joined
+    return ""
+
+
 def cmd_notifs(args):
     items = get_notifs(args.from_file)
     if args.app:
@@ -341,8 +361,7 @@ def cmd_notifs(args):
         app = (n.get("packageName") or "?").split(".")[-1]
         when = (n.get("when") or "")[11:16]
         title = n.get("title") or ""
-        content = (n.get("content") or "").replace("\n", " ")
-        print("%s  %-10s %s: %s" % (when, app, title, content))
+        print("%s  %-10s %s: %s" % (when, app, title, body_of(n)))
     return 0
 
 
@@ -552,6 +571,79 @@ def cmd_foreground(args):
     return 0
 
 
+VOICE_FRAME = (
+    "[spoken aloud by @aadarwal into the phone. This is a VOICE turn: answer "
+    "out loud by running `phone say \"<your answer>\"`, and keep it to one or "
+    "two sentences — it is being listened to, not read. Use the `phone` verbs "
+    "to act on the device.]\n\n%s"
+)
+
+
+def cmd_voice(args):
+    if args.text is not None:
+        text = args.text
+    else:
+        need_termux()
+        rc, out = termux("termux-speech-to-text", timeout=args.timeout)
+        text = (out or "").strip()
+        if text and not args.quiet:
+            # An early acknowledgement is the cheapest latency win there is:
+            # the brain's answer is seconds away, but silence feels broken.
+            run([shutil.which("termux-tts-speak") or "true", "ok"], timeout=10)
+    if not (text or "").strip():
+        if args.text is None and have_termux():
+            termux("termux-tts-speak", "I didn't catch that", timeout=15)
+        sys.stderr.write("phone: nothing heard\n")
+        return 1
+    prompt = VOICE_FRAME % text.strip()
+    if args.print_only:
+        print("-> %s" % args.to)
+        print(prompt)
+        return 0
+    cli = shutil.which("communicate") or shutil.which("homi")
+    if not cli:
+        die("no homi CLI on PATH — cannot reach a brain", 3)
+    rc, out = run([cli, "homi", "send", args.to, prompt, "--from", "phone"],
+                  timeout=40)
+    if rc != 0:
+        die("could not deliver to %s: %s" % (args.to, (out or "").strip()), 4)
+    print((out or "").strip())
+    return 0
+
+
+def cmd_ptt(args):
+    """Post the agent's front door: an ongoing notification whose buttons run
+    scripts inside Termux.
+
+    This is the trigger mechanism that actually survives Android. An always-on
+    wake word loses to the background-process killer, and the headset button
+    only reaches whoever owns the MediaSession — but a notification button is
+    event-driven, costs nothing while idle, and works from the lock screen.
+    A button action containing $REPLY gets a RemoteInput text box, so the same
+    notification is both press-to-talk and type-to-agent.
+    """
+    me = os.path.abspath(sys.argv[0])
+    talk = "%s voice --to %s" % (me, args.to)
+    typed = '%s voice --to %s --text "$REPLY"' % (me, args.to)
+    argv = ["termux-notification",
+            "--title", args.title,
+            "--content", args.content,
+            "--id", args.id,
+            "--ongoing", "--alert-once",
+            "--priority", "high",
+            "--button1", "Talk", "--button1-action", talk,
+            "--button2", "Type", "--button2-action", typed]
+    if args.print_only:
+        print(" ".join(argv))
+        return 0
+    need_termux()
+    rc, out = run([shutil.which("termux-notification")] + argv[1:], timeout=30)
+    if rc != 0:
+        die("could not post the notification: %s" % (out or "").strip(), 4)
+    print("press-to-talk posted (id=%s)" % args.id)
+    return 0
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="phone", add_help=True,
                                 description="drive an Android device as a "
@@ -642,6 +734,21 @@ def build_parser():
     s.add_argument("--grep")
 
     add("foreground", cmd_foreground, "the app currently on screen")
+
+    s = add("voice", cmd_voice, "one spoken turn: listen -> a brain -> speak")
+    s.add_argument("--to", default="ember", help="agent to think about it")
+    s.add_argument("--text", default=None,
+                   help="skip the microphone and use this text")
+    s.add_argument("--timeout", type=int, default=60)
+    s.add_argument("--quiet", action="store_true", help="no spoken ack")
+    s.add_argument("--print-only", action="store_true", dest="print_only")
+
+    s = add("ptt", cmd_ptt, "post the press-to-talk / type-to-agent notification")
+    s.add_argument("--to", default="ember")
+    s.add_argument("--title", default="ember")
+    s.add_argument("--content", default="Talk to your phone")
+    s.add_argument("--id", default="phone-voice")
+    s.add_argument("--print-only", action="store_true", dest="print_only")
     return p
 
 
