@@ -1,0 +1,668 @@
+#!/usr/bin/env python3
+"""phone — drive an Android device as a fabric surface.
+
+The device analog of anu's `pane` and `nv`: one verb layer over the two
+mechanisms an unrooted Android phone actually offers.
+
+  termux-api   the device as a peripheral — speak, listen, notifications,
+               camera, torch, location, clipboard, SMS.
+  adb (self)   the device as a screen — see it (screencap), read it as text
+               (uiautomator), touch it (input), launch it (am start).
+               adb is connected from the phone TO ITSELF over wireless
+               debugging, so no PC is tethered and nothing leaves the device.
+
+Everything an agent needs is a verb here, so the brain never has to know
+whether a capability comes from termux-api or adb. Any agent on the fabric —
+local (ember) or remote (fable on the mini, crucible on the 88-core box) —
+drives the phone by calling these verbs.
+
+Stdlib only. Runs on the phone, in Termux.
+
+The parsing verbs (`ui`, `find`, `notifs`) accept `--from FILE` so the logic
+that an LLM depends on is testable off-device.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+# Friendly names -> packages. An agent says "whatsapp", not a reverse-DNS id.
+APPS = {
+    "whatsapp": "com.whatsapp",
+    "gmail": "com.google.android.gm",
+    "mail": "com.google.android.gm",
+    "signal": "org.thoughtcrime.securesms",
+    "telegram": "org.telegram.messenger",
+    "messages": "com.google.android.apps.messaging",
+    "sms": "com.google.android.apps.messaging",
+    "ytmusic": "com.google.android.apps.youtube.music",
+    "youtubemusic": "com.google.android.apps.youtube.music",
+    "youtube": "com.google.android.youtube",
+    "spotify": "com.spotify.music",
+    "maps": "com.google.android.apps.maps",
+    "chrome": "com.android.chrome",
+    "photos": "com.google.android.apps.photos",
+    "calendar": "com.google.android.calendar",
+    "slack": "com.Slack",
+    "instagram": "com.instagram.android",
+}
+
+
+# Deep links: the LEVEL-1 path to app control. Android switches wireless
+# debugging OFF on a network change or after idle, so anything that matters
+# must not need adb. termux-open-url hands a link to Android, which routes it
+# to the owning app — same result as `am start`, no adb involved.
+LINKS = {
+    "ytmusic": "https://music.youtube.com/search?q={q}",
+    "youtubemusic": "https://music.youtube.com/search?q={q}",
+    "spotify": "https://open.spotify.com/search/{q}",
+    "youtube": "https://www.youtube.com/results?search_query={q}",
+    "whatsapp": "https://wa.me/",
+    "gmail": "https://mail.google.com/",
+    "mail": "https://mail.google.com/",
+    "maps": "https://maps.google.com/?q={q}",
+    "photos": "https://photos.google.com/",
+    "calendar": "https://calendar.google.com/",
+    "chrome": "https://www.google.com/",
+}
+
+
+def is_url(s):
+    return "://" in s or s.startswith("www.")
+
+
+def pkg_of(name):
+    if not name:
+        return None
+    n = name.strip().lower()
+    if n in APPS:
+        return APPS[n]
+    return name if "." in name else None
+
+
+def die(msg, code=2):
+    sys.stderr.write("phone: %s\n" % msg)
+    sys.exit(code)
+
+
+def run(cmd, timeout=30, want_bytes=False):
+    """Run a command. Returns (rc, out). Never raises on a non-zero exit."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                           text=not want_bytes)
+        return r.returncode, (r.stdout if r.stdout is not None else
+                              (b"" if want_bytes else ""))
+    except FileNotFoundError:
+        return 127, (b"" if want_bytes else "")
+    except subprocess.TimeoutExpired:
+        return 124, (b"" if want_bytes else "")
+
+
+def have_termux():
+    if os.environ.get("PHONE_NO_DEVICE"):
+        return False
+    return shutil.which("termux-tts-speak") is not None
+
+
+def need_termux():
+    if not have_termux():
+        die("no device: termux-api tools are not available here. "
+            "`phone` runs ON the phone (Termux), not on the conductor.", 3)
+
+
+def termux(name, *args, **kw):
+    need_termux()
+    exe = shutil.which(name)
+    if not exe:
+        die("no device: %s is missing (install the termux-api package AND "
+            "the Termux:API app, signed by the same key as Termux)" % name, 3)
+    return run([exe] + [str(a) for a in args], timeout=kw.get("timeout", 30))
+
+
+def adb(*args, **kw):
+    """adb against the phone's own wireless-debugging endpoint."""
+    if os.environ.get("PHONE_NO_DEVICE"):
+        die("no device: adb is unavailable", 3)
+    exe = shutil.which("adb")
+    if not exe:
+        die("no device: adb is missing (pkg install android-tools)", 3)
+    rc, out = run([exe] + [str(a) for a in args],
+                  timeout=kw.get("timeout", 40),
+                  want_bytes=kw.get("want_bytes", False))
+    if rc == 127:
+        die("no device: adb could not run", 3)
+    return rc, out
+
+
+def adb_ready():
+    rc, out = adb("devices", timeout=15)
+    return rc == 0 and re.search(r"\tdevice\s*$", out or "", re.M) is not None
+
+
+def need_adb():
+    if not adb_ready():
+        die("adb is not connected — run `adb-heal` (the port rotates after a "
+            "reboot; pairing itself persists)", 3)
+
+
+# ---------------------------------------------------------------- UI parsing
+
+class El(object):
+    __slots__ = ("text", "desc", "rid", "cls", "clickable", "enabled",
+                 "bounds", "parent")
+
+    def __init__(self):
+        self.text = ""
+        self.desc = ""
+        self.rid = ""
+        self.cls = ""
+        self.clickable = False
+        self.enabled = True
+        self.bounds = (0, 0, 0, 0)
+        self.parent = None
+
+    @property
+    def center(self):
+        x1, y1, x2, y2 = self.bounds
+        return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+    @property
+    def label(self):
+        if self.text:
+            return self.text
+        if self.desc:
+            return "[%s]" % self.desc
+        return self.rid.split("/")[-1] if self.rid else ""
+
+
+_BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def parse_ui(xml_text):
+    """uiautomator XML -> flat element list, each knowing its parent.
+
+    Parents matter: in real apps the visible label is a non-clickable TextView
+    inside a clickable row, so tapping the label's own center can miss the
+    handler entirely. `find` walks up from a match to the nearest clickable
+    ancestor.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        die("could not parse the UI tree (%s)" % e, 4)
+    out = []
+
+    def walk(node, parent):
+        el = None
+        if node.tag == "node":
+            el = El()
+            a = node.attrib
+            el.text = (a.get("text") or "").strip()
+            el.desc = (a.get("content-desc") or "").strip()
+            el.rid = a.get("resource-id") or ""
+            el.cls = a.get("class") or ""
+            el.clickable = (a.get("clickable") == "true")
+            el.enabled = (a.get("enabled") != "false")
+            m = _BOUNDS.match(a.get("bounds") or "")
+            if m:
+                el.bounds = tuple(int(g) for g in m.groups())
+            el.parent = parent
+            out.append(el)
+        for kid in list(node):
+            walk(kid, el if el is not None else parent)
+
+    walk(root, None)
+    return out
+
+
+def clickable_target(el):
+    """The element that should actually receive the tap: el if it is
+    clickable, else its nearest clickable-and-enabled ancestor."""
+    cur = el
+    while cur is not None:
+        if cur.clickable and cur.enabled:
+            return cur
+        cur = cur.parent
+    return None
+
+
+def get_ui(from_file=None):
+    if from_file:
+        with open(from_file, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    need_adb()
+    # uiautomator writes to a file on the device; /dev/tty streams it back.
+    rc, out = adb("shell", "uiautomator dump /dev/tty", timeout=60)
+    if "<hierarchy" not in (out or ""):
+        rc, out = adb("shell",
+                      "uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; "
+                      "cat /sdcard/ui.xml", timeout=60)
+    if "<hierarchy" not in (out or ""):
+        die("could not read the UI tree (the screen may be off or secure)", 4)
+    i = out.index("<hierarchy")
+    j = out.rfind("</hierarchy>")
+    return out[i:j + len("</hierarchy>")] if j > 0 else out[i:]
+
+
+def cmd_ui(args):
+    els = parse_ui(get_ui(args.from_file))
+    lines = []
+    for el in els:
+        lab = el.label
+        if not lab:
+            continue
+        if args.grep and args.grep.lower() not in lab.lower():
+            continue
+        tgt = clickable_target(el)
+        if tgt is None:
+            lines.append("%-11s %s" % ("-", lab))
+        else:
+            x, y = tgt.center
+            lines.append("%-11s %s" % ("%d,%d" % (x, y), lab))
+    if not lines:
+        print("(nothing readable on screen)")
+        return 0
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_find(args):
+    els = parse_ui(get_ui(args.from_file))
+    q = args.query.lower()
+    exact, partial = [], []
+    for el in els:
+        for hay in (el.text, el.desc):
+            if not hay:
+                continue
+            h = hay.lower()
+            if h == q:
+                exact.append(el)
+            elif q in h:
+                partial.append(el)
+            break
+    for pool in (exact, partial):
+        for el in pool:
+            tgt = clickable_target(el)
+            if tgt is not None:
+                x, y = tgt.center
+                print("%d %d" % (x, y))
+                return 0
+    # An honest miss. Never print coordinates we are not sure about: a wrong
+    # tap on someone's phone is worse than no tap.
+    sys.stderr.write("phone: no enabled, tappable element matching %r\n"
+                     % args.query)
+    return 1
+
+
+# ------------------------------------------------------- notification inbox
+
+def get_notifs(from_file=None):
+    if from_file:
+        with open(from_file, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    else:
+        rc, raw = termux("termux-notification-list", timeout=40)
+        if rc != 0 or not (raw or "").strip():
+            die("could not read notifications — is Termux:API granted "
+                "notification access? (cmd notification allow_listener "
+                "com.termux.api/.apis.NotificationListAPI$NotificationService)",
+                4)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        die("notification list was not JSON", 4)
+    return data if isinstance(data, list) else []
+
+
+def cmd_notifs(args):
+    items = get_notifs(args.from_file)
+    if args.app:
+        want = pkg_of(args.app)
+        if not want:
+            die("unknown app %r (use a package name or one of: %s)"
+                % (args.app, ", ".join(sorted(APPS))), 2)
+        items = [n for n in items if n.get("packageName") == want]
+    if args.since:
+        items = [n for n in items if (n.get("when") or "") > args.since]
+    items.sort(key=lambda n: n.get("when") or "", reverse=True)
+    if args.limit:
+        items = items[:args.limit]
+    if args.json:
+        print(json.dumps(items, indent=2))
+        return 0
+    if not items:
+        print("(no notifications)")
+        return 0
+    for n in items:
+        app = (n.get("packageName") or "?").split(".")[-1]
+        when = (n.get("when") or "")[11:16]
+        title = n.get("title") or ""
+        content = (n.get("content") or "").replace("\n", " ")
+        print("%s  %-10s %s: %s" % (when, app, title, content))
+    return 0
+
+
+# ------------------------------------------------------------- device verbs
+
+def cmd_say(args):
+    text = " ".join(args.text)
+    if not text.strip():
+        die("nothing to say", 2)
+    rc, _ = termux("termux-tts-speak", text, timeout=args.timeout)
+    return 0 if rc == 0 else 1
+
+
+def cmd_listen(args):
+    need_termux()
+    rc, out = termux("termux-speech-to-text", timeout=args.timeout)
+    text = (out or "").strip()
+    if not text:
+        sys.stderr.write("phone: heard nothing\n")
+        return 1
+    print(text)
+    return 0
+
+
+def cmd_notify(args):
+    rc, _ = termux("termux-notification", "--title", args.title,
+                   "--content", args.content, "--id", str(args.id))
+    return 0 if rc == 0 else 1
+
+
+def cmd_tap(args):
+    need_adb()
+    adb("shell", "input tap %d %d" % (args.x, args.y))
+    return 0
+
+
+def cmd_type(args):
+    need_adb()
+    text = " ".join(args.text)
+    # `input text` is space-separated-token hostile; %s is the documented
+    # escape, and quoting keeps the rest of the shell out of it.
+    safe = text.replace("%", "%%").replace(" ", "%s")
+    safe = re.sub(r"[^\w%@.,:;!?'\"/+()\[\]#&*-]", "", safe)
+    adb("shell", "input text '%s'" % safe.replace("'", ""))
+    return 0
+
+
+def cmd_key(args):
+    need_adb()
+    k = args.key.upper()
+    if not k.startswith("KEYCODE_"):
+        k = "KEYCODE_" + k
+    if not re.match(r"^KEYCODE_[A-Z0-9_]+$", k):
+        die("bad keycode %r" % args.key, 2)
+    adb("shell", "input keyevent %s" % k)
+    return 0
+
+
+def launch(url, print_only=False):
+    """Level 1: hand a link to Android. No adb, so this keeps working when
+    wireless debugging switches itself off."""
+    if print_only:
+        print(url)
+        return 0
+    exe = shutil.which("termux-open-url")
+    if exe:
+        rc, _ = run([exe, url], timeout=30)
+        if rc == 0:
+            return 0
+    # Level 2 fallback, only if adb happens to be up.
+    if not os.environ.get("PHONE_NO_DEVICE") and shutil.which("adb") \
+            and adb_ready():
+        adb("shell", "am start -a android.intent.action.VIEW -d %s"
+            % json.dumps(url), timeout=30)
+        return 0
+    die("could not open %s (Termux:API missing and adb is down)" % url, 3)
+
+
+def cmd_open(args):
+    target = args.target
+    if is_url(target):
+        return launch(target, args.print_url)
+    key = target.strip().lower()
+    if key in LINKS:
+        return launch(LINKS[key].replace("{q}", ""), args.print_url)
+    p = pkg_of(target)
+    if not p:
+        die("unknown app %r (known: %s)" % (target, ", ".join(sorted(APPS))), 2)
+    if args.print_url:
+        die("%r has no deep link; it launches via adb only" % target, 2)
+    need_adb()
+    adb("shell", "monkey -p %s -c android.intent.category.LAUNCHER 1" % p,
+        timeout=30)
+    return 0
+
+
+def cmd_play(args):
+    from urllib.parse import quote_plus
+    query = " ".join(args.query)
+    app = (args.app or "ytmusic").strip().lower()
+    tmpl = LINKS.get(app)
+    if not tmpl or "{q}" not in tmpl:
+        die("cannot search in %r — try ytmusic, spotify, or youtube" % app, 2)
+    return launch(tmpl.replace("{q}", quote_plus(query)), args.print_url)
+
+
+def cmd_msg(args):
+    """Open a chat with the message prefilled. The human still taps send —
+    which is the right default: an agent that can silently send messages as
+    you is a different, much larger trust decision."""
+    from urllib.parse import quote
+    app = args.app.strip().lower()
+    if app != "whatsapp":
+        die("msg currently supports whatsapp only", 2)
+    num = re.sub(r"[^\d]", "", args.to or "")
+    if not num:
+        die("--to must be a phone number in international form", 2)
+    url = "https://wa.me/%s" % num
+    if args.text:
+        url += "?text=%s" % quote(args.text, safe="")
+    return launch(url, args.print_url)
+
+
+def cmd_media(args):
+    need_adb()
+    keys = {"pause": "KEYCODE_MEDIA_PAUSE", "play": "KEYCODE_MEDIA_PLAY",
+            "next": "KEYCODE_MEDIA_NEXT", "prev": "KEYCODE_MEDIA_PREVIOUS",
+            "stop": "KEYCODE_MEDIA_STOP"}
+    adb("shell", "input keyevent %s" % keys[args.action])
+    return 0
+
+
+def cmd_screen(args):
+    need_adb()
+    out_path = args.out or "screen.png"
+    rc, data = adb("exec-out", "screencap -p", timeout=60, want_bytes=True)
+    if rc != 0 or not data:
+        die("screenshot failed (screen off or secure surface)", 4)
+    with open(out_path, "wb") as f:
+        f.write(data)
+    print(out_path)
+    return 0
+
+
+def cmd_photo(args):
+    rc, _ = termux("termux-camera-photo", "-c", str(args.cam), args.out,
+                   timeout=60)
+    if rc != 0:
+        return 1
+    print(args.out)
+    return 0
+
+
+def cmd_torch(args):
+    rc, _ = termux("termux-torch", args.state)
+    return 0 if rc == 0 else 1
+
+
+def cmd_battery(args):
+    rc, out = termux("termux-battery-status")
+    if rc != 0:
+        return 1
+    try:
+        d = json.loads(out)
+        print("%s%%  %s  %s" % (d.get("percentage"), d.get("status", "?"),
+                                d.get("plugged", "")))
+    except ValueError:
+        print((out or "").strip())
+    return 0
+
+
+def cmd_where(args):
+    rc, out = termux("termux-location", "-p",
+                     args.provider, timeout=60)
+    print((out or "").strip())
+    return 0 if rc == 0 else 1
+
+
+def cmd_clip(args):
+    if args.action == "get":
+        rc, out = termux("termux-clipboard-get")
+        print((out or "").rstrip("\n"))
+        return 0 if rc == 0 else 1
+    rc, _ = termux("termux-clipboard-set", " ".join(args.text))
+    return 0 if rc == 0 else 1
+
+
+def cmd_apps(args):
+    need_adb()
+    rc, out = adb("shell", "pm list packages -3", timeout=40)
+    pkgs = sorted(l.replace("package:", "").strip()
+                  for l in (out or "").splitlines() if l.strip())
+    rev = {v: k for k, v in APPS.items()}
+    for p in pkgs:
+        if args.grep and args.grep.lower() not in p.lower():
+            continue
+        print("%-45s %s" % (p, rev.get(p, "")))
+    return 0
+
+
+def cmd_foreground(args):
+    need_adb()
+    rc, out = adb("shell", "dumpsys activity activities", timeout=40)
+    m = re.search(r"ResumedActivity.*?([a-zA-Z0-9_.]+/[a-zA-Z0-9_.$]+)",
+                  out or "")
+    print(m.group(1) if m else "(unknown)")
+    return 0
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="phone", add_help=True,
+                                description="drive an Android device as a "
+                                            "fabric surface")
+    sub = p.add_subparsers(dest="verb")
+
+    def add(name, fn, help_):
+        s = sub.add_parser(name, help=help_)
+        s.set_defaults(fn=fn)
+        return s
+
+    s = add("say", cmd_say, "speak text aloud")
+    s.add_argument("text", nargs="+")
+    s.add_argument("--timeout", type=int, default=60)
+
+    s = add("listen", cmd_listen, "speech -> text on stdout")
+    s.add_argument("--timeout", type=int, default=60)
+
+    s = add("notifs", cmd_notifs, "the universal inbox (all apps)")
+    s.add_argument("--app")
+    s.add_argument("--since")
+    s.add_argument("--limit", type=int, default=0)
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--from", dest="from_file")
+
+    s = add("ui", cmd_ui, "read the screen as tappable text")
+    s.add_argument("--grep")
+    s.add_argument("--from", dest="from_file")
+
+    s = add("find", cmd_find, "label -> tap coordinates (or fail loudly)")
+    s.add_argument("query")
+    s.add_argument("--from", dest="from_file")
+
+    s = add("tap", cmd_tap, "tap x y")
+    s.add_argument("x", type=int)
+    s.add_argument("y", type=int)
+
+    s = add("type", cmd_type, "type text into the focused field")
+    s.add_argument("text", nargs="+")
+
+    s = add("key", cmd_key, "send a keyevent (BACK, HOME, ENTER, ...)")
+    s.add_argument("key")
+
+    s = add("open", cmd_open, "launch an app or a url")
+    s.add_argument("target")
+    s.add_argument("--print-url", action="store_true",
+                   dest="print_url", help="show the link instead of opening")
+
+    s = add("play", cmd_play, "play music by search query")
+    s.add_argument("query", nargs="+")
+    s.add_argument("--app")
+    s.add_argument("--print-url", action="store_true", dest="print_url")
+
+    s = add("msg", cmd_msg, "open a chat with a message prefilled")
+    s.add_argument("app")
+    s.add_argument("--to", required=True)
+    s.add_argument("--text", default="")
+    s.add_argument("--print-url", action="store_true", dest="print_url")
+
+    s = add("media", cmd_media, "pause/play/next/prev/stop")
+    s.add_argument("action", choices=["pause", "play", "next", "prev", "stop"])
+
+    s = add("screen", cmd_screen, "screenshot to a png")
+    s.add_argument("--out")
+
+    s = add("photo", cmd_photo, "take a photo")
+    s.add_argument("--cam", type=int, default=0)
+    s.add_argument("--out", default="photo.jpg")
+
+    s = add("torch", cmd_torch, "torch on|off")
+    s.add_argument("state", choices=["on", "off"])
+
+    add("battery", cmd_battery, "battery status")
+
+    s = add("where", cmd_where, "location")
+    s.add_argument("--provider", default="gps")
+
+    s = add("clip", cmd_clip, "clipboard get|set")
+    s.add_argument("action", choices=["get", "set"])
+    s.add_argument("text", nargs="*")
+
+    s = add("notify", cmd_notify, "post a notification")
+    s.add_argument("title")
+    s.add_argument("content")
+    s.add_argument("--id", type=int, default=1001)
+
+    s = add("apps", cmd_apps, "installed third-party packages")
+    s.add_argument("--grep")
+
+    add("foreground", cmd_foreground, "the app currently on screen")
+    return p
+
+
+def main(argv):
+    parser = build_parser()
+    if len(argv) < 2:
+        parser.print_help()
+        return 2
+    verb = argv[1]
+    valid = set(parser._subparsers._group_actions[0].choices) \
+        if parser._subparsers else set()
+    if verb not in valid and not verb.startswith("-"):
+        sys.stderr.write("phone: unknown verb %r\n" % verb)
+        sys.stderr.write("try one of: %s\n" % ", ".join(sorted(valid)))
+        return 2
+    args = parser.parse_args(argv[1:])
+    if not getattr(args, "fn", None):
+        parser.print_help()
+        return 2
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
