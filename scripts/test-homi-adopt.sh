@@ -420,6 +420,54 @@ print(rc != 0, bool(out.strip()))")"
 if [ "$r" = "True True" ]; then ok "an OSError degrades to a reported failure"
 else bad "ssh oserror handling (got: $r)"; fi
 
+echo "== the HUB's own key is pushed to the device (so a launchd daemon can dial without an agent)"
+r="$(PY "
+f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=False, reverse_ok=True, shim=True, tmux_bin='/x/tmux',
+         claude_bin='/x/claude', kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@mini',
+                          reverse_candidates=['1.2.3.4']))
+steps = [a['step'] for a in acts]
+print('authorize_hub_key_there' in steps)")"
+if [ "$r" = "True" ]; then ok "a device missing the hub key gets it installed"
+else bad "hub key plan (got: $r)"; fi
+
+echo "== hub key already installed -> no-op"
+r="$(PY "
+f = dict(os='Linux', login_shell='/bin/bash', home='/h', xdg='/run/user/1',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=True, reverse_ok=True, shim=True, tmux_bin='/x/tmux',
+         claude_bin='/x/claude', kernel_hash='SAME', py3=True)
+acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@mini',
+                                  reverse_candidates=['1.2.3.4']))
+print(len(acts), len(checklist))")"
+if [ "$r" = "0 0" ]; then ok "a fully adopted device stays a no-op"
+else bad "hub key idempotence (got: $r)"; fi
+
+echo "== probe asks whether the hub key is already authorized there"
+r="$(PY "
+sc = ha.probe_script('a@mini', hub_key_material='ABCDEFmaterial123')
+print('HUBKEY=' in sc, 'ABCDEFmaterial123' in sc, 'authorized_keys' in sc)")"
+if [ "$r" = "True True True" ]; then
+  ok "probe greps the device's authorized_keys for the hub's key material"
+else bad "probe hub key (got: $r)"; fi
+
+echo "== the hub key is installed with a real ssh-key shape, never blind text"
+r="$(PY "
+seen = []
+def okssh(addr, cmd, timeout=60):
+    seen.append(cmd); return (0, '')
+ha.execute('u@h', [{'step':'authorize_hub_key_there'}], dict(os='Darwin'),
+           dict(my_addr='a@mini', here_dir='/tmp',
+                hub_pubkey='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhubkeymaterial hub'),
+           ssh=okssh, say=lambda s: None)
+c = seen[-1]
+print('authorized_keys' in c, 'ssh-ed25519' in c, 'grep -q' in c)")"
+if [ "$r" = "True True True" ]; then
+  ok "installs into authorized_keys, deduped by grep, key-shaped"
+else bad "hub key install (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
