@@ -265,7 +265,12 @@ def plan(facts, local):
         # listens in ~/.local/run/cc-socks (the split-brain, proven live).
         need_restart = True
     if need_restart:
-        acts.append({"step": "restart_daemon"})   # always LAST: post-pair
+        # `env`: this device was moved off the default cc-socks, so its
+        # daemon must be restarted WITH that runtime dir — a profile is not
+        # enough (non-interactive ssh sources none on macOS, and a no-systemd
+        # Linux like Termux has no runtime dir at all).
+        acts.append({"step": "restart_daemon",
+                     "env": provisioned_rt})      # always LAST: post-pair
 
     return acts, checklist
 
@@ -504,12 +509,14 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
                 % ("refreshed (hash mismatch)" if r.returncode == 0
                    else "REFRESH FAILED"))
         elif step == "restart_daemon":
-            # macOS non-interactive ssh sources no profile, so bake the
-            # runtime dir into the command itself — otherwise the daemon
-            # resolves /tmp/cc-socks while claude (launched WITH the export)
-            # listens in ~/.local/run/cc-socks: the split-brain, proven live.
+            # Bake the runtime dir into the command whenever this device was
+            # steered. A profile is not enough: macOS non-interactive ssh
+            # sources none, and on a no-systemd Linux (Termux/Android) the
+            # unsteered daemon dies outright on /tmp/cc-socks (PermissionError
+            # — /tmp is not writable there). Keying this off the OS instead of
+            # the plan's own decision is what broke that case.
             env = ('XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/run}" '
-                   if facts.get("os") == "Darwin" else "")
+                   if (a.get("env") or facts.get("os") == "Darwin") else "")
             rc, out = ssh(addr,
                           "pkill -f 'homi.py daemon' 2>/dev/null; sleep 1; "
                           "%snohup python3 "

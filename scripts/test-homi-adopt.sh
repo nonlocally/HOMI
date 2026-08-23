@@ -479,6 +479,37 @@ if [ "$r" = "True" ]; then
   ok "no fabric key -> REV=0, so adopt authorizes it instead of trusting a fallback"
 else bad "reverse test guard (got: $r)"; fi
 
+echo "== a STEERED device carries the runtime dir into its daemon restart on ANY os"
+r="$(PY "
+def cap(store):
+    def f(addr, cmd, timeout=60):
+        store.append(cmd); return (0, '42')
+    return f
+# steered linux (no systemd: termux/android) -> restart must carry the env
+f = dict(os='Linux', login_shell='/bin/bash', home='/h', xdg='',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=True, reverse_ok=True, shim=True, tmux_bin='/x/tmux',
+         claude_bin='/x/claude', kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m',
+                          reverse_candidates=['1.2.3.4']))
+rst = [a for a in acts if a['step']=='restart_daemon']
+seen = []
+ha.execute('u@h', rst, f, dict(my_addr='a@m', here_dir='/tmp'),
+           ssh=cap(seen), say=lambda s: None)
+# a real systemd box (xdg present) is never steered -> no inline env
+g = dict(f, xdg='/run/user/1000')
+acts2, _ = ha.plan(g, dict(kernel_hash='SAME', my_addr='a@m',
+                           reverse_candidates=['1.2.3.4']))
+seen2 = []
+ha.execute('u@h', [{'step':'restart_daemon'}], g,
+           dict(my_addr='a@m', here_dir='/tmp'), ssh=cap(seen2), say=lambda s: None)
+print(bool(rst), 'XDG_RUNTIME_DIR' in seen[0],
+      not any(a['step']=='runtime_dir' for a in acts2),
+      'XDG_RUNTIME_DIR' not in seen2[0])")"
+if [ "$r" = "True True True True" ]; then
+  ok "steered -> daemon restarts WITH the runtime dir (any os); real systemd untouched"
+else bad "steered restart env (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
