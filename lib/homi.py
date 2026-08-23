@@ -3381,6 +3381,112 @@ def _pair_ssh(addr, cmd, timeout=25):
         return 255, "ssh: %s" % e
 
 
+def _cli_adopt(args):
+    """homi adopt <user@host> [--spawn NAME] — onboard a device COMPLETELY.
+
+    probe -> plan -> provision -> pair -> (spawn NAME) -> human checklist.
+    Everything pair only prints fixes for, adopt executes: the device's own
+    reverse key, a dial alias learned from $SSH_CONNECTION, a per-user
+    runtime dir (shared-machine cc-socks), the CLI shim, a hash-compared
+    kernel refresh. What still needs the human (claude /login, a Tailscale
+    SSH check) is detected and printed as a checklist, never a timeout."""
+    import homi_adopt as ha
+    addr, spawn_name, err = ha.parse_args(args)
+    if err:
+        print("adopt: %s" % err)
+        return 1
+    if spawn_name and not re.match(r"[a-z0-9][a-z0-9._-]{0,63}\Z", spawn_name):
+        print("adopt: bad agent name %r" % spawn_name)
+        return 1
+
+    mydev = self_device() or "?"
+    my_addr = "%s@%s" % (getpass_user(), mydev)
+    here_dir = os.path.dirname(os.path.abspath(__file__))
+    missing = ha.hub_missing_files(here_dir)
+    if missing:
+        print("adopt: this hub is missing kernel files %s — its own install "
+              "is incomplete; adopt cannot deploy or hash-compare them. Fix "
+              "the hub first." % ", ".join(missing))
+        return 1
+    local = {"kernel_hash": ha._local_kernel_hash(here_dir),
+             "my_addr": my_addr, "here_dir": here_dir}
+
+    print("adopt: onboarding %s" % addr)
+    rc, out = ha._run_ssh(addr, ha.probe_script(my_addr), timeout=45)
+    if rc != 0 and "=" not in out:
+        print("  probe                    FAILED (%s)" % out.strip()[:120])
+        print("  fix: make `ssh %s true` work, then re-run." % addr)
+        if rc == 124 or "tailscale" in out.lower():
+            # A HANG (rather than a refusal) on a tailnet device is almost
+            # always a pending Tailscale SSH check: ssh waits forever on a
+            # browser approval nobody sees. Name it instead of leaving the
+            # operator to guess at a timeout.
+            print("  a hang like this is usually a pending Tailscale SSH "
+                  "check — run this yourself and click the URL it prints:")
+            print("    ssh %s echo ok" % addr)
+        return 1
+    facts = ha.parse_facts(out)
+    local["reverse_candidates"] = ha.hub_reverse_candidates(
+        facts.get("ssh_ip"), ha._hub_ipv4s())
+    acts, checklist = ha.plan(facts, local)
+    if acts:
+        checklist += ha.execute(addr, acts, facts, local) or []
+    else:
+        print("  provision                nothing to do")
+
+    rc = _cli_pair([addr])
+    if rc != 0:
+        checklist.append("pair did not fully verify — see its output above")
+
+    if spawn_name and rc == 0:
+        far = _call({"op": "status"})
+        fardev = None
+        links = _read_json(os.path.join(state_root(), "links.json"), {})
+        for dev, ent in links.items():
+            if isinstance(ent, dict) and ent.get("addr") == addr:
+                fardev = dev
+        if not fardev:
+            host = addr.split("@")[-1].split(".")[0]
+            cands = [d for d in links if host.lower() in d.lower()]
+            fardev = cands[0] if cands else None
+        if not facts.get("claude_bin"):
+            rc2, out2 = ha._run_ssh(
+                addr, "PATH=%s command -v claude" % ha._FAR_PATH)
+            if rc2 == 0 and out2.strip():
+                facts["claude_bin"] = out2.strip()
+        if not facts.get("claude_bin"):
+            checklist.append("claude not installed on %s — cannot spawn" % addr)
+        elif not fardev:
+            checklist.append("could not learn the far device name — spawn "
+                             "manually: homi adopt again after pair settles")
+        else:
+            rc3, out3 = ha._run_ssh(
+                addr, "PATH=%s timeout 90 claude -p ok --model haiku "
+                      ">/dev/null 2>&1 && echo AUTHED || echo UNAUTHED"
+                % ha._FAR_PATH, timeout=120)
+            if "AUTHED" not in out3:
+                checklist.append(
+                    "claude needs login on %s — run: ssh -t %s 'claude /login'"
+                    " — then: homi adopt %s --spawn %s"
+                    % (addr, addr, addr, spawn_name))
+            else:
+                def _ask(target, text):
+                    r = _call({"op": "ask", "to": target, "text": text,
+                               "from_name": "adopt", "timeout": 90})
+                    return bool(r.get("ok")), (r.get("reply") or "")
+                steered = any(a.get("step") == "runtime_dir" for a in acts)
+                ha.spawn(addr, spawn_name, facts, fardev, ask=_ask,
+                         steered=steered)
+
+    if checklist:
+        print("adopt: NEEDS YOU —")
+        for c in checklist:
+            print("  · %s" % c)
+    else:
+        print("adopt: complete — nothing left for a human.")
+    return 0
+
+
 def _cli_pair(args):
     """homi pair <user@host> — enroll another of YOUR devices, one-sided.
 
@@ -3511,7 +3617,8 @@ def _cli_pair(args):
     here_dir = os.path.dirname(os.path.abspath(__file__))
     kernel_files = [os.path.join(here_dir, f) for f in
                     ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
-                     "homi_board.py", "homi_talk.py", "homi_transcript.py", "homi_codex.py")]
+                     "homi_board.py", "homi_talk.py", "homi_transcript.py", "homi_codex.py",
+                     "homi_adopt.py")]
 
     def stage_kernel():
         _pair_ssh(addr, "mkdir -p %s" % far_stage_dir)
@@ -3540,7 +3647,9 @@ def _cli_pair(args):
                 addr, 'o=$(stat -f %u /tmp/cc-socks 2>/dev/null || '
                       'stat -c %u /tmp/cc-socks 2>/dev/null); u=$(id -u); '
                       'if [ -n "$o" ] && [ "$o" != "$u" ]; then '
-                      'echo "/tmp/homi-$u"; fi')
+                      'mkdir -p "$HOME/.local/run/cc-socks" && '
+                      'chmod 700 "$HOME/.local/run" 2>/dev/null; '
+                      'echo "$HOME/.local/run/cc-socks"; fi')
             sock_d = sock_d.strip() if rc_s == 0 else ""
             if sock_d:
                 far_prod_env[0] = "HOMI_SOCK_DIR=%s " % shlex.quote(sock_d)
@@ -5078,6 +5187,8 @@ def cli_call(argv):
         return homi_board.main(args)
     if op == "pair":
         return _cli_pair(args)
+    if op == "adopt":
+        return _cli_adopt(args)
     if op == "connect":
         return _cli_connect(args)
     if op == "federate":
