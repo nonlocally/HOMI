@@ -631,6 +631,10 @@ def cmd_ptt(args):
             "--id", args.id,
             "--ongoing", "--alert-once",
             "--priority", "high",
+            # Tapping the BODY must do the obvious thing too. Without this,
+            # Android falls back to launching the posting app — which lands
+            # the human on Termux:API's info page, looking like a bug.
+            "--action", talk,
             "--button1", "Talk", "--button1-action", talk,
             "--button2", "Type", "--button2-action", typed]
     if args.print_only:

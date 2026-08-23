@@ -193,6 +193,12 @@ else bad "ptt reply button (got: $out)"; fi
 if printf '%s' "$out" | grep -q -- "--ongoing"; then
   ok "ptt is ongoing so it stays pinned"
 else bad "ptt not ongoing (got: $out)"; fi
+# Tapping the notification BODY must talk too. Without an explicit --action,
+# Android launches the posting app instead — the human lands on Termux:API's
+# info screen and reasonably thinks it is broken. (Observed live.)
+if printf '%s' "$out" | grep -q -- "--action"; then
+  ok "tapping the notification body starts a voice turn (not the API app)"
+else bad "ptt missing tap-anywhere --action (got: $out)"; fi
 
 echo
 echo "pass=$pass fail=$fail"
