@@ -186,6 +186,49 @@ else bad "HEAD answers 200"; fi
 if curl -sf -m 5 "http://127.0.0.1:$PORT/?cachebust=1" >/dev/null 2>&1; then
   ok "a query string does not 404 the page"
 else bad "query string handling"; fi
+
+echo "== PWA: the talk page is installable to a phone home screen"
+# A voice frontend has to live where the phone can reach it as an app, not a
+# browser tab: manifest + service worker + icons are the installability floor.
+man="$(curl -sf -m 5 "http://127.0.0.1:$PORT/manifest.webmanifest" 2>/dev/null)"
+if printf '%s' "$man" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d.get('display')=='standalone', 'display'
+assert d.get('start_url'), 'start_url'
+assert d.get('name') and d.get('short_name'), 'name'
+icons=d.get('icons') or []
+assert icons, 'icons'
+assert any(i.get('sizes')=='512x512' for i in icons), '512'
+assert any('maskable' in (i.get('purpose') or '') for i in icons), 'maskable'
+print('ok')" 2>/dev/null | grep -q ok; then
+  ok "manifest is valid and installable (standalone, named, 512 + maskable icon)"
+else bad "manifest.webmanifest (got: $man)"; fi
+
+sw="$(curl -sf -m 5 "http://127.0.0.1:$PORT/sw.js" 2>/dev/null)"
+if [ -n "$sw" ] && printf '%s' "$sw" | grep -qi "addEventListener"; then
+  ok "service worker is served (Chrome requires one to offer install)"
+else bad "sw.js (got: $sw)"; fi
+
+hdr="$(curl -sf -m 5 -D - -o /dev/null "http://127.0.0.1:$PORT/sw.js" 2>/dev/null)"
+if printf '%s' "$hdr" | grep -qi "javascript"; then
+  ok "sw.js is served as javascript"
+else bad "sw.js content-type (got: $hdr)"; fi
+
+icon="$(curl -sf -m 5 "http://127.0.0.1:$PORT/icon-512.png" 2>/dev/null | head -c 8 | od -An -tx1 | tr -d ' \n')"
+if [ "$icon" = "89504e470d0a1a0a" ]; then
+  ok "icon-512.png is a real PNG (magic bytes)"
+else bad "icon png magic (got: $icon)"; fi
+
+echo "== the talk page opts into being an app"
+tp="$(curl -sf -m 5 "http://127.0.0.1:$PORT/talk/communicate" 2>/dev/null)"
+if printf '%s' "$tp" | grep -q "manifest.webmanifest" && printf '%s' "$tp" | grep -qi "serviceWorker"; then
+  ok "talk page links the manifest and registers the service worker"
+else bad "talk page PWA wiring"; fi
+if printf '%s' "$tp" | grep -qi "theme-color" && printf '%s' "$tp" | grep -qi "viewport-fit=cover"; then
+  ok "talk page sets theme-color and covers the phone safe area"
+else bad "talk page theme/safe-area meta"; fi
+
 kill_server
 
 echo "== the live-dot reflects a seat surface, not just the mail plane"

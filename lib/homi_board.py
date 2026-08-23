@@ -237,6 +237,79 @@ class _Cache:
             return self.snap
 
 
+
+# ---------------------------------------------------------------- PWA assets
+# A voice frontend has to live on the phone's home screen, not in a browser
+# tab: once installed, Chrome grants it unmuted autoplay (so the agent can
+# speak without a fresh tap every session) and it survives as a real app icon.
+# Chrome's installability floor is manifest + service worker + icons.
+
+def _png_icon(size, bg=(11, 11, 10), fg=(122, 162, 247)):
+    """A square PNG drawn in code — a centred dot on the board's ground.
+
+    The dot IS the motif: every agent on the board is a liveness dot, so the
+    app icon is the same mark. Generating it here keeps a binary out of the
+    repo and lets any size be served on demand.
+    """
+    import struct
+    import zlib
+    r = size // 5           # dot radius
+    cx = cy = size / 2.0
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)      # PNG filter type 0 for this scanline
+        for x in range(size):
+            dx, dy = x + 0.5 - cx, y + 0.5 - cy
+            inside = (dx * dx + dy * dy) <= (r * r)
+            rows += bytes(fg if inside else bg)
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+            + chunk(b"IEND", b""))
+
+
+def _manifest():
+    return json.dumps({
+        "name": "homi \u2014 agents",
+        "short_name": "homi",
+        "description": "Talk to your agents.",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#0b0b0a",
+        "theme_color": "#0b0b0a",
+        "orientation": "portrait",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png",
+             "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+             "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+             "purpose": "maskable"},
+        ],
+    }, indent=2)
+
+
+# Deliberately no offline caching: this page is a live view of a live fabric,
+# and a stale cached answer would be a lie. The worker exists to satisfy
+# Chrome's install criteria and to carry push later.
+_SW_JS = """self.addEventListener('install', function (e) {
+  self.skipWaiting();
+});
+self.addEventListener('activate', function (e) {
+  e.waitUntil(self.clients.claim());
+});
+self.addEventListener('fetch', function (e) {
+  // Pass through. The fabric is live; caching it would serve stale truth.
+});
+"""
+
+
 def serve(port, bind, no_remote, ttl=10.0):
     import hmac
     import http.server
@@ -331,6 +404,18 @@ def serve(port, bind, no_remote, ttl=10.0):
                 return render_html(cache.get()).encode(), "text/html; charset=utf-8"
             if path == "/state.json":
                 return json.dumps(cache.get()).encode(), "application/json"
+            if path == "/manifest.webmanifest":
+                return _manifest().encode(), "application/manifest+json"
+            if path == "/sw.js":
+                return _SW_JS.encode(), "text/javascript; charset=utf-8"
+            if path.startswith("/icon-") and path.endswith(".png"):
+                try:
+                    n = int(path[len("/icon-"):-len(".png")].split("x")[0])
+                except ValueError:
+                    return None, None
+                if n not in (192, 512):
+                    return None, None
+                return _png_icon(n), "image/png"
             if path.startswith("/talk/"):
                 target = urllib.parse.unquote(path[len("/talk/"):])
                 if not handle:
