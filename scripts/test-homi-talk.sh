@@ -61,9 +61,15 @@ TOKEN="$(printf '%s' "$page" | grep -o '"token": *"[a-f0-9]*"' | head -1 | grep 
 if [ -n "$TOKEN" ]; then ok "mutation token injected into the page"; else bad "mutation token injected"; fi
 n="$(printf '%s' "$page" | grep -c "$TOKEN")"
 if [ "$n" = "1" ]; then ok "token appears exactly once"; else bad "token appears exactly once (got $n)"; fi
-if [ "$(printf '%s' "$page" | grep -c -e 'https\?://' -e 'url(' -e '@import' -e '<link' -e 'src=')" = "0" ]; then
-  ok "talk page self-contained"
-else bad "talk page self-contained"; fi
+# Self-contained means NO THIRD-PARTY ORIGIN — not "no <link> tag". The page
+# now links its own manifest and icon so a phone can install it; those are
+# root-relative and served by this same process. What must never appear is an
+# absolute URL, a remote font/style import, or a src= pointing off-origin.
+ext="$(printf '%s' "$page" | grep -c -e 'https\?://' -e 'url(' -e '@import')"
+offsite="$(printf '%s' "$page" | grep -oE '(href|src)="[^"]*"' | grep -vE '(href|src)="/' | grep -c . )"
+if [ "$ext" = "0" ] && [ "$offsite" = "0" ]; then
+  ok "talk page self-contained (no third-party origin; own manifest/icon ok)"
+else bad "talk page self-contained (external=$ext offsite=$offsite)"; fi
 
 echo "== write-path auth, layer by layer"
 send() { curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/api/send" "$@"; }

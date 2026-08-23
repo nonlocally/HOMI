@@ -729,9 +729,14 @@ echo "== the page's behavior, EXECUTED (grep lied twice; the harness cannot)"
 if node "$HERE/scripts/test-timeline-dom.js" >/dev/null 2>&1; then
   ok "restart replays the whole pane from zero (real JS under a DOM shim)"
 else bad "DOM behavioral contract (run: node scripts/test-timeline-dom.js)"; fi
-if [ "$(printf '%s' "$page" | grep -c -e 'https\?://' -e 'url(' -e '@import' -e '<link' -e 'src=')" = "0" ]; then
-  ok "talk page still self-contained"
-else bad "talk page self-contained"; fi
+# Self-contained means NO THIRD-PARTY ORIGIN, not "no <link> tag": the page
+# links its own manifest and icon so a phone can install it, both served by
+# this same process. Absolute URLs and remote imports remain forbidden.
+ext="$(printf '%s' "$page" | grep -c -e 'https\?://' -e 'url(' -e '@import')"
+offsite="$(printf '%s' "$page" | grep -oE '(href|src)="[^"]*"' | grep -vE '(href|src)="/' | grep -c . )"
+if [ "$ext" = "0" ] && [ "$offsite" = "0" ]; then
+  ok "talk page still self-contained (no third-party origin)"
+else bad "talk page self-contained (external=$ext offsite=$offsite)"; fi
 
 echo
 echo "pass=$pass fail=$fail"

@@ -330,7 +330,10 @@ TALK_TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#090909">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>talk</title>
 <style>
@@ -868,6 +871,19 @@ TALK_TEMPLATE = r"""<!doctype html>
     if (!document.hidden) poll();   // reload-on-foreground: iOS froze us
   });
 })();
+
+// Register the service worker so Chrome offers "install to home screen".
+// The worker caches nothing — this page is a live view of a live fabric —
+// it exists to satisfy the install criteria and to carry push later.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js").catch(function () {
+      /* not installable here (http origin, or worker blocked) — the page
+         still works exactly as before; installation is a bonus, not a
+         dependency. */
+    });
+  });
+}
 </script>
 </body>
 </html>

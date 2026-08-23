@@ -616,14 +616,24 @@ def cmd_voice(args):
         # reliable than the mail plane, and it works with agent builds that
         # predate live-mail delivery.
         tmux = shutil.which("tmux") or "tmux"
-        argv = [tmux, "send-keys", "-t", args.seat, prompt, "Enter"]
+        # An agent's composer treats an embedded newline as "keep typing", so
+        # a multi-line prompt lands STAGED and unsubmitted. Send it as one
+        # line, then Enter as a separate keystroke. (Observed live: the turn
+        # sat in the composer until this was split.)
+        flat = " ".join(prompt.split())
+        argv = [tmux, "send-keys", "-t", args.seat, "-l", flat]
         if args.print_only:
-            print(" ".join(argv[:4] + ["<prompt>", "Enter"]))
-            print(prompt)
+            print(" ".join([tmux, "send-keys", "-t", args.seat, "-l",
+                            "<prompt>"]))
+            print(flat)
             return 0
         rc, out = run(argv, timeout=30)
         if rc != 0:
-            die("could not reach seat %s: %s" % (args.seat, (out or "").strip()), 4)
+            die("could not reach seat %s: %s" % (args.seat, (out or "").strip()),
+                4)
+        import time as _t
+        _t.sleep(0.4)
+        run([tmux, "send-keys", "-t", args.seat, "Enter"], timeout=15)
         print("delivered to seat %s" % args.seat)
         return 0
     if args.print_only:
