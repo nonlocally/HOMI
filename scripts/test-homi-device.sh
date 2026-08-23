@@ -94,6 +94,25 @@ if [ "$(printf '%s' "$r" | tr '\n' ' ')" = "True True True" ]; then
   ok "batch mode, a connect timeout, and no agent forwarding"
 else bad "ssh hardening (got: $r)"; fi
 
+echo "== \"-\" is the stdout convention, not a rogue option"
+# `screen --out -` streams the picture back instead of leaving it on the
+# device's disk. An over-strict validator rejected it and the cockpit failed
+# with an argument error instead of the honest \"adb is down\". (Observed live.)
+r="$(py "
+import homi_device as d
+argv = d.build('aadarshs-pixel-10', 'screen', ['--out', '-'])
+print(argv[-1] == '-')
+try:
+    d.build('aadarshs-pixel-10', 'screen', ['--out', '-x; id'])
+    print('LEAK')
+except ValueError:
+    print('still refuses hostile args')
+")"
+if [ "$(printf '%s' "$r" | head -1)" = "True" ] && \
+   printf '%s' "$r" | tail -1 | grep -q refuses; then
+  ok "screen --out - passes; hostile arguments still refused"
+else bad "stdout convention (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

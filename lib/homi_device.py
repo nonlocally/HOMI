@@ -75,6 +75,10 @@ def _check_args(verb, args):
     for a in args:
         if not _SAFE_ARG.match(a):
             raise ValueError("unsafe argument: %r" % a)
+        # "-" is the stdout convention, not an option — `screen --out -`
+        # streams the picture rather than leaving it on the device's disk.
+        if a == "-":
+            continue
         if a.startswith("-") and a not in VERBS[verb] and not _INT.match(a):
             raise ValueError("unexpected option: %r" % a)
     return args
