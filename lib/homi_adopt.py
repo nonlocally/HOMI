@@ -291,10 +291,18 @@ def spawn_cmds(name, facts, steered=False):
 
 
 def _run_ssh(addr, cmd, timeout=60):
-    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                        addr, cmd], capture_output=True, text=True,
-                       timeout=timeout)
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
+    """(rc, output). NEVER raises: a device that hangs (a pending Tailscale
+    SSH check, a wedged sshd) must produce an honest report, not a traceback
+    out of the operator's tool."""
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes",
+                            "-o", "ConnectTimeout=10", addr, cmd],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 124, "ssh timed out after %ss (device hung or unreachable)" % timeout
+    except OSError as e:
+        return 125, "ssh could not run: %s" % e
 
 
 def hub_missing_files(here_dir):

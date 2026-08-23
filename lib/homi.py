@@ -3416,9 +3416,14 @@ def _cli_adopt(args):
     if rc != 0 and "=" not in out:
         print("  probe                    FAILED (%s)" % out.strip()[:120])
         print("  fix: make `ssh %s true` work, then re-run." % addr)
-        if "tailscale" in out.lower():
-            print("  (a Tailscale SSH check may be pending — run the ssh "
-                  "yourself and click the URL it prints)")
+        if rc == 124 or "tailscale" in out.lower():
+            # A HANG (rather than a refusal) on a tailnet device is almost
+            # always a pending Tailscale SSH check: ssh waits forever on a
+            # browser approval nobody sees. Name it instead of leaving the
+            # operator to guess at a timeout.
+            print("  a hang like this is usually a pending Tailscale SSH "
+                  "check — run this yourself and click the URL it prints:")
+            print("    ssh %s echo ok" % addr)
         return 1
     facts = ha.parse_facts(out)
     local["reverse_candidates"] = ha.hub_reverse_candidates(

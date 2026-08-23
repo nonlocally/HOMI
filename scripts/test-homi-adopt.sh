@@ -390,6 +390,36 @@ print(ha.parse_facts('HOMIKEY=1\n')['fabric_key'],
 if [ "$r" = "True False False" ]; then ok "fabric_key parsed, absent means false"
 else bad "parse fabric_key (got: $r)"; fi
 
+echo "== a hung/unreachable device never tracebacks — _run_ssh reports honestly"
+r="$(PY "
+import subprocess
+real = subprocess.run
+def boom(*a, **k):
+    raise subprocess.TimeoutExpired(cmd='ssh', timeout=1)
+subprocess.run = boom
+try:
+    rc, out = ha._run_ssh('u@h', 'true', timeout=1)
+finally:
+    subprocess.run = real
+print(rc != 0, 'timed out' in out.lower())")"
+if [ "$r" = "True True" ]; then ok "an ssh timeout returns a nonzero rc + message, never an exception"
+else bad "ssh timeout handling (got: $r)"; fi
+
+echo "== an OSError (no ssh binary / DNS blowup) is also caught"
+r="$(PY "
+import subprocess
+real = subprocess.run
+def boom(*a, **k):
+    raise OSError('no such binary')
+subprocess.run = boom
+try:
+    rc, out = ha._run_ssh('u@h', 'true', timeout=1)
+finally:
+    subprocess.run = real
+print(rc != 0, bool(out.strip()))")"
+if [ "$r" = "True True" ]; then ok "an OSError degrades to a reported failure"
+else bad "ssh oserror handling (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
