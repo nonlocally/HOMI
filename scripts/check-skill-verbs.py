@@ -30,10 +30,17 @@ def documented():
         end = text.find("\n---", 3)
         if end > 0:
             text = text[end + 4:]
+    # Only CODE teaches a verb. Prose says things like "address the phone
+    # with one flag", and chasing those with an ever-growing exception list
+    # is how a check stops meaning anything. Fenced blocks and inline code
+    # are where the instructions actually live.
+    blocks = re.findall(r"```(.*?)```", text, re.S)
+    inline = re.findall(r"`([^`\n]+)`", text)
     found = set()
-    # code-block lines and inline mentions both count as teaching a verb
-    for m in re.finditer(r"(?:^|`|\s)phone ([a-z][a-z-]*)", text, re.M):
-        found.add(m.group(1))
+    for chunk in blocks + inline:
+        for m in re.finditer(r"(?:^|\s)phone (?:--\S+ \S+ )*([a-z][a-z-]*)",
+                             chunk, re.M):
+            found.add(m.group(1))
     return {v for v in found if v not in NOT_VERBS}
 
 

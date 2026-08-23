@@ -682,6 +682,35 @@ out="$("$PHONE" --device "bad name; rm -rf" --print-link 2>&1)"; rc=$?
 if [ $rc -ne 0 ]; then ok "a hostile device name is refused"
 else bad "device name not validated (out=$out)"; fi
 
+echo "== two drivers racing for the lease: exactly one wins"
+# The lease was correct only because shelld's accept loop happens to be
+# single-threaded — correctness resting on a distant, unrelated property.
+# Make shelld concurrent (the obvious future optimisation) and it goes racy
+# with no test failing and nothing erroring; you just occasionally get two
+# drivers, which is precisely what it exists to prevent. This asserts the
+# invariant itself rather than the property it used to lean on.
+SOCK6="$T/race.sock"
+PHONE_SHELL_SOCK="$SOCK6" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK6" ] && break; sleep 0.4; done
+wins="$(python3 -c "
+import subprocess, threading, os
+env = dict(os.environ); env['PHONE_SHELL_SOCK'] = '$SOCK6'
+won = []
+lock = threading.Lock()
+def go(name):
+    r = subprocess.run(['$PHONE', 'lease', 'acquire', '--as', name],
+                       capture_output=True, env=env)
+    if r.returncode == 0:
+        with lock:
+            won.append(name)
+threads = [threading.Thread(target=go, args=('driver%d' % i,)) for i in range(8)]
+[t.start() for t in threads]; [t.join() for t in threads]
+print(len(won))
+")"
+if [ "$wins" = "1" ]; then ok "8 simultaneous acquires, exactly 1 winner"
+else bad "the lease is racy: $wins winners out of 8"; fi
+"$PHONE" shelld --stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

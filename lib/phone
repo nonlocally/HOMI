@@ -251,6 +251,15 @@ def dev_shell(cmd, timeout=40, want_bytes=False):
     return 127, (b"" if want_bytes else "")
 
 
+# A note that belongs in the code, not only in a commit message: on Android
+# /tmp is owned by shell:shell, and an app UID cannot write there EVEN IF the
+# directory is mode 0777 — SELinux, not Unix permissions. (Tested: created
+# /tmp/claude-<uid> as shell via Shizuku, chmod 777, and Termux still got
+# EACCES.) That is why TMPDIR is exported in every shell profile rather than
+# "fixed" by relaxing a mode, and why removing that export silently costs the
+# on-device agent the ability to run any command at all.
+
+
 def dev_read(remote_path, want_bytes=False):
     """Read a file the device shell just wrote.
 
@@ -434,11 +443,27 @@ def cmd_shelld(args):
     os.chmod(path, 0o600)           # this socket IS shell-level power
     srv.listen(8)
 
-    # The lease. Held in this process because the accept loop below is
-    # single-threaded: check-and-set is atomic without any locking.
+    # The lease. Held in this process, and guarded by its OWN lock.
+    #
+    # It is tempting to skip the lock: the accept loop below is
+    # single-threaded, so check-and-set is already atomic. But that makes the
+    # lease's correctness depend on a distant, unrelated property of the
+    # daemon — and the most natural future change here, serving connections
+    # concurrently so one slow verb stops blocking others, would silently
+    # make it racy. Nothing would fail and nothing would error; you would
+    # just occasionally get two drivers, which is exactly what the lease
+    # exists to prevent, and it would be nearly unreproducible.
+    # The lock costs nothing while this stays single-threaded, and it keeps
+    # the correctness local to the thing being protected.
+    import threading as _th
     lease = {"holder": None, "until": 0.0}
+    lease_lock = _th.Lock()
 
     def lease_op(line):
+        with lease_lock:
+            return _lease_op_locked(line)
+
+    def _lease_op_locked(line):
         parts = line.split()
         op = parts[0] if parts else "status"
         now = time.time()
