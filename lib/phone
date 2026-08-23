@@ -874,30 +874,59 @@ def cmd_tap(args):
 
 
 def cmd_type(args):
-    need_shell()
+    # No need_shell() here: --print-only must work with no device, so the
+    # exact argv can be inspected and tested off-device.
+    import shlex
     text = " ".join(args.text)
     # `input text` mangles multi-word strings: the documented %s-for-space
     # escape silently dropped most of a sentence on this device (measured —
-    # "Written by an AI agent over Shizuku" arrived as "iuku"). Typing word
-    # by word with an explicit SPACE keyevent is slower and correct.
+    # "Written by an AI agent over Shizuku" arrived as "iuku"). So: word by
+    # word with an explicit SPACE keyevent.
+    #
+    # Quote with shlex rather than stripping. The old strip-regex deleted
+    # apostrophes, =, $, <, >, |, backtick and more, so "Don't" became "Dont"
+    # and "x=2" became "x2" — and then it reported success, because it
+    # counted WORDS WHOSE EXIT CODE WAS 0, which says nothing about what
+    # arrived. An actuator that lies about what it typed is worse than one
+    # that fails.
     words = text.split(" ")
-    typed = 0
-    for i, w in enumerate(words):
+    argv = []
+    dropped = []
+    for w in words:
+        # Control characters are the only thing `input text` genuinely cannot
+        # carry; everything else survives quoting.
+        clean = "".join(c for c in w if c.isprintable())
+        if clean != w:
+            dropped.append(w)
+        argv.append(clean)
+    plan = []
+    for i, w in enumerate(argv):
         if i:
-            dev_shell("input keyevent 62")      # KEYCODE_SPACE
-        if not w:
-            continue
-        # Keep the word out of the shell's way; input text takes one token.
-        safe = w.replace("'", "")
-        safe = re.sub(r"[^\w@.,:;!?\"/+()\[\]#&*%-]", "", safe)
-        if not safe:
-            continue
-        rc, _ = dev_shell("input text '%s'" % safe)
-        if rc == 0:
-            typed += 1
-    record("type", text[:200], "act",
-           "typed %d/%d words" % (typed, len([w for w in words if w])))
-    return 0
+            plan.append("input keyevent 62")     # KEYCODE_SPACE
+        if w:
+            plan.append("input text %s" % shlex.quote(w))
+    if args.print_only:
+        print("\n".join(plan))
+        return 0
+    need_shell()
+    delivered = 0
+    for step in plan:
+        rc, _ = dev_shell(step)
+        if rc != 0:
+            break
+        if step.startswith("input text "):
+            delivered += len(argv[len([p for p in plan[:plan.index(step) + 1]
+                                       if p.startswith("input text ")]) - 1])
+    want = sum(len(w) for w in argv)
+    ok_all = (delivered == want and not dropped)
+    record("type", {"requested": text[:200], "sent": " ".join(argv)[:200]},
+           "act", "delivered %d/%d chars%s"
+           % (delivered, want,
+              "; dropped unprintable" if dropped else ""))
+    if not ok_all:
+        sys.stderr.write("phone: typed %d of %d characters\n"
+                         % (delivered, want))
+    return 0 if ok_all else 1
 
 
 def cmd_key(args):
@@ -1557,6 +1586,8 @@ def build_parser():
 
     s = add("type", cmd_type, "type text into the focused field")
     s.add_argument("text", nargs="+")
+    s.add_argument("--print-only", action="store_true", dest="print_only",
+                   help="show the exact input-text argv instead of typing")
 
     s = add("key", cmd_key, "send a keyevent (BACK, HOME, ENTER, ...)")
     s.add_argument("key")

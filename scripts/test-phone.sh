@@ -464,6 +464,31 @@ if [ "$out" = "recovered" ] && [ $((end-mid)) -le 12 ]; then
 else bad "daemon wedged after a hang (out=$out took $((end-mid))s)"; fi
 PHONE_SHELL_SOCK="$SOCK3" "$PHONE" shelld --stop >/dev/null 2>&1
 
+echo "== type must preserve real text, and admit what it dropped"
+# The strip-regex silently deleted apostrophes, =, $, <, >, |, backtick and
+# more, then reported success by counting WORDS WHOSE EXIT CODE WAS 0 — which
+# says nothing about what arrived. An actuator that lies about what it typed
+# is worse than one that fails.
+# Assert the ROUND TRIP through a shell parser, not the literal bytes:
+# shlex correctly emits 'Don'"'"'t' for Don't, which is how a shell actually
+# delivers an apostrophe. Checking for the literal would fail on correct code.
+out="$("$PHONE" type --print-only "Don't panic: x=2 & y=7 (ok)" 2>&1)"
+if printf '%s' "$out" | python3 -c "
+import shlex, sys
+words = []
+for line in sys.stdin.read().splitlines():
+    if line.startswith('input text '):
+        words.append(shlex.split(line)[-1])
+got = ' '.join(words)
+want = \"Don't panic: x=2 & y=7 (ok)\"
+print('OK' if got == want else 'GOT:' + got)
+" | grep -q '^OK$'; then
+  ok "type delivers the exact text through the shell (apostrophes, =, &)"
+else bad "type mangles text (got: $out)"; fi
+if printf '%s' "$out" | grep -q "input text"; then
+  ok "--print-only shows the exact input text argv"
+else bad "--print-only should show the argv (got: $out)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
