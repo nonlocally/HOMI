@@ -622,6 +622,32 @@ if printf '%s' "$out" | grep -q "tongs"; then
   ok "log can be filtered to one actor (who did this?)"
 else bad "log --actor (got: $out)"; fi
 
+echo "== look: the screen an agent can actually afford to read"
+# `ui` dumps every node with text — hundreds of lines on a real app, most of
+# it container ids the agent can do nothing with. A model paying that on
+# every step burns its context on scaffolding. `look` is the same screen,
+# summarised: what app, and the things that can actually be acted on.
+out="$("$PHONE" look --from "$T/ui.xml" 2>&1)"
+if printf '%s' "$out" | grep -qi "whatsapp"; then
+  ok "look names the app in the foreground"
+else bad "look should name the app (got: $out)"; fi
+if printf '%s' "$out" | grep -q "peer peer-user" && printf '%s' "$out" | grep -q "Send"; then
+  ok "look keeps the things you can act on"
+else bad "look dropped actionable elements (got: $out)"; fi
+if printf '%s' "$out" | grep -qE "^\s*[0-9]+,[0-9]+"; then
+  ok "look keeps coordinates so a tap needs no second call"
+else bad "look has no coordinates (got: $out)"; fi
+# The container ids ui emits (conversation, drag_layer, scrim_view) are
+# scaffolding — an agent can do nothing with them and they dominate the dump.
+if ! printf '%s' "$out" | grep -q "scrim_view"; then
+  ok "look drops container scaffolding"
+else bad "look kept scaffolding"; fi
+ui_lines=$("$PHONE" ui --from "$T/ui.xml" 2>/dev/null | wc -l | tr -d ' ')
+look_lines=$("$PHONE" look --from "$T/ui.xml" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$look_lines" -le "$ui_lines" ]; then
+  ok "look is no larger than ui ($look_lines vs $ui_lines lines)"
+else bad "look is bigger than ui ($look_lines vs $ui_lines)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

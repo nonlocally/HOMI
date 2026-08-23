@@ -855,6 +855,69 @@ def cmd_ui(args):
     return 0
 
 
+def cmd_look(args):
+    """The screen, summarised for something that pays per token.
+
+    `ui` prints every node carrying text — on a real app that is hundreds of
+    lines, mostly container ids (drag_layer, scrim_view, *_container) an
+    agent can do nothing with. A model paying that on every step spends its
+    context on scaffolding instead of on the task.
+
+    So: name the app, then list only what can be ACTED ON, deduplicated, with
+    coordinates included so acting needs no second call.
+    """
+    xml = get_ui(args.from_file)
+    els = parse_ui(xml)
+    app = ""
+    m = re.search(r'package="([^"]+)"', xml or "")
+    if m:
+        app = m.group(1)
+    lines = []
+    seen = set()
+    for el in els:
+        lab = el.label
+        if not lab:
+            continue
+        # Scaffolding: a bare resource-id with no human text is a container
+        # the agent cannot meaningfully target.
+        if not el.text and not el.desc:
+            continue
+        tgt = clickable_target(el)
+        if tgt is None and not args.all:
+            continue
+        # One line per TARGET, not per node. An element's text and its
+        # content-desc are usually two descriptions of the same tappable
+        # thing, and printing both doubles the cost for no new information.
+        # Prefer the human text; a [desc] only stands in when there is none.
+        key = tgt.center if tgt else ("nolabel", lab)
+        if key in seen:
+            continue
+        if el.text:
+            seen.add(key)
+        else:
+            # Hold a desc-only entry back one beat: if a text node for the
+            # same target follows, it wins.
+            if any(e.text and clickable_target(e) is not None
+                   and clickable_target(e).center == key
+                   for e in els):
+                continue
+            seen.add(key)
+        if tgt is None:
+            lines.append("           %s" % lab)
+        else:
+            x, y = tgt.center
+            lines.append("%-11s %s" % ("%d,%d" % (x, y), lab))
+        if args.limit and len(lines) >= args.limit:
+            lines.append("           … more (use `ui` for everything)")
+            break
+    print("app: %s" % (app or "unknown"))
+    if not lines:
+        print("(nothing actionable on screen)")
+        return 0
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_find(args):
     els = parse_ui(get_ui(args.from_file))
     if args.rid:
@@ -1792,6 +1855,12 @@ def build_parser():
 
     s = add("ui", cmd_ui, "read the screen as tappable text")
     s.add_argument("--grep")
+    s.add_argument("--from", dest="from_file")
+
+    s = add("look", cmd_look, "the screen, summarised for an agent")
+    s.add_argument("--limit", type=int, default=40)
+    s.add_argument("--all", action="store_true",
+                   help="include things that cannot be tapped")
     s.add_argument("--from", dest="from_file")
 
     s = add("find", cmd_find, "label -> tap coordinates (or fail loudly)")
