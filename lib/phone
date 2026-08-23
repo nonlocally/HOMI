@@ -1435,9 +1435,26 @@ def ledger_path():
                         "communicate", "phone-actions.jsonl")
 
 
-def record(verb, detail, kind="act", result=None):
-    import time as _t
-    row = {"ts": round(_t.time(), 3), "verb": verb, "kind": kind,
+_T0 = time.time()
+
+
+def record(verb, detail, kind="act", result=None, rc=None):
+    """Append one line to the trace.
+
+    It carries WHO, HOW LONG and WHETHER IT WORKED, not just what was
+    attempted. Without those, a slow tap and a failed one read identically,
+    and a request cannot be followed back to whoever asked for it — which is
+    the whole point of keeping the record at all.
+    """
+    row = {"ts": round(time.time(), 3), "verb": verb, "kind": kind,
+           "actor": actor(),
+           # Process start to here: for a one-verb CLI that IS the verb's
+           # duration, and it is honest about what it measures.
+           "ms": int(round((time.time() - _T0) * 1000)),
+           "rc": rc if rc is not None else (
+               1 if isinstance(result, str)
+               and result.lower().startswith(("failed", "unconfirmed",
+                                              "did not")) else 0),
            "detail": detail}
     if result is not None:
         row["result"] = result
@@ -1475,6 +1492,8 @@ def cmd_log(args):
         rows = []
     if args.kind:
         rows = [r for r in rows if r.get("kind") == args.kind]
+    if args.actor:
+        rows = [r for r in rows if r.get("actor") == args.actor]
     rows.reverse()
     if args.limit:
         rows = rows[:args.limit]
@@ -1492,8 +1511,13 @@ def cmd_log(args):
         if not isinstance(det, str):
             det = json.dumps(det)
         res = r.get("result")
-        print("%s %s %-8s %s%s" % (when, mark, r.get("verb") or "?", det,
-                                   ("  -> " + str(res)) if res else ""))
+        who = r.get("actor") or "-"
+        ms = r.get("ms")
+        bad = "!" if r.get("rc") else " "
+        print("%s %s%s %-9s %-8s %s%s%s"
+              % (when, mark, bad, who[:9], r.get("verb") or "?", det,
+                 ("  -> " + str(res)) if res else "",
+                 ("  %dms" % ms) if isinstance(ms, int) else ""))
     return 0
 
 
@@ -1808,6 +1832,7 @@ def build_parser():
     s = add("log", cmd_log, "what the agent has done on this phone")
     s.add_argument("--limit", type=int, default=40)
     s.add_argument("--kind", choices=["act", "read"])
+    s.add_argument("--actor", help="only what this driver did")
     s.add_argument("--json", action="store_true")
 
     s = add("media", cmd_media, "pause/play/next/prev/stop")

@@ -598,6 +598,30 @@ else bad "expired lease still held (rc=$rc out=$out)"; fi
 "$PHONE" shelld --stop >/dev/null 2>&1
 unset PHONE_SHELL_SOCK
 
+echo "== the ledger must be a TRACE, not a list of claims"
+# "open keep -> opened" says what was attempted and asserted. It does not say
+# WHO asked, whether the underlying command actually succeeded, or how long
+# it took — so a slow tap and a failed one read identically, and a request
+# cannot be followed back to its requester.
+LED2="$T/trace.jsonl"
+PHONE_LEDGER="$LED2" PHONE_ACTOR=tongs PHONE_NO_DEVICE=1 "$PHONE" msg whatsapp \
+  --to "+16175551234" --text "trace me" --send >/dev/null 2>&1
+if python3 -c "
+import json
+rows=[json.loads(l) for l in open('$LED2') if l.strip()]
+a=rows[-1]
+assert a.get('actor')=='tongs', 'actor missing: %r' % a
+assert isinstance(a.get('ms'), (int,float)), 'ms missing: %r' % a
+assert 'rc' in a, 'rc missing: %r' % a
+print('ok')" 2>/dev/null | grep -q ok; then
+  ok "an entry carries actor, elapsed ms, and an exit code"
+else bad "ledger is not a trace (got: $(tail -1 "$LED2" 2>/dev/null))"; fi
+
+out="$(PHONE_LEDGER="$LED2" "$PHONE" log --limit 3 --actor tongs 2>&1)"
+if printf '%s' "$out" | grep -q "tongs"; then
+  ok "log can be filtered to one actor (who did this?)"
+else bad "log --actor (got: $out)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
