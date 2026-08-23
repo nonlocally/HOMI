@@ -316,6 +316,8 @@ def serve(port, bind, no_remote, ttl=10.0):
     import urllib.parse
     import homi_talk
     import homi_voice
+    import homi_device
+    import homi_cockpit
     import homi_transcript
 
     cache = _Cache(no_remote, ttl=ttl)
@@ -417,6 +419,64 @@ def serve(port, bind, no_remote, ttl=10.0):
                 if n not in (192, 512):
                     return None, None
                 return _png_icon(n), "image/png"
+            if path.startswith("/api/device/"):
+                # The cockpit's hands. Token-gated like every other read of
+                # fabric content, and narrowed three ways in homi_device:
+                # a known device, an allowlisted verb, validated arguments.
+                if not self._token_ok():
+                    self._json(403, {"ok": False, "err": "token"})
+                    raise _Handled
+                rest = path[len("/api/device/"):]
+                dev, _sep, verb = rest.partition("/")
+                dev = urllib.parse.unquote(dev)
+                verb = urllib.parse.unquote(verb).strip("/")
+                snap = cache.get()
+                roster = [d.get("device") for d in (snap.get("devices") or [])]
+                if not homi_device.known(dev, roster):
+                    self._json(404, {"ok": False, "err": "unknown device"})
+                    raise _Handled
+                if not homi_device.allowed(verb):
+                    self._json(403, {"ok": False,
+                                     "err": "verb not exposed"})
+                    raise _Handled
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query)
+                dargs = []
+                for k in ("limit", "app", "since", "grep", "id", "kind"):
+                    v = (q.get(k) or [None])[0]
+                    if v is not None:
+                        dargs += ["--" + k, v]
+                for k in ("x", "y", "code"):
+                    v = (q.get(k) or [None])[0]
+                    if v is not None:
+                        dargs.append(v)
+                if verb in ("notifs", "log"):
+                    dargs.append("--json")
+                if verb == "screen":
+                    dargs = ["--out", "-"]
+                okd, out = homi_device.run(dev, verb, dargs,
+                                           binary=(verb == "screen"),
+                                           timeout=75)
+                if not okd:
+                    self._json(502, {"ok": False, "err": out})
+                    raise _Handled
+                if verb == "screen":
+                    return out, "image/png"
+                if verb in ("notifs", "log"):
+                    return (out or "[]").encode() if isinstance(out, str) \
+                        else out, "application/json"
+                return (out or "").encode(), "text/plain; charset=utf-8"
+            if path.startswith("/device/"):
+                dev = urllib.parse.unquote(path[len("/device/"):]).strip("/")
+                if not handle:
+                    return (b"claim a handle first: communicate homi init",
+                            "text/plain; charset=utf-8")
+                snap = cache.get()
+                roster = [d.get("device") for d in (snap.get("devices") or [])]
+                if not homi_device.known(dev, roster):
+                    return None, None
+                return (homi_cockpit.render_cockpit(dev, token).encode(),
+                        "text/html; charset=utf-8")
             if path.startswith("/voice/"):
                 target = urllib.parse.unquote(path[len("/voice/"):])
                 if not handle:

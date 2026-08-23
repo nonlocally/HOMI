@@ -212,6 +212,78 @@ if printf '%s' "$out" | grep -qi "send-keys"; then
   ok "voice --seat delivers by typing into the pane"
 else bad "voice --seat should use tmux send-keys (got: $out)"; fi
 
+echo "== the ledger: every action leaves a trace, at the only chokepoint there is"
+# Full two-way agency is safe because it is ACCOUNTABLE, not because it is
+# gated. Every capability flows through this CLI, so this CLI is where the
+# record gets written — an agent cannot act on the phone without logging it.
+LEDGER="$T/actions.jsonl"
+# A FAILED send must be recorded too — "I tried to message your mother and
+# could not" is exactly the kind of thing the record exists to preserve.
+PHONE_LEDGER="$LEDGER" PHONE_NO_DEVICE=1 "$PHONE" msg whatsapp --to "+16175551234" \
+  --text "some message" --send >/dev/null 2>&1
+if [ -s "$LEDGER" ] && python3 -c "
+import json,sys
+rows=[json.loads(l) for l in open('$LEDGER') if l.strip()]
+a=rows[-1]
+assert a['verb']=='msg', a
+assert 'some message' in json.dumps(a), a
+assert a.get('ts') and a.get('kind')=='act', a
+assert a['detail']['sent'] is False, a
+assert 'fail' in str(a.get('result','')).lower(), a
+print('ok')" 2>/dev/null | grep -q ok; then
+  ok "an attempted action appends a structured entry — failures included"
+else bad "ledger append (got: $(cat "$LEDGER" 2>/dev/null | tail -1))"; fi
+
+echo "== reads of PERSONAL data are logged too, but marked as reads"
+PHONE_LEDGER="$LEDGER" "$PHONE" notifs --from "$T/notifs.json" >/dev/null 2>&1
+if python3 -c "
+import json
+rows=[json.loads(l) for l in open('$LEDGER') if l.strip()]
+r=[x for x in rows if x['verb']=='notifs']
+assert r, 'no notifs entry'
+assert r[-1]['kind']=='read', r[-1]
+print('ok')" 2>/dev/null | grep -q ok; then
+  ok "reading the inbox is recorded as kind=read (it is someone's private mail)"
+else bad "read logging"; fi
+
+echo "== mechanical reads do NOT flood the ledger"
+before=$(wc -l < "$LEDGER")
+PHONE_LEDGER="$LEDGER" "$PHONE" find "Send" --from "$T/ui.xml" >/dev/null 2>&1
+PHONE_LEDGER="$LEDGER" "$PHONE" ui --from "$T/ui.xml" >/dev/null 2>&1
+after=$(wc -l < "$LEDGER")
+if [ "$before" = "$after" ]; then
+  ok "ui/find are mechanical and stay out of the record"
+else bad "ledger noise (grew $before -> $after)"; fi
+
+echo "== phone log reads the ledger back"
+out="$(PHONE_LEDGER="$LEDGER" "$PHONE" log --limit 5 2>&1)"
+if printf '%s' "$out" | grep -q "msg"; then ok "phone log renders recent actions"
+else bad "phone log (got: $out)"; fi
+out="$(PHONE_LEDGER="$LEDGER" "$PHONE" log --json 2>&1)"
+if printf '%s' "$out" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); assert isinstance(d,list) and d; print('ok')" 2>/dev/null | grep -q ok; then
+  ok "phone log --json is machine-readable (the cockpit renders it)"
+else bad "phone log --json"; fi
+
+echo "== msg --send: the two-way loop, and it must never fake success"
+out="$(PHONE_NO_DEVICE=1 "$PHONE" msg whatsapp --to "+16175551234" --text "hi" --send 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qiE "adb|device|cannot"; then
+  ok "--send without adb fails loudly (it cannot tap, so it must not claim it sent)"
+else bad "msg --send no-device honesty (rc=$rc out=$out)"; fi
+
+echo "== find --id: resource-id beats a label (labels move between releases)"
+out="$("$PHONE" find --id "com.whatsapp:id/send" --from "$T/ui.xml" 2>&1)"
+if printf '%s' "$out" | grep -q "950" && printf '%s' "$out" | grep -q "2050"; then
+  ok "find --id resolves a resource-id to coordinates"
+else bad "find --id (got: $out)"; fi
+
+echo "== screen --out - streams to stdout (no picture left on disk)"
+if grep -q 'out_path == "-"' "$HERE/lib/phone" && \
+   grep -q "stdout.buffer.write" "$HERE/lib/phone"; then
+  ok "screen supports streaming to stdout for the cockpit"
+else bad "screen --out - missing"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
