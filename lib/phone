@@ -272,6 +272,21 @@ def cmd_ui(args):
 
 def cmd_find(args):
     els = parse_ui(get_ui(args.from_file))
+    if args.rid:
+        # A resource-id is the stable handle: labels get translated and
+        # reworded between app releases, ids rarely move.
+        for el in els:
+            if el.rid == args.rid:
+                tgt = clickable_target(el)
+                if tgt is not None:
+                    x, y = tgt.center
+                    print("%d %d" % (x, y))
+                    return 0
+        sys.stderr.write("phone: no enabled, tappable element with id %r\n"
+                         % args.rid)
+        return 1
+    if not args.query:
+        die("give a label to find, or --id <resource-id>", 2)
     q = args.query.lower()
     exact, partial = [], []
     for el in els:
@@ -348,6 +363,7 @@ def cmd_notifs(args):
         items = [n for n in items if n.get("packageName") == want]
     if args.since:
         items = [n for n in items if (n.get("when") or "") > args.since]
+    record("notifs", {"app": args.app or "all", "n": len(items)}, "read")
     items.sort(key=lambda n: n.get("when") or "", reverse=True)
     if args.limit:
         items = items[:args.limit]
@@ -372,6 +388,7 @@ def cmd_say(args):
     if not text.strip():
         die("nothing to say", 2)
     rc, _ = termux("termux-tts-speak", text, timeout=args.timeout)
+    record("say", text[:200], "act")
     return 0 if rc == 0 else 1
 
 
@@ -395,6 +412,7 @@ def cmd_notify(args):
 def cmd_tap(args):
     need_adb()
     adb("shell", "input tap %d %d" % (args.x, args.y))
+    record("tap", "%d,%d" % (args.x, args.y), "act")
     return 0
 
 
@@ -406,6 +424,7 @@ def cmd_type(args):
     safe = text.replace("%", "%%").replace(" ", "%s")
     safe = re.sub(r"[^\w%@.,:;!?'\"/+()\[\]#&*-]", "", safe)
     adb("shell", "input text '%s'" % safe.replace("'", ""))
+    record("type", text[:200], "act")
     return 0
 
 
@@ -465,13 +484,23 @@ def cmd_play(args):
     tmpl = LINKS.get(app)
     if not tmpl or "{q}" not in tmpl:
         die("cannot search in %r — try ytmusic, spotify, or youtube" % app, 2)
+    if not args.print_url:
+        record("play", query, "act")
     return launch(tmpl.replace("{q}", quote_plus(query)), args.print_url)
 
 
+SEND_IDS = ("com.whatsapp:id/send", "com.whatsapp:id/send_container")
+
+
 def cmd_msg(args):
-    """Open a chat with the message prefilled. The human still taps send —
-    which is the right default: an agent that can silently send messages as
-    you is a different, much larger trust decision."""
+    """Open a chat with the message prefilled, and — with --send — press send.
+
+    Two-way is the point: an assistant that can only draft is a notepad. What
+    makes it safe is not a permission prompt on every message but the ledger:
+    the send is recorded here, at the chokepoint, whether or not anyone is
+    watching. --send additionally VERIFIES rather than assuming: it re-reads
+    the screen and reports honestly if the message did not go.
+    """
     from urllib.parse import quote
     app = args.app.strip().lower()
     if app != "whatsapp":
@@ -482,7 +511,67 @@ def cmd_msg(args):
     url = "https://wa.me/%s" % num
     if args.text:
         url += "?text=%s" % quote(args.text, safe="")
-    return launch(url, args.print_url)
+    if args.print_url:
+        return launch(url, True)
+    if not args.send:
+        rc = launch(url, False)          # dies loudly if it cannot open
+        record("msg", {"app": app, "to": num, "text": args.text,
+                       "sent": False}, "act", "drafted")
+        return rc
+
+    # --send needs to TOUCH the screen, which only the adb tier can do.
+    if os.environ.get("PHONE_NO_DEVICE") or not shutil.which("adb") \
+            or not adb_ready():
+        record("msg", {"app": app, "to": num, "text": args.text,
+                       "sent": False}, "act", "failed: no adb")
+        die("cannot send: adb is down, so the send button cannot be pressed. "
+            "Run `adb-heal`. (Refusing to report a send that did not happen.)",
+            3)
+    launch(url, False)
+    import time as _t
+    deadline = _t.time() + 25
+    coords = None
+    while _t.time() < deadline:
+        _t.sleep(1.5)
+        try:
+            els = parse_ui(get_ui(None))
+        except SystemExit:
+            continue
+        for el in els:
+            if el.rid in SEND_IDS or (el.desc or "").strip().lower() == "send":
+                tgt = clickable_target(el)
+                if tgt is not None:
+                    coords = tgt.center
+                    break
+        if coords:
+            break
+    if not coords:
+        record("msg", {"app": app, "to": num, "text": args.text,
+                       "sent": False}, "act", "failed: no send button")
+        die("cannot send: never found the send button (the chat may not have "
+            "opened). Nothing was sent.", 4)
+    adb("shell", "input tap %d %d" % coords)
+    _t.sleep(2.0)
+    # Verify rather than assume: after a send the composer empties, so the
+    # send affordance disappears. If it is still there, the tap did not take.
+    still = False
+    try:
+        for el in parse_ui(get_ui(None)):
+            if el.rid in SEND_IDS or (el.desc or "").strip().lower() == "send":
+                still = True
+                break
+    except SystemExit:
+        still = False
+    if still:
+        record("msg", {"app": app, "to": num, "text": args.text,
+                       "sent": False}, "act", "unconfirmed")
+        sys.stderr.write("phone: tapped send but the composer still looks "
+                         "full — treat as UNSENT and check the thread\n")
+        return 1
+    record("msg", {"app": app, "to": num, "text": args.text, "sent": True},
+           "act", "sent")
+    print("sent to %s" % num)
+    return 0
 
 
 def cmd_media(args):
@@ -502,6 +591,7 @@ def cmd_screen(args):
         die("screenshot failed (screen off or secure surface)", 4)
     with open(out_path, "wb") as f:
         f.write(data)
+    record("screen", out_path, "read")
     print(out_path)
     return 0
 
@@ -517,6 +607,7 @@ def cmd_photo(args):
 
 def cmd_torch(args):
     rc, _ = termux("termux-torch", args.state)
+    record("torch", args.state, "act")
     return 0 if rc == 0 else 1
 
 
@@ -584,6 +675,90 @@ def find_cli():
         if os.access(cand, os.X_OK):
             return cand
     return None
+
+
+
+# ------------------------------------------------------------- action ledger
+# Full two-way agency on someone's real phone is acceptable when it is
+# ACCOUNTABLE, not when it is gated into uselessness. Every capability on this
+# device flows through this CLI, which makes this CLI the one chokepoint where
+# a record can be written — an agent cannot act on the phone without leaving a
+# trace here. The cockpit renders this ledger; that is the safety property.
+#
+# What gets recorded:
+#   act   — anything that changes the world (send, tap, type, play, torch...)
+#   read  — reads of PERSONAL data (the inbox, the screen, location)
+# Mechanical reads (ui, find, battery, apps) are deliberately NOT recorded:
+# a record nobody can read is not accountability, it is noise.
+
+def ledger_path():
+    p = os.environ.get("PHONE_LEDGER")
+    if p:
+        return p
+    return os.path.join(os.path.expanduser("~"), ".local", "state",
+                        "communicate", "phone-actions.jsonl")
+
+
+def record(verb, detail, kind="act", result=None):
+    import time as _t
+    row = {"ts": round(_t.time(), 3), "verb": verb, "kind": kind,
+           "detail": detail}
+    if result is not None:
+        row["result"] = result
+    path = ledger_path()
+    try:
+        d = os.path.dirname(path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, 0o700)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+        try:
+            os.chmod(path, 0o600)   # it holds message text and contacts
+        except OSError:
+            pass
+    except OSError:
+        # Never let bookkeeping break the action itself; but say so, so a
+        # missing trail is visible rather than silent.
+        sys.stderr.write("phone: WARNING could not write the action ledger\n")
+
+
+def cmd_log(args):
+    path = ledger_path()
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        rows = []
+    if args.kind:
+        rows = [r for r in rows if r.get("kind") == args.kind]
+    rows.reverse()
+    if args.limit:
+        rows = rows[:args.limit]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("(no actions recorded)")
+        return 0
+    import time as _t
+    for r in rows:
+        when = _t.strftime("%H:%M", _t.localtime(r.get("ts") or 0))
+        mark = "*" if r.get("kind") == "act" else " "
+        det = r.get("detail")
+        if not isinstance(det, str):
+            det = json.dumps(det)
+        res = r.get("result")
+        print("%s %s %-8s %s%s" % (when, mark, r.get("verb") or "?", det,
+                                   ("  -> " + str(res)) if res else ""))
+    return 0
 
 
 VOICE_FRAME = (
@@ -730,7 +905,8 @@ def build_parser():
     s.add_argument("--from", dest="from_file")
 
     s = add("find", cmd_find, "label -> tap coordinates (or fail loudly)")
-    s.add_argument("query")
+    s.add_argument("query", nargs="?")
+    s.add_argument("--id", dest="rid", help="match a resource-id instead")
     s.add_argument("--from", dest="from_file")
 
     s = add("tap", cmd_tap, "tap x y")
@@ -753,11 +929,18 @@ def build_parser():
     s.add_argument("--app")
     s.add_argument("--print-url", action="store_true", dest="print_url")
 
-    s = add("msg", cmd_msg, "open a chat with a message prefilled")
+    s = add("msg", cmd_msg, "message someone (draft, or --send it)")
     s.add_argument("app")
     s.add_argument("--to", required=True)
     s.add_argument("--text", default="")
+    s.add_argument("--send", action="store_true",
+                   help="actually press send (verified; needs adb)")
     s.add_argument("--print-url", action="store_true", dest="print_url")
+
+    s = add("log", cmd_log, "what the agent has done on this phone")
+    s.add_argument("--limit", type=int, default=40)
+    s.add_argument("--kind", choices=["act", "read"])
+    s.add_argument("--json", action="store_true")
 
     s = add("media", cmd_media, "pause/play/next/prev/stop")
     s.add_argument("action", choices=["pause", "play", "next", "prev", "stop"])
