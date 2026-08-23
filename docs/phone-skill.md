@@ -29,6 +29,23 @@ phone log                   what has been done, by whom, and whether it worked
 `phone ui` exists and prints everything; prefer `look`, which is ~4x smaller
 and drops container scaffolding you cannot act on anyway.
 
+## If you are not on the phone
+
+You probably are not. The controller runs on a real machine, because the
+on-device agent is pinned to an old build on a slow CPU and Android keeps
+reaping its session. Address the phone with one flag:
+
+```
+phone --device aadarshs-pixel-10 look
+phone --device aadarshs-pixel-10 tap 933 2119
+```
+
+The first call forwards the device's shell socket and every later one reuses
+it. Everything below works identically either way — that is the point of the
+flag. (It is a forwarded socket rather than ssh-per-command because Termux's
+sshd forks a shell for every command, ~0.45s, which no amount of connection
+reuse fixes.)
+
 ## The loop
 
 **look → decide → act → look again.**

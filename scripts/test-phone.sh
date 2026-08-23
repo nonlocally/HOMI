@@ -661,6 +661,27 @@ for must in "look" "lease" "Never guess" "SPOKEN"; do
   else bad "skill missing: $must"; fi
 done
 
+echo "== --device: drive a phone from somewhere else, over a forwarded socket"
+# The on-phone agent is pinned to an old claude on a slow CPU and keeps
+# losing its session. The controller belongs off-device — which only works
+# if the CLI can address a remote phone. It does that by forwarding shelld's
+# socket, so sshd never forks a shell (the ~0.45s that made this feel slow).
+out="$("$PHONE" --device aadarshs-pixel-10 --print-link 2>&1)"
+if printf '%s' "$out" | grep -q "ssh" && printf '%s' "$out" | grep -q -- "-L"; then
+  ok "--device knows how to build the forward"
+else bad "--print-link (got: $out)"; fi
+if printf '%s' "$out" | grep -q "phone-shell.sock"; then
+  ok "the forward targets the device's shelld socket"
+else bad "forward target wrong (got: $out)"; fi
+# A stream-local forward must NOT be handed to an existing mux master: it is
+# accepted and silently never created. Measured, and it cost real time.
+if printf '%s' "$out" | grep -q "ControlPath=none"; then
+  ok "the forward uses a dedicated connection, not the mux"
+else bad "forward would be swallowed by an existing master (got: $out)"; fi
+out="$("$PHONE" --device "bad name; rm -rf" --print-link 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then ok "a hostile device name is refused"
+else bad "device name not validated (out=$out)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

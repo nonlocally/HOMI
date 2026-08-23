@@ -720,6 +720,78 @@ def cmd_lease(args):
     return 0
 
 
+
+# ------------------------------------------------------- driving from afar
+# The controller belongs OFF the phone: the on-device agent is pinned to an
+# old claude build (newer ones ship no Android binary), runs on a phone CPU,
+# and Android keeps reaping its session. A controller on a real machine gets
+# a current model and stays alive.
+#
+# What makes that practical is not ssh-per-verb — Termux's sshd forks a shell
+# for every command, ~0.45s, and no amount of connection multiplexing touches
+# it (measured with a verified master). It is forwarding shelld's unix socket:
+# the far sshd then never forks anything, it just hands bytes to a process
+# that is already running. Measured 0.449s -> 0.066s for the same round trip.
+#
+# With PHONE_SHELL_SOCK pointed at the forward, every verb in this file works
+# unchanged from another machine. That is the whole trick.
+
+REMOTE_SOCK = "/data/data/com.termux/files/usr/tmp/phone-shell.sock"
+_DEV_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,62}\Z")
+
+
+def link_argv(device, local_sock):
+    """The exact command that forwards a device's shelld socket here."""
+    if not _DEV_RE.match(device or ""):
+        die("bad device name %r" % device, 2)
+    return [
+        "ssh",
+        # NOT the mux. Asking an existing master to add a stream-local
+        # forward is accepted and then silently never created, and `-f -N -L`
+        # attaches to the master instead of opening one. A dedicated
+        # connection is what actually produces the socket.
+        "-o", "ControlMaster=no",
+        "-o", "ControlPath=none",
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=20",
+        "-o", "StreamLocalBindUnlink=yes",
+        "-f", "-N",
+        "-L", "%s:%s" % (local_sock, REMOTE_SOCK),
+        device,
+    ]
+
+
+def local_sock_for(device):
+    return os.path.join(
+        os.environ.get("TMPDIR", "/tmp").rstrip("/"),
+        "phone-%s.sock" % re.sub(r"[^a-z0-9]+", "-", device.lower()))
+
+
+def ensure_link(device):
+    """Point this process at a remote phone, bringing the forward up if it is
+    not already answering. Returns the local socket path."""
+    sock = local_sock_for(device)
+    os.environ["PHONE_SHELL_SOCK"] = sock
+    probe = shelld_call("true", timeout=6)
+    if probe is not None and probe[0] == 0:
+        return sock                      # already forwarded and answering
+    try:
+        os.unlink(sock)
+    except OSError:
+        pass
+    rc, _out = run(link_argv(device, sock), timeout=30)
+    if rc != 0:
+        die("could not reach %s (is it on the network, and is "
+            "`phone shelld` running there?)" % device, 3)
+    for _ in range(20):
+        probe = shelld_call("true", timeout=6)
+        if probe is not None and probe[0] == 0:
+            return sock
+        time.sleep(0.4)
+    die("forwarded %s but its shell never answered" % device, 3)
+
+
 # ---------------------------------------------------------------- UI parsing
 
 class El(object):
@@ -1976,10 +2048,44 @@ def build_parser():
 
 
 def main(argv):
+    # --device is a GLOBAL: it changes which phone every verb addresses, so
+    # it is consumed before the subcommand parser ever sees the arguments.
+    argv = list(argv)
+    device = os.environ.get("PHONE_DEVICE")
+    print_link = False
+    out = []
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--device" and i + 1 < len(argv):
+            device = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--device="):
+            device = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--print-link":
+            print_link = True
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    argv = [argv[0]] + out
+
+    if print_link:
+        if not device:
+            die("--print-link needs --device", 2)
+        print(" ".join(link_argv(device, local_sock_for(device))))
+        return 0
+    if device:
+        ensure_link(device)
+
     parser = build_parser()
     if len(argv) < 2:
         parser.print_help()
         return 2
+
     verb = argv[1]
     valid = set(parser._subparsers._group_actions[0].choices) \
         if parser._subparsers else set()
