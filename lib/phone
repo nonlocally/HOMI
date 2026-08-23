@@ -434,6 +434,38 @@ def cmd_shelld(args):
     os.chmod(path, 0o600)           # this socket IS shell-level power
     srv.listen(8)
 
+    # The lease. Held in this process because the accept loop below is
+    # single-threaded: check-and-set is atomic without any locking.
+    lease = {"holder": None, "until": 0.0}
+
+    def lease_op(line):
+        parts = line.split()
+        op = parts[0] if parts else "status"
+        now = time.time()
+        expired = lease["holder"] and now >= lease["until"]
+        if expired:
+            lease["holder"] = None          # a dead holder must not brick it
+        if op == "status":
+            if not lease["holder"]:
+                return 0, "-"
+            return 0, "%s %d" % (lease["holder"],
+                                 max(0, int(lease["until"] - now)))
+        if op == "acquire":
+            who = parts[1] if len(parts) > 1 else "anon"
+            ttl = float(parts[2]) if len(parts) > 2 else DEFAULT_TTL
+            if lease["holder"] and lease["holder"] != who:
+                return 1, lease["holder"]
+            lease["holder"] = who
+            lease["until"] = now + ttl      # re-acquire renews
+            return 0, who
+        if op == "release":
+            who = parts[1] if len(parts) > 1 else "anon"
+            if lease["holder"] and lease["holder"] != who:
+                return 1, lease["holder"]
+            lease["holder"] = None
+            return 0, "-"
+        return 2, "unknown lease op"
+
     # A one-element box so the shell can be replaced without rebinding a
     # closure variable.
     box = [None]
@@ -557,10 +589,14 @@ def cmd_shelld(args):
                     if not chunk:
                         break
                     data += chunk
-                cmd = data.decode("utf-8", "replace").strip()
+                raw = data.decode("utf-8", "replace")
+                cmd = raw.strip()
                 if not cmd:
                     continue
-                rc, out = run_one(cmd)
+                if raw.startswith(LEASE_CTL):
+                    rc, out = lease_op(raw[len(LEASE_CTL):].strip())
+                else:
+                    rc, out = run_one(cmd)
                 conn.sendall(out.encode("utf-8", "replace"))
                 conn.sendall(("%s %d\n" % (SENTINEL, rc)).encode())
             except OSError:
@@ -594,6 +630,94 @@ def cmd_sh(args):
         rc, out = r
     sys.stdout.write(out if out.endswith("\n") or not out else out + "\n")
     return rc
+
+
+
+# ----------------------------------------------------------------- the lease
+# Two drivers acting on one phone is not a race that produces a wrong pixel —
+# it is one agent typing into another agent's chat. So a driver takes a lease
+# before it acts.
+#
+# The lease lives in SHELLD, for three reasons: it is on-device, so it
+# arbitrates the local agent, a remote controller and the cockpit's HTTP path
+# identically; every shell verb already funnels through it; and its accept
+# loop is single-threaded, which makes check-and-set atomic without a lock.
+#
+# The CLI does the GATING rather than the daemon, because the termux-api
+# verbs (open, play, say, photo, torch) never reach shelld at all — a gate
+# only shelld enforced would leave exactly those unguarded.
+#
+# It carries a TTL because the failure that matters is a driver that dies
+# holding it. A phone that can be bricked by a crashed agent is worse than
+# one with no lease.
+
+LEASE_CTL = "\0lease "          # NUL: a shell command can never begin this way
+DEFAULT_TTL = 300
+
+
+def actor():
+    return os.environ.get("PHONE_ACTOR") or "anon"
+
+
+# Verbs that CHANGE the world need the wheel. Reads never do: watching must
+# not require taking control, or a second pair of eyes becomes an outage.
+MUTATING = {"tap", "type", "key", "open", "play", "media", "msg", "say",
+            "photo", "torch", "notify", "ptt", "clip"}
+
+
+def lease_call(args, timeout=15):
+    """Talk to the lease held inside shelld. None if there is no daemon."""
+    return shelld_call(LEASE_CTL + args, timeout=timeout)
+
+
+def lease_check(verb):
+    """Refuse a mutating verb when somebody else holds the wheel."""
+    if verb not in MUTATING:
+        return
+    if os.environ.get("PHONE_NO_LEASE"):
+        return
+    r = lease_call("status")
+    if r is None:
+        return                    # no daemon: nothing to arbitrate, act
+    _rc, out = r
+    holder, _, _rest = (out or "").strip().partition(" ")
+    me = actor()
+    if holder and holder != "-" and holder != me:
+        die("%s is held by %r — this phone has one driver at a time. "
+            "Wait, or take it with `phone lease acquire --as %s`."
+            % (verb, holder, me), 5)
+
+
+def cmd_lease(args):
+    if args.action == "status":
+        r = lease_call("status")
+        if r is None:
+            print("(no daemon; nothing holds the phone)")
+            return 0
+        out = (r[1] or "").strip()
+        holder = out.split(" ")[0] if out else "-"
+        print("free" if holder in ("", "-") else out)
+        return 0
+    who = args.holder or actor()
+    if args.action == "acquire":
+        r = lease_call("acquire %s %d" % (who, args.ttl))
+        if r is None:
+            die("no daemon to hold a lease (start `phone shelld --start`)", 3)
+        rc, out = r
+        if rc != 0:
+            die("held by %s" % (out or "").strip(), 5)
+        record("lease", {"holder": who, "ttl": args.ttl}, "act", "acquired")
+        print("acquired by %s" % who)
+        return 0
+    r = lease_call("release %s" % who)
+    if r is None:
+        die("no daemon", 3)
+    rc, out = r
+    if rc != 0:
+        die("not yours to release (%s)" % (out or "").strip(), 5)
+    record("lease", {"holder": who}, "act", "released")
+    print("released")
+    return 0
 
 
 # ---------------------------------------------------------------- UI parsing
@@ -1722,6 +1846,11 @@ def build_parser():
     s.add_argument("--start", action="store_true")
     s.add_argument("--stop", action="store_true")
 
+    s = add("lease", cmd_lease, "who is driving this phone")
+    s.add_argument("action", choices=["acquire", "release", "status"])
+    s.add_argument("--as", dest="holder")
+    s.add_argument("--ttl", type=int, default=DEFAULT_TTL)
+
     s = add("sh", cmd_sh, "run a raw device-shell command")
     s.add_argument("cmd", nargs="+")
     s.add_argument("--timeout", type=int, default=90)
@@ -1768,6 +1897,10 @@ def main(argv):
     if not getattr(args, "fn", None):
         parser.print_help()
         return 2
+    # Gate here, not in the daemon: open/play/say/photo/torch are termux-api
+    # and never reach shelld, so a daemon-side gate would leave exactly the
+    # verbs that touch the outside world unguarded.
+    lease_check(verb)
     return args.fn(args)
 
 

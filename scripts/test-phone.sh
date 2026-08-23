@@ -542,6 +542,62 @@ if grep -q "tier_notice\|termux-notification.*shizuku\|notify_tier" "$HERE/lib/p
   ok "a lost shell tier raises a notification the human can act on"
 else bad "a lost tier is silent"; fi
 
+echo "== the lease: only one driver may act on the phone at a time"
+# Two agents interleaving taps is not a race that produces a wrong pixel; it
+# is one agent typing into another's chat. The lease lives in shelld because
+# its accept loop is single-threaded, which makes check-and-set atomic for
+# free, and because it arbitrates local, remote and cockpit callers alike.
+SOCK5="$T/lease.sock"
+PHONE_SHELL_SOCK="$SOCK5" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK5" ] && break; sleep 0.4; done
+export PHONE_SHELL_SOCK="$SOCK5"
+
+out="$("$PHONE" lease acquire --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "a free phone can be leased"
+else bad "acquire failed (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" lease acquire --as intruder 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "tongs"; then
+  ok "a second driver is refused, and told who holds it"
+else bad "second acquire should fail naming the holder (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" lease acquire --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "the holder may re-acquire (renew) its own lease"
+else bad "holder re-acquire failed (rc=$rc out=$out)"; fi
+
+out="$("$PHONE" lease status 2>&1)"
+if printf '%s' "$out" | grep -q "tongs"; then ok "status names the holder"
+else bad "status (got: $out)"; fi
+
+# A mutating verb from a NON-holder must refuse rather than interleave.
+out="$(PHONE_ACTOR=intruder "$PHONE" key HOME 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "lease\|held by"; then
+  ok "a mutating verb from a non-holder is refused"
+else bad "non-holder was allowed to act (rc=$rc out=$out)"; fi
+
+# Reads stay free: watching must never require taking the wheel.
+out="$(PHONE_ACTOR=onlooker "$PHONE" notifs --from "$T/notifs.json" 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "reads are not gated by the lease"
+else bad "a read was blocked by the lease (rc=$rc)"; fi
+
+out="$("$PHONE" lease release --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "the holder can release"
+else bad "release failed (rc=$rc out=$out)"; fi
+out="$("$PHONE" lease acquire --as intruder 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "and the phone is free again"
+else bad "still held after release (rc=$rc out=$out)"; fi
+
+# A crashed holder must not lock the phone forever.
+"$PHONE" lease release --as intruder >/dev/null 2>&1
+"$PHONE" lease acquire --as ghost --ttl 1 >/dev/null 2>&1
+sleep 2
+out="$("$PHONE" lease acquire --as tongs 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "an expired lease is reclaimable (a crashed holder does not brick the phone)"
+else bad "expired lease still held (rc=$rc out=$out)"; fi
+"$PHONE" lease release --as tongs >/dev/null 2>&1
+"$PHONE" shelld --stop >/dev/null 2>&1
+unset PHONE_SHELL_SOCK
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
