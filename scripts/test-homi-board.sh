@@ -229,6 +229,31 @@ if printf '%s' "$tp" | grep -qi "theme-color" && printf '%s' "$tp" | grep -qi "v
   ok "talk page sets theme-color and covers the phone safe area"
 else bad "talk page theme/safe-area meta"; fi
 
+echo "== voice: the talk page as something you speak to"
+vp="$(curl -sf -m 5 "http://127.0.0.1:$PORT/voice/communicate" 2>/dev/null)"
+if [ -n "$vp" ] && printf '%s' "$vp" | grep -qi "speechSynthesis" \
+   && printf '%s' "$vp" | grep -qi "SpeechRecognition"; then
+  ok "voice page serves and uses Web Speech in AND out"
+else bad "voice page speech wiring"; fi
+if printf '%s' "$vp" | grep -q "/api/send" && printf '%s' "$vp" | grep -q "/api/timeline/"; then
+  ok "voice page talks to the REAL fabric (send + await the reply)"
+else bad "voice page still mocked"; fi
+vtok="$(printf '%s' "$vp" | grep -oE 'var TOKEN = "[0-9a-f]{16,}"' | wc -l | tr -d ' ')"
+if [ "$vtok" = "1" ]; then
+  ok "voice page carries a real mutation token exactly once"
+else bad "voice token injection (matches=$vtok)"; fi
+# Chrome silently truncates a speechSynthesis utterance around 15s, so a long
+# answer MUST be chunked or the agent gets cut off mid-sentence.
+if printf '%s' "$vp" | grep -qiE "chunk"; then
+  ok "long replies are chunked (Chrome cuts utterances at ~15s)"
+else bad "no utterance chunking"; fi
+if printf '%s' "$vp" | grep -qE "no-speech|not-allowed"; then
+  ok "recognition errors are handled as normal control flow"
+else bad "speech errors unhandled"; fi
+vbad="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/voice/../etc" 2>/dev/null)"
+if [ "$vbad" != "200" ]; then ok "voice rejects a non-conforming target"
+else bad "voice accepted a bad target"; fi
+
 kill_server
 
 echo "== the live-dot reflects a seat surface, not just the mail plane"
