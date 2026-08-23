@@ -54,13 +54,17 @@ def probe_script(my_addr):
         'stat -c %%u /tmp/cc-socks 2>/dev/null); '
         'echo "CCOWNER=$o"; echo "UID_=$(id -u)"; '
         '[ -f ~/.ssh/id_ed25519.pub ] && echo "OWNKEY=1" || echo "OWNKEY=0"; '
+        '[ -f ~/.ssh/id_homi ] && echo "HOMIKEY=1" || echo "HOMIKEY=0"; '
         'command -v python3 >/dev/null && echo "PY3=1" || echo "PY3=0"; '
         'echo "TMUX_BIN=$(PATH=%(p)s command -v tmux)"; '
         'echo "CLAUDE_BIN=$(PATH=%(p)s command -v claude)"; '
         'echo "SHIM=$([ -x ~/.local/bin/communicate ] && echo 1 || echo 0)"; '
+        'if [ -f ~/.local/share/homi/daemon/current/homi.py ]; then '
         'echo "KHASH=$(cat %(kf)s 2>/dev/null | md5 -q 2>/dev/null || '
         'cat %(kf)s 2>/dev/null | md5sum 2>/dev/null | cut -d" " -f1)"; '
-        'ssh -o BatchMode=yes -o ConnectTimeout=6 %(me)s true 2>/dev/null '
+        'else echo "KHASH="; fi; '
+        'ssh -o BatchMode=yes -o ConnectTimeout=6 -i ~/.ssh/id_homi '
+        '-o IdentitiesOnly=yes %(me)s true 2>/dev/null '
         '&& echo "REV=1" || echo "REV=0"'
         % {"p": _FAR_PATH, "kf": kf, "me": shlex.quote(my_addr)}
     )
@@ -90,6 +94,7 @@ def parse_facts(out):
         "ssh_ip": ip,
         "cc_collision": bool(owner) and bool(uid) and owner != uid,
         "own_key": kv.get("OWNKEY") == "1",
+        "fabric_key": kv.get("HOMIKEY") == "1",
         "py3": kv.get("PY3") == "1",
         "tmux_bin": kv.get("TMUX_BIN", ""),
         "claude_bin": kv.get("CLAUDE_BIN", ""),
@@ -123,6 +128,56 @@ def parse_args(argv):
     return addr, spawn, None
 
 
+FABRIC_KEY = "~/.ssh/id_homi"
+
+
+def fabric_keygen_cmd():
+    """Generate the fabric's OWN key — dedicated and passphrase-free.
+
+    Never reuse the operator's personal key: it is commonly passphrase-
+    protected (studio-2, live), and a locked key makes the far daemon's
+    non-interactive reverse dial fail with a misleading 'Permission denied'
+    even though sshd accepted the key. A dedicated key also means the hub
+    authorizes exactly one, tagged, revocable credential per device."""
+    return ("[ -f %s ] || ssh-keygen -t ed25519 -N '' -q -f %s "
+            "-C homi-$(hostname -s) </dev/null" % (FABRIC_KEY, FABRIC_KEY))
+
+
+def _hub_ipv4s():
+    """The hub's own non-loopback IPv4 addresses, for reverse-dial
+    candidates. Best-effort; empty on any platform where ifconfig differs."""
+    import subprocess as _sp
+    try:
+        out = _sp.run(["ifconfig"], capture_output=True, text=True,
+                      timeout=6).stdout
+    except Exception:
+        return []
+    ips = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("inet ") and not line.startswith("inet 127."):
+            ip = line.split()[1]
+            if ip.count(".") == 3:
+                ips.append(ip)
+    return ips
+
+
+def hub_reverse_candidates(ssh_ip, hub_ips):
+    """Ordered, de-duplicated reverse-dial addresses: the connection's own
+    source IP first (usually same-network and correct), then the hub's other
+    addresses. Bridge/virtual ranges (192.168., 10., 172.16-31.) go last —
+    they rarely route from another machine."""
+    def rank(ip):
+        return 1 if (ip.startswith("192.168.") or ip.startswith("10.")
+                     or ip.startswith("172.")) else 0
+    seen, out = set(), []
+    for ip in ([ssh_ip] if ssh_ip else []) + list(hub_ips):
+        if ip and ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return sorted(out, key=rank)
+
+
 def _profile_files(login_shell):
     sh = os.path.basename(login_shell or "")
     if sh == "zsh":
@@ -137,19 +192,21 @@ def plan(facts, local):
     Pure. Ordering: keys -> alias -> runtime dir -> shim -> kernel."""
     acts, checklist = [], []
 
-    if not facts.get("own_key"):
-        acts.append({"step": "gen_own_key"})
+    if not facts.get("fabric_key"):
+        acts.append({"step": "gen_fabric_key"})
     if not facts.get("reverse_ok"):
-        # The far side must dial the hub with its own key: authorize it
-        # here (dedup-checked on apply), and give it a resolvable address.
+        # The far side must dial the hub with its own key: authorize it here
+        # (dedup-checked on apply), and give it an address that actually
+        # routes back — chosen from candidates at execute time.
         acts.append({"step": "authorize_key_here"})
-        if facts.get("ssh_ip"):
-            acts.append({"step": "reverse_alias", "ip": facts["ssh_ip"]})
+        cands = local.get("reverse_candidates") or []
+        if cands:
+            acts.append({"step": "reverse_alias", "candidates": cands})
         else:
             checklist.append(
-                "reverse path: could not learn the hub's address from "
-                "SSH_CONNECTION — on the device, make `ssh %s` work "
-                "(alias or DNS), then re-run adopt" % local.get("my_addr"))
+                "reverse path: no hub address to offer — on the device, make "
+                "`ssh %s` work (alias or DNS), then re-run adopt"
+                % local.get("my_addr"))
 
     steer = bool(facts.get("cc_collision")) or (
         facts.get("os") != "Darwin" and not facts.get("xdg"))
@@ -303,32 +360,58 @@ def _authorize_here(pubkey, tag):
 
 
 def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
-    """Run the planned actions. Each prints one honest line."""
+    """Run the planned actions. Each prints one honest line. Returns extra
+    checklist items discovered during execution (e.g. no reverse address
+    verified)."""
     devtag = "adopt-%s" % addr.split("@")[-1].split(".")[0]
+    extra = []
     for a in acts:
         step = a["step"]
-        if step == "gen_own_key":
-            ssh(addr, "ssh-keygen -t ed25519 -N '' -q -f ~/.ssh/id_ed25519 "
-                      "</dev/null 2>/dev/null; true")
-            say("  provision: own key       generated")
+        if step == "gen_fabric_key":
+            rc, _ = ssh(addr, "mkdir -p ~/.ssh && chmod 700 ~/.ssh; " +
+                        fabric_keygen_cmd())
+            say("  provision: fabric key    %s"
+                % ("%s generated (no passphrase)" % FABRIC_KEY if rc == 0
+                   else "KEYGEN FAILED"))
         elif step == "authorize_key_here":
-            rc, out = ssh(addr, "cat ~/.ssh/id_ed25519.pub")
+            rc, out = ssh(addr, "cat %s.pub" % FABRIC_KEY)
             done = rc == 0 and _authorize_here(out, devtag)
             say("  provision: reverse key   %s" %
                 ("authorized on this hub" if done else "FAILED to fetch"))
         elif step == "reverse_alias":
             host = local["my_addr"].split("@")[-1]
             user = local["my_addr"].split("@")[0]
-            ssh(addr, "mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
-                      "grep -q 'Host %s' ~/.ssh/config 2>/dev/null || "
-                      "printf '\\nHost %s\\n  HostName %s\\n  User %s\\n' "
-                      ">> ~/.ssh/config; chmod 600 ~/.ssh/config"
-                      % (host, host, a["ip"], user))
-            rc, _ = ssh(addr, "ssh -o BatchMode=yes -o ConnectTimeout=8 "
-                              "-o StrictHostKeyChecking=accept-new %s true"
-                        % shlex.quote(local["my_addr"]))
-            say("  provision: dial alias    %s -> %s (%s)"
-                % (host, a["ip"], "verified" if rc == 0 else "NOT VERIFIED"))
+            winner = None
+            for ip in a["candidates"]:
+                rc, _ = ssh(addr, "ssh -o BatchMode=yes -o ConnectTimeout=6 "
+                            "-i %s -o IdentitiesOnly=yes "
+                            "-o StrictHostKeyChecking=accept-new %s true"
+                            % (FABRIC_KEY,
+                               shlex.quote("%s@%s" % (user, ip))))
+                if rc == 0:
+                    winner = ip
+                    break
+            if winner:
+                # IdentityFile + IdentitiesOnly: the daemon's dial uses the
+                # fabric key ONLY — a passphrase-locked personal key can
+                # neither shadow it nor break BatchMode signing.
+                ssh(addr, "mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
+                          "grep -q 'Host %s' ~/.ssh/config 2>/dev/null && "
+                          "sed -i.bak '/Host %s/,+4d' ~/.ssh/config; "
+                          "printf '\\nHost %s\\n  HostName %s\\n  User %s\\n"
+                          "  IdentityFile %s\\n  IdentitiesOnly yes\\n' "
+                          ">> ~/.ssh/config; chmod 600 ~/.ssh/config"
+                          % (host, host, host, winner, user, FABRIC_KEY))
+                say("  provision: dial alias    %s -> %s (verified)"
+                    % (host, winner))
+            else:
+                extra.append("reverse path: none of the hub addresses (%s) "
+                             "reach back from this device — run, ON %s: "
+                             "ssh-copy-id %s, or add a working Host alias"
+                             % (", ".join(a["candidates"]), addr,
+                                local["my_addr"]))
+                say("  provision: dial alias    NONE of %d candidates verified"
+                    % len(a["candidates"]))
         elif step == "runtime_dir":
             payload = runtime_profile_lines().replace("\n", "\\n")
             rcs = []
@@ -391,6 +474,7 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
             say("  provision: daemon        %s"
                 % ("restarted on the new kernel" if (rc == 0 and out.strip())
                    else "RESTART UNCONFIRMED"))
+    return extra
 
 
 def spawn(addr, name, facts, fardev, ssh=_run_ssh, say=print, ask=None,

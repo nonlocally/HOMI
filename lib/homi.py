@@ -3399,8 +3399,7 @@ def _cli_adopt(args):
         print("adopt: bad agent name %r" % spawn_name)
         return 1
 
-    me = _call({"op": "status"})
-    mydev = me.get("device") or "?"
+    mydev = self_device() or "?"
     my_addr = "%s@%s" % (getpass_user(), mydev)
     here_dir = os.path.dirname(os.path.abspath(__file__))
     missing = ha.hub_missing_files(here_dir)
@@ -3422,9 +3421,11 @@ def _cli_adopt(args):
                   "yourself and click the URL it prints)")
         return 1
     facts = ha.parse_facts(out)
+    local["reverse_candidates"] = ha.hub_reverse_candidates(
+        facts.get("ssh_ip"), ha._hub_ipv4s())
     acts, checklist = ha.plan(facts, local)
     if acts:
-        ha.execute(addr, acts, facts, local)
+        checklist += ha.execute(addr, acts, facts, local) or []
     else:
         print("  provision                nothing to do")
 

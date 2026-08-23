@@ -41,9 +41,9 @@ else bad "parse_facts (got: $r)"; fi
 echo "== plan: healthy adopted device -> NO actions, NO checklist (idempotent)"
 r="$(PY "
 f = dict(os='Linux', login_shell='/bin/bash', home='/home/a', xdg='/run/user/1008',
-         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, reverse_ok=True,
-         shim=True, tmux_bin='/usr/bin/tmux', claude_bin='/home/a/.local/bin/claude',
-         kernel_hash='SAME', py3=True)
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         reverse_ok=True, shim=True, tmux_bin='/usr/bin/tmux',
+         claude_bin='/home/a/.local/bin/claude', kernel_hash='SAME', py3=True)
 acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='aadarwal@mini'))
 print(len(acts), len(checklist))")"
 if [ "$r" = "0 0" ]; then ok "adopting twice is a no-op"
@@ -55,15 +55,16 @@ f = dict(os='Darwin', login_shell='/opt/homebrew/bin/bash', home='/Users/a', xdg
          ssh_ip='203.0.113.8', cc_collision=True, own_key=True, reverse_ok=False,
          shim=False, tmux_bin='/opt/homebrew/bin/tmux', claude_bin='/Users/a/.local/bin/claude',
          kernel_hash='OLD', py3=True)
-acts, checklist = ha.plan(f, dict(kernel_hash='NEW', my_addr='aadarwal@mini'))
+acts, checklist = ha.plan(f, dict(kernel_hash='NEW', my_addr='aadarwal@mini',
+                                  reverse_candidates=['203.0.113.8','100.1.1.1']))
 steps = [a['step'] for a in acts]
 alias = [a for a in acts if a['step']=='reverse_alias'][0]
 rt = [a for a in acts if a['step']=='runtime_dir'][0]
-print('authorize_key_here' in steps, 'gen_own_key' in steps,
-      alias['ip'], sorted(rt['profiles']),
+print('authorize_key_here' in steps, 'gen_fabric_key' in steps,
+      alias['candidates'][0], sorted(rt['profiles']),
       'kernel_refresh' in steps, 'restart_daemon' in steps, 'shim' in steps)")"
-if [ "$r" = "True False 203.0.113.8 ['~/.bash_profile', '~/.bashrc'] True True True" ]; then
-  ok "alias from SSH_CONNECTION ip; bash profiles; key authorized not regenerated; kernel refreshed"
+if [ "$r" = "True True 203.0.113.8 ['~/.bash_profile', '~/.bashrc'] True True True" ]; then
+  ok "candidates offered; bash profiles; a fabric key is minted even though a personal key exists; kernel refreshed"
 else bad "peer-device plan (got: $r)"; fi
 
 echo "== plan: the mw83 scenario (linux, xdg fine, bare box: no tmux/claude/shim)"
@@ -71,7 +72,8 @@ r="$(PY "
 f = dict(os='Linux', login_shell='/bin/bash', home='/home/a', xdg='/run/user/1008',
          ssh_ip='203.0.113.8', cc_collision=False, own_key=True, reverse_ok=False,
          shim=False, tmux_bin='', claude_bin='', kernel_hash='OLD', py3=True)
-acts, checklist = ha.plan(f, dict(kernel_hash='NEW', my_addr='aadarwal@mini'))
+acts, checklist = ha.plan(f, dict(kernel_hash='NEW', my_addr='aadarwal@mini',
+                                  reverse_candidates=['203.0.113.8']))
 steps = [a['step'] for a in acts]
 print('runtime_dir' in steps, 'reverse_alias' in steps,
       'install_tmux_static' in steps, 'install_claude' in steps, 'shim' in steps)")"
@@ -87,7 +89,7 @@ f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
          kernel_hash='', py3=True)
 acts, _ = ha.plan(f, dict(kernel_hash='NEW', my_addr='aadarwal@mini'))
 steps = [a['step'] for a in acts]
-print(steps.index('gen_own_key') < steps.index('authorize_key_here'),
+print(steps.index('gen_fabric_key') < steps.index('authorize_key_here'),
       'runtime_dir' in steps, 'kernel_refresh' in steps)")"
 if [ "$r" = "True False False" ]; then
   ok "keygen precedes authorize; no steer without a collision (default cc-socks matches the launchd daemon); absent kernel left to pair"
@@ -119,17 +121,35 @@ if [ "$r" = "False False False" ]; then
   ok "working reverse leg is left alone; non-shared mac keeps the default cc-socks"
 else bad "reverse-ok plan (got: $r)"; fi
 
-echo "== plan: no SSH_CONNECTION ip and broken reverse -> human checklist, never a bad alias"
+echo "== plan: NO reverse candidate at all -> checklist, never a bad alias"
 r="$(PY "
 f = dict(os='Linux', login_shell='/bin/bash', home='/home/a', xdg='/run/user/1',
          ssh_ip='', cc_collision=False, own_key=True, reverse_ok=False,
          shim=True, tmux_bin='/x/tmux', claude_bin='/x/claude',
          kernel_hash='SAME', py3=True)
-acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='aadarwal@mini'))
+acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='aadarwal@mini',
+                                  reverse_candidates=[]))
 print(any(a['step']=='reverse_alias' for a in acts),
       any('reverse' in c for c in checklist))")"
-if [ "$r" = "False True" ]; then ok "unknown hub address degrades to a checklist item"
-else bad "no-ip plan (got: $r)"; fi
+if [ "$r" = "False True" ]; then ok "no candidate degrades to a checklist item, no broken alias"
+else bad "no-candidate plan (got: $r)"; fi
+
+echo "== B: hub_reverse_candidates — source IP first, virtual ranges last, deduped"
+r="$(PY "
+print(ha.hub_reverse_candidates('100.126.234.47',
+      ['203.0.113.8','100.126.234.47','192.168.64.1']))")"
+if [ "$r" = "['100.126.234.47', '203.0.113.8', '192.168.64.1']" ]; then
+  ok "connection IP leads; 192.168 sinks; the duplicate collapses"
+else bad "hub candidates (got: $r)"; fi
+
+echo "== A: probe reports empty KHASH when no kernel is present (fresh device)"
+r="$(PY "
+sc = ha.probe_script('aadarwal@mini')
+guard = 'current/homi.py ]; then' in sc
+empty = 'else echo' in sc
+print(guard, empty)")"
+if [ "$r" = "True True" ]; then ok "a kernel-less device hashes to empty, not md5-of-nothing"
+else bad "probe kernel guard (got: $r)"; fi
 
 echo "== profile selection covers unknown shells"
 r="$(PY "print(ha._profile_files('/usr/bin/fish'), ha._profile_files(''))")"
@@ -301,6 +321,74 @@ print(ha.hub_missing_files(good) == [],
 if [ "$r" = "True True True" ]; then
   ok "healthy hub clean; incomplete hub names the gap; presence changes the hash"
 else bad "I4 hub guard (got: $r)"; fi
+
+echo "== fabric key: a device with no id_homi gets one generated (personal key untouched)"
+r="$(PY "
+f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
+         ssh_ip='203.0.113.8', cc_collision=False, own_key=True, fabric_key=False,
+         reverse_ok=False, shim=True, tmux_bin='/x/tmux', claude_bin='/x/claude',
+         kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@mini',
+                          reverse_candidates=['203.0.113.8']))
+steps = [a['step'] for a in acts]
+print('gen_fabric_key' in steps, 'gen_own_key' not in steps,
+      steps.index('gen_fabric_key') < steps.index('authorize_key_here'))")"
+if [ "$r" = "True True True" ]; then
+  ok "a dedicated passphrase-free fabric key is generated before authorizing"
+else bad "fabric key plan (got: $r)"; fi
+
+echo "== fabric key: present -> not regenerated (idempotent)"
+r="$(PY "
+f = dict(os='Linux', login_shell='/bin/bash', home='/h', xdg='/run/user/1',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=False, fabric_key=True,
+         reverse_ok=True, shim=True, tmux_bin='/x/tmux', claude_bin='/x/claude',
+         kernel_hash='SAME', py3=True)
+acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@mini',
+                                  reverse_candidates=['1.2.3.4']))
+print(len(acts), len(checklist))")"
+if [ "$r" = "0 0" ]; then ok "existing fabric key + working reverse = still a no-op"
+else bad "fabric key idempotence (got: $r)"; fi
+
+echo "== keygen command: ed25519, NO passphrase, dedicated path"
+r="$(PY "
+c = ha.fabric_keygen_cmd()
+print('id_homi' in c, \"-N ''\" in c, 'ed25519' in c, 'id_ed25519' not in c)")"
+if [ "$r" = "True True True True" ]; then
+  ok "keygen writes ~/.ssh/id_homi with an empty passphrase, never the personal key"
+else bad "keygen cmd (got: $r)"; fi
+
+echo "== the dial alias pins the fabric key (IdentitiesOnly), so a locked personal key can't shadow it"
+r="$(PY "
+seen = []
+def okssh(addr, cmd, timeout=60):
+    seen.append(cmd)
+    return (0, '')
+ha.execute('u@h', [{'step':'reverse_alias','candidates':['203.0.113.8']}],
+           dict(os='Darwin'), dict(my_addr='aadarwal@mini', here_dir='/tmp'),
+           ssh=okssh, say=lambda s: None)
+probe = seen[0]; write = seen[-1]
+print('id_homi' in probe, 'IdentitiesOnly' in probe,
+      'IdentityFile' in write and 'id_homi' in write,
+      'IdentitiesOnly yes' in write)")"
+if [ "$r" = "True True True True" ]; then
+  ok "reverse probe AND the written Host block both pin ~/.ssh/id_homi"
+else bad "alias identity pinning (got: $r)"; fi
+
+echo "== probe asks about the fabric key and tests reverse WITH it"
+r="$(PY "
+sc = ha.probe_script('aadarwal@mini')
+print('HOMIKEY=' in sc, 'id_homi' in sc, 'IdentitiesOnly=yes' in sc)")"
+if [ "$r" = "True True True" ]; then
+  ok "probe reports HOMIKEY and its REV test uses the fabric key only"
+else bad "probe fabric key (got: $r)"; fi
+
+echo "== parse_facts surfaces fabric_key"
+r="$(PY "
+print(ha.parse_facts('HOMIKEY=1\n')['fabric_key'],
+      ha.parse_facts('HOMIKEY=0\n')['fabric_key'],
+      ha.parse_facts('OS=Darwin\n')['fabric_key'])")"
+if [ "$r" = "True False False" ]; then ok "fabric_key parsed, absent means false"
+else bad "parse fabric_key (got: $r)"; fi
 
 echo
 echo "pass=$pass fail=$fail"
