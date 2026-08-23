@@ -33,7 +33,7 @@ import time
 KERNEL_FILES = sorted([
     "homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
     "homi_board.py", "homi_talk.py", "homi_transcript.py", "homi_codex.py",
-    "homi_adopt.py", "homi_voice.py", "homi_device.py", "homi_cockpit.py",
+    "homi_adopt.py", "homi_device.py", "homi_cockpit.py",
     # Not a module: the device-side CLI. It ships through the same vehicle so
     # a device's copy is hash-compared and refreshed like everything else,
     # instead of being scp'd by hand and silently drifting.

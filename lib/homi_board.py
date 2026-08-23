@@ -315,7 +315,6 @@ def serve(port, bind, no_remote, ttl=10.0):
     import http.server
     import urllib.parse
     import homi_talk
-    import homi_voice
     import homi_device
     import homi_cockpit
     import homi_transcript
@@ -478,15 +477,19 @@ def serve(port, bind, no_remote, ttl=10.0):
                 return (homi_cockpit.render_cockpit(dev, token).encode(),
                         "text/html; charset=utf-8")
             if path.startswith("/voice/"):
+                # One console, not two. The voice page re-implemented the
+                # timeline and lost history, paging, the work fold and the
+                # restart guard along the way; talk gains the voice key
+                # instead. Existing links and installed shortcuts survive.
                 target = urllib.parse.unquote(path[len("/voice/"):])
-                if not handle:
-                    return (b"claim a handle first: communicate homi init",
-                            "text/plain; charset=utf-8")
-                if not homi_talk.valid_target(target):
-                    return None, None
-                return (homi_voice.render_voice(handle, target,
-                                                token).encode(),
-                        "text/html; charset=utf-8")
+                if homi_talk.valid_target(target):
+                    self.send_response(302)
+                    self.send_header(
+                        "Location",
+                        "/talk/" + urllib.parse.quote(target) + "?v=1")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    raise _Handled
             if path.startswith("/talk/"):
                 target = urllib.parse.unquote(path[len("/talk/"):])
                 if not handle:
@@ -770,7 +773,11 @@ TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0a">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
 <title>homi board</title>
 <style>
   /* Instrument panel, dark-first, warm-neutral. Color is worry (status) or
@@ -1184,6 +1191,15 @@ TEMPLATE = r"""<!doctype html>
   }
   pollState();
 })();
+
+  // The board is what start_url opens, so it must itself be installable:
+  // without a manifest link and a registered worker, the one page Chrome
+  // cannot offer to install from is the page the installed app lands on.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function () {});
+    });
+  }
 </script>
 </body>
 </html>
