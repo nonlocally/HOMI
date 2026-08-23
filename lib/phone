@@ -571,6 +571,21 @@ def cmd_foreground(args):
     return 0
 
 
+def find_cli():
+    """Locate the homi CLI without relying on PATH — see cmd_ptt: the shell a
+    notification action runs in has a minimal PATH."""
+    for c in ("communicate", "homi"):
+        w = shutil.which(c)
+        if w:
+            return w
+    home = os.path.expanduser("~")
+    for cand in (os.path.join(home, ".local", "bin", "communicate"),
+                 os.path.join(home, ".local", "bin", "homi")):
+        if os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 VOICE_FRAME = (
     "[spoken aloud by @aadarwal into the phone. This is a VOICE turn: answer "
     "out loud by running `phone say \"<your answer>\"`, and keep it to one or "
@@ -596,13 +611,28 @@ def cmd_voice(args):
         sys.stderr.write("phone: nothing heard\n")
         return 1
     prompt = VOICE_FRAME % text.strip()
+    if args.seat:
+        # The brain is on THIS device: type into its pane. Shorter and more
+        # reliable than the mail plane, and it works with agent builds that
+        # predate live-mail delivery.
+        tmux = shutil.which("tmux") or "tmux"
+        argv = [tmux, "send-keys", "-t", args.seat, prompt, "Enter"]
+        if args.print_only:
+            print(" ".join(argv[:4] + ["<prompt>", "Enter"]))
+            print(prompt)
+            return 0
+        rc, out = run(argv, timeout=30)
+        if rc != 0:
+            die("could not reach seat %s: %s" % (args.seat, (out or "").strip()), 4)
+        print("delivered to seat %s" % args.seat)
+        return 0
     if args.print_only:
         print("-> %s" % args.to)
         print(prompt)
         return 0
-    cli = shutil.which("communicate") or shutil.which("homi")
+    cli = find_cli()
     if not cli:
-        die("no homi CLI on PATH — cannot reach a brain", 3)
+        die("no homi CLI found — cannot reach a brain", 3)
     rc, out = run([cli, "homi", "send", args.to, prompt, "--from", "phone"],
                   timeout=40)
     if rc != 0:
@@ -622,9 +652,21 @@ def cmd_ptt(args):
     A button action containing $REPLY gets a RemoteInput text box, so the same
     notification is both press-to-talk and type-to-agent.
     """
-    me = os.path.abspath(sys.argv[0])
-    talk = "%s voice --to %s" % (me, args.to)
-    typed = '%s voice --to %s --text "$REPLY"' % (me, args.to)
+    # A notification action runs in a MINIMAL shell whose PATH is just
+    # $PREFIX/bin — no ~/.local/bin. So the action must carry an ABSOLUTE
+    # path, and argv[0] may be a bare name rather than one. (Observed live:
+    # the Type button silently did nothing because `phone` was not found.)
+    me = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
+    me = os.path.realpath(me)
+    # Invoke python explicitly rather than relying on the shebang. Termux has
+    # no /usr/bin/env — normally its termux-exec shim rewrites the shebang at
+    # exec time, but a notification action can run in a stripped environment
+    # where that shim is absent and the script is simply "not found".
+    # (Observed live: the Type button failed exactly this way.)
+    base = "%s %s" % (sys.executable or "python3", me)
+    tail = "--seat %s" % args.seat if args.seat else "--to %s" % args.to
+    talk = "%s voice %s" % (base, tail)
+    typed = '%s voice %s --text "$REPLY"' % (base, tail)
     argv = ["termux-notification",
             "--title", args.title,
             "--content", args.content,
@@ -745,10 +787,13 @@ def build_parser():
                    help="skip the microphone and use this text")
     s.add_argument("--timeout", type=int, default=60)
     s.add_argument("--quiet", action="store_true", help="no spoken ack")
+    s.add_argument("--seat", default=None,
+                   help="deliver into this tmux target instead of via mail")
     s.add_argument("--print-only", action="store_true", dest="print_only")
 
     s = add("ptt", cmd_ptt, "post the press-to-talk / type-to-agent notification")
     s.add_argument("--to", default="ember")
+    s.add_argument("--seat", default=None)
     s.add_argument("--title", default="ember")
     s.add_argument("--content", default="Talk to your phone")
     s.add_argument("--id", default="phone-voice")

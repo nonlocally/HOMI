@@ -200,6 +200,18 @@ if printf '%s' "$out" | grep -q -- "--action"; then
   ok "tapping the notification body starts a voice turn (not the API app)"
 else bad "ptt missing tap-anywhere --action (got: $out)"; fi
 
+echo "== voice --seat: deliver straight into a local agent's pane"
+# When the brain lives on THIS device, the mail plane is a needless hop (and
+# an older agent build may not read live mail at all). Typing into its tmux
+# pane is the shortest, most reliable path.
+out="$("$PHONE" voice --text "hello there" --seat homi-ember --print-only 2>&1)"
+if printf '%s' "$out" | grep -q "homi-ember" && printf '%s' "$out" | grep -q "hello there"; then
+  ok "voice --seat targets a tmux pane instead of the mail plane"
+else bad "voice --seat (got: $out)"; fi
+if printf '%s' "$out" | grep -qi "send-keys"; then
+  ok "voice --seat delivers by typing into the pane"
+else bad "voice --seat should use tmux send-keys (got: $out)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
