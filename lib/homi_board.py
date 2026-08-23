@@ -315,6 +315,7 @@ def serve(port, bind, no_remote, ttl=10.0):
     import http.server
     import urllib.parse
     import homi_talk
+    import homi_voice
     import homi_transcript
 
     cache = _Cache(no_remote, ttl=ttl)
@@ -416,6 +417,16 @@ def serve(port, bind, no_remote, ttl=10.0):
                 if n not in (192, 512):
                     return None, None
                 return _png_icon(n), "image/png"
+            if path.startswith("/voice/"):
+                target = urllib.parse.unquote(path[len("/voice/"):])
+                if not handle:
+                    return (b"claim a handle first: communicate homi init",
+                            "text/plain; charset=utf-8")
+                if not homi_talk.valid_target(target):
+                    return None, None
+                return (homi_voice.render_voice(handle, target,
+                                                token).encode(),
+                        "text/html; charset=utf-8")
             if path.startswith("/talk/"):
                 target = urllib.parse.unquote(path[len("/talk/"):])
                 if not handle:
