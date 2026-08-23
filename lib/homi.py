@@ -3391,16 +3391,9 @@ def _cli_adopt(args):
     kernel refresh. What still needs the human (claude /login, a Tailscale
     SSH check) is detected and printed as a checklist, never a timeout."""
     import homi_adopt as ha
-    addr = None
-    spawn_name = None
-    it = iter(args)
-    for a in it:
-        if a == "--spawn":
-            spawn_name = next(it, None)
-        elif not a.startswith("-"):
-            addr = a
-    if not addr or (spawn_name is not None and not spawn_name):
-        print("usage: homi adopt <user@host> [--spawn <agent-name>]")
+    addr, spawn_name, err = ha.parse_args(args)
+    if err:
+        print("adopt: %s" % err)
         return 1
     if spawn_name and not re.match(r"[a-z0-9][a-z0-9._-]{0,63}\Z", spawn_name):
         print("adopt: bad agent name %r" % spawn_name)
@@ -3410,6 +3403,12 @@ def _cli_adopt(args):
     mydev = me.get("device") or "?"
     my_addr = "%s@%s" % (getpass_user(), mydev)
     here_dir = os.path.dirname(os.path.abspath(__file__))
+    missing = ha.hub_missing_files(here_dir)
+    if missing:
+        print("adopt: this hub is missing kernel files %s — its own install "
+              "is incomplete; adopt cannot deploy or hash-compare them. Fix "
+              "the hub first." % ", ".join(missing))
+        return 1
     local = {"kernel_hash": ha._local_kernel_hash(here_dir),
              "my_addr": my_addr, "here_dir": here_dir}
 
@@ -3469,7 +3468,9 @@ def _cli_adopt(args):
                     r = _call({"op": "ask", "to": target, "text": text,
                                "from_name": "adopt", "timeout": 90})
                     return bool(r.get("ok")), (r.get("reply") or "")
-                ha.spawn(addr, spawn_name, facts, fardev, ask=_ask)
+                steered = any(a.get("step") == "runtime_dir" for a in acts)
+                ha.spawn(addr, spawn_name, facts, fardev, ask=_ask,
+                         steered=steered)
 
     if checklist:
         print("adopt: NEEDS YOU —")
@@ -3640,7 +3641,9 @@ def _cli_pair(args):
                 addr, 'o=$(stat -f %u /tmp/cc-socks 2>/dev/null || '
                       'stat -c %u /tmp/cc-socks 2>/dev/null); u=$(id -u); '
                       'if [ -n "$o" ] && [ "$o" != "$u" ]; then '
-                      'echo "/tmp/homi-$u"; fi')
+                      'mkdir -p "$HOME/.local/run/cc-socks" && '
+                      'chmod 700 "$HOME/.local/run" 2>/dev/null; '
+                      'echo "$HOME/.local/run/cc-socks"; fi')
             sock_d = sock_d.strip() if rc_s == 0 else ""
             if sock_d:
                 far_prod_env[0] = "HOMI_SOCK_DIR=%s " % shlex.quote(sock_d)

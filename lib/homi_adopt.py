@@ -151,14 +151,16 @@ def plan(facts, local):
                 "SSH_CONNECTION — on the device, make `ssh %s` work "
                 "(alias or DNS), then re-run adopt" % local.get("my_addr"))
 
+    steer = bool(facts.get("cc_collision")) or (
+        facts.get("os") != "Darwin" and not facts.get("xdg"))
     provisioned_rt = False
-    if not facts.get("xdg"):
-        # No runtime dir in the probe env (macOS always; Termux): provision
-        # before the first collision, not after live delivery silently dies.
+    if steer:
+        # Move BOTH the daemon (pair steers its plist/unit to the same
+        # ~/.local/run/cc-socks) and claude off the unusable default.
         acts.append({"step": "runtime_dir",
                      "profiles": _profile_files(facts.get("login_shell")),
                      "reason": ("collision" if facts.get("cc_collision")
-                                else "preemptive")})
+                                else "no-systemd-runtime")})
         provisioned_rt = True
 
     if not facts.get("shim"):
@@ -208,14 +210,17 @@ def settings_file_cmd():
             r'> "$HOME/.homi-settings.json"')
 
 
-def spawn_cmds(name, facts):
+def spawn_cmds(name, facts, steered=False):
     """Remote commands that spawn agent NAME in tmux session homi-NAME.
     Interactive shell + send-keys (claude needs a real pty; a launcher
     script as the pane command died twice). Returned as a list of remote
-    sh lines to run in order, with waits handled by the caller."""
+    sh lines to run in order, with waits handled by the caller. `steered`:
+    the device was moved to ~/.local/run (collision / no-systemd), so claude
+    must bind its socket there too — otherwise it keeps the OS default that
+    its daemon also uses."""
     tmux = facts.get("tmux_bin") or "tmux"
-    env = ("export XDG_RUNTIME_DIR=\\\"\\$HOME/.local/run\\\"; "
-           if facts.get("os") == "Darwin" else "")
+    env = ('export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/run}"; '
+           if steered else "")
     return [
         settings_file_cmd(),
         "%s kill-session -t homi-%s 2>/dev/null; "
@@ -235,15 +240,29 @@ def _run_ssh(addr, cmd, timeout=60):
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
+def hub_missing_files(here_dir):
+    """Kernel files absent from the hub itself — an empty list is a healthy
+    hub. A non-empty one means the hub can neither deploy nor honestly
+    hash-compare those files."""
+    return [f for f in KERNEL_FILES
+            if not os.path.exists(os.path.join(here_dir, f))]
+
+
 def _local_kernel_hash(here_dir):
+    # Name-tagged so file PRESENCE is part of the identity: a file missing
+    # here vs present there changes the hash (asymmetric mismatch -> refresh).
+    # Hub completeness is guarded separately (hub_missing_files) so the
+    # symmetric both-missing case can't silently mask an incomplete deploy.
     import hashlib
     h = hashlib.md5()
     for f in KERNEL_FILES:
         try:
             with open(os.path.join(here_dir, f), "rb") as fh:
-                h.update(fh.read())
+                data = fh.read()
         except OSError:
-            pass
+            data = None
+        h.update(("\0%s\0" % f).encode())
+        h.update(b"ABSENT" if data is None else data)
     return h.hexdigest()
 
 
@@ -374,9 +393,10 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
                    else "RESTART UNCONFIRMED"))
 
 
-def spawn(addr, name, facts, fardev, ssh=_run_ssh, say=print, ask=None):
+def spawn(addr, name, facts, fardev, ssh=_run_ssh, say=print, ask=None,
+          steered=False):
     """Spawn agent NAME on the device and prove it end to end."""
-    cmds = spawn_cmds(name, facts)
+    cmds = spawn_cmds(name, facts, steered=steered)
     ssh(addr, cmds[0])
     ssh(addr, cmds[1])
     ssh(addr, cmds[2])

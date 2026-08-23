@@ -79,7 +79,7 @@ if [ "$r" = "False True True True True" ]; then
   ok "linux keeps systemd runtime dir; static tmux + native claude planned"
 else bad "mw83 plan (got: $r)"; fi
 
-echo "== plan: fresh mac with zsh and no key -> keygen + zshenv runtime dir"
+echo "== plan: fresh NON-shared mac -> keygen, but the default cc-socks is kept"
 r="$(PY "
 f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
          ssh_ip='10.0.0.9', cc_collision=False, own_key=False, reverse_ok=False,
@@ -87,12 +87,24 @@ f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
          kernel_hash='', py3=True)
 acts, _ = ha.plan(f, dict(kernel_hash='NEW', my_addr='aadarwal@mini'))
 steps = [a['step'] for a in acts]
-rt = [a for a in acts if a['step']=='runtime_dir'][0]
 print(steps.index('gen_own_key') < steps.index('authorize_key_here'),
-      rt['profiles'], 'kernel_refresh' in steps)")"
-if [ "$r" = "True ['~/.zshenv'] False" ]; then
-  ok "keygen precedes authorize; zshenv; darwin runtime dir even before a collision; absent kernel left to pair"
+      'runtime_dir' in steps, 'kernel_refresh' in steps)")"
+if [ "$r" = "True False False" ]; then
+  ok "keygen precedes authorize; no steer without a collision (default cc-socks matches the launchd daemon); absent kernel left to pair"
 else bad "fresh mac plan (got: $r)"; fi
+
+echo "== plan: SHARED mac (collision) DOES steer, into zshenv"
+r="$(PY "
+f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
+         ssh_ip='10.0.0.9', cc_collision=True, own_key=True, reverse_ok=True,
+         shim=True, tmux_bin='/x/tmux', claude_bin='/x/claude',
+         kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='aadarwal@mini'))
+rt = [a for a in acts if a['step']=='runtime_dir']
+print(bool(rt), rt[0]['profiles'] if rt else '-', rt[0]['reason'] if rt else '-')")"
+if [ "$r" = "True ['~/.zshenv'] collision" ]; then
+  ok "a real collision steers both daemon and claude to ~/.local/run"
+else bad "shared mac plan (got: $r)"; fi
 
 echo "== plan: reverse already works -> no alias, no key work beyond dedupe"
 r="$(PY "
@@ -103,8 +115,8 @@ f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
 acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='aadarwal@mini'))
 steps = [a['step'] for a in acts]
 print('reverse_alias' in steps, 'authorize_key_here' in steps, 'runtime_dir' in steps)")"
-if [ "$r" = "False False True" ]; then
-  ok "working reverse leg is left alone; darwin runtime dir still provisioned"
+if [ "$r" = "False False False" ]; then
+  ok "working reverse leg is left alone; non-shared mac keeps the default cc-socks"
 else bad "reverse-ok plan (got: $r)"; fi
 
 echo "== plan: no SSH_CONNECTION ip and broken reverse -> human checklist, never a bad alias"
@@ -124,19 +136,21 @@ r="$(PY "print(ha._profile_files('/usr/bin/fish'), ha._profile_files(''))")"
 if [ "$r" = "['~/.profile'] ['~/.profile']" ]; then ok "unknown shell -> ~/.profile fallback"
 else bad "profile fallback (got: $r)"; fi
 
-echo "== spawn command: settings via FILE (no inline JSON), env exported, far tmux path used"
+echo "== spawn command: settings via FILE; XDG exported ONLY when the device was steered"
 r="$(PY "
 f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
          tmux_bin='/opt/homebrew/bin/tmux', claude_bin='/Users/a/.local/bin/claude')
-cmds = ha.spawn_cmds('lathe', f)
-joined = chr(10).join(cmds)
-print('--settings ~/.homi-settings.json' in joined,
-      '{' not in joined.replace('crossSessionInbound','X'),
-      '/opt/homebrew/bin/tmux' in joined,
-      'XDG_RUNTIME_DIR' in joined,
-      'homi-lathe' in joined)" 2>&1 | tail -1)"
-if [ "$r" = "True False True True True" ]; then
-  ok "spawn: settings file referenced, no raw JSON braces in shell, env + session name right"
+steered = ha.spawn_cmds('lathe', f, steered=True)
+plain = ha.spawn_cmds('lathe', f, steered=False)
+sj, pj = chr(10).join(steered), chr(10).join(plain)
+print('--settings ~/.homi-settings.json' in sj,
+      '{' not in sj.replace('crossSessionInbound','X'),
+      '/opt/homebrew/bin/tmux' in sj,
+      'XDG_RUNTIME_DIR' in sj,
+      'XDG_RUNTIME_DIR' not in pj,
+      'homi-lathe' in sj)" 2>&1 | tail -1)"
+if [ "$r" = "True False True True True True" ]; then
+  ok "spawn: settings file, no raw JSON braces, tmux path, XDG iff steered, session name"
 else bad "spawn cmds (got: $r)"; fi
 
 echo "== settings file writer: emits exact JSON via printf-safe encoding"
@@ -233,10 +247,10 @@ if [ "$r" = "True True" ]; then
   ok "darwin daemon restarts WITH the env claude uses; linux trusts systemd"
 else bad "restart env (got: $r)"; fi
 
-echo "== C1: plan() restarts the daemon whenever the runtime dir was provisioned on darwin"
+echo "== C1: plan() restarts the daemon whenever the runtime dir was provisioned"
 r="$(PY "
 f = dict(os='Darwin', login_shell='/bin/zsh', home='/Users/a', xdg='',
-         ssh_ip='10.0.0.9', cc_collision=False, own_key=True, reverse_ok=True,
+         ssh_ip='10.0.0.9', cc_collision=True, own_key=True, reverse_ok=True,
          shim=True, tmux_bin='/x/tmux', claude_bin='/x/claude',
          kernel_hash='SAME', py3=True)
 acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m'))
@@ -268,6 +282,25 @@ print(':-' in line, f['ssh_ip'], g['ssh_ip'] == '')")"
 if [ "$r" = "True 1.2.3.4 True" ]; then
   ok "\${XDG_RUNTIME_DIR:-...} guard; ssh_ip must be address-shaped"
 else bad "profile guard / ip validation (got: $r)"; fi
+
+echo "== C2 is WIRED: _cli_adopt actually calls ha.parse_args (not a private loop)"
+r="$(grep -c 'ha.parse_args(args)' "$HERE/lib/homi.py")"
+if [ "$r" -ge 1 ]; then ok "the shipped CLI path delegates to the strict parser"
+else bad "C2 wiring (parse_args not called in homi.py)"; fi
+
+echo "== I4: hub-completeness guard + name-tagged hashing"
+r="$(PY "
+import tempfile, os
+good = tempfile.mkdtemp()
+for fn in ha.KERNEL_FILES: open(os.path.join(good, fn),'w').write('x')
+bad = tempfile.mkdtemp()
+for fn in ha.KERNEL_FILES[1:]: open(os.path.join(bad, fn),'w').write('x')
+print(ha.hub_missing_files(good) == [],
+      ha.hub_missing_files(bad) == [ha.KERNEL_FILES[0]],
+      ha._local_kernel_hash(good) != ha._local_kernel_hash(bad))")"
+if [ "$r" = "True True True" ]; then
+  ok "healthy hub clean; incomplete hub names the gap; presence changes the hash"
+else bad "I4 hub guard (got: $r)"; fi
 
 echo
 echo "pass=$pass fail=$fail"
