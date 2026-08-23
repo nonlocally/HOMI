@@ -327,6 +327,81 @@ if [ -z "$missing" ]; then
   ok "every sensitive verb records (camera, gps, clipboard, mic, keys, launches)"
 else bad "verbs act with NO ledger entry:$missing"; fi
 
+echo "== shizuku is preferred over adb, and adb is only a fallback"
+# Shizuku holds shell UID over Binder IPC: no port, no connection, nothing
+# for Android to switch off. adb is the fragile path that kept dying, so it
+# must never be REQUIRED when Shizuku is present.
+if grep -q "def have_rish" "$HERE/lib/phone" && grep -q "def dev_shell" "$HERE/lib/phone"; then
+  ok "there is a single device-shell entry point with a shizuku path"
+else bad "no dev_shell/have_rish abstraction"; fi
+
+# every place that used to hard-require adb must now accept either tier
+if ! grep -nE "^\s+need_adb\(\)" "$HERE/lib/phone" | grep -q .; then
+  ok "no verb hard-requires adb any more"
+else bad "still calling need_adb(): $(grep -nE '^\s+need_adb\(\)' "$HERE/lib/phone" | head -3)"; fi
+
+out="$(PHONE_NO_DEVICE=1 "$PHONE" tap 10 10 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "shizuku"; then
+  ok "with no device at all, the error names shizuku as the fix"
+else bad "no-shell error should mention shizuku (rc=$rc out=$out)"; fi
+
+echo "== bulk data is READ FROM A FILE, never streamed through the bridge"
+# Measured: rish truncates its stdout at a pipe-buffer boundary — a UI dump
+# came back as exactly 8192 bytes. So the privileged side WRITES to /sdcard
+# and the unprivileged side READS the file directly. Streaming large output
+# through the bridge is the bug, not the transport.
+if grep -q "def dev_read" "$HERE/lib/phone"; then
+  ok "there is a file-based path for bulk device data"
+else bad "no dev_read helper"; fi
+if grep -q "8192\|truncat" "$HERE/lib/phone"; then
+  ok "the truncation hazard is documented where it bites"
+else bad "truncation hazard undocumented"; fi
+
+echo "== a persistent shell, because the spawn IS the cost"
+# Measured on the device: every rish invocation costs ~1.1s to start
+# app_process and load its dex, while the command itself takes milliseconds.
+# Paying that per verb is what made the agent feel glacial. One long-lived
+# shell fed over a socket removes it.
+SOCK="$T/shell.sock"
+PHONE_SHELL_SOCK="$SOCK" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK" ] && break; sleep 0.4; done
+if [ -S "$SOCK" ]; then ok "shelld starts and listens on a socket"
+else bad "shelld did not create $SOCK"; fi
+
+out="$(PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "echo hello-from-persistent" 2>&1 | tail -1)"
+if [ "$out" = "hello-from-persistent" ]; then ok "a command round-trips through the persistent shell"
+else bad "shelld round trip (got: $out)"; fi
+
+# state must persist across calls — that is the point of one shell
+PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "MARKER=stateful" >/dev/null 2>&1
+out="$(PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "echo \$MARKER" 2>&1 | tail -1)"
+if [ "$out" = "stateful" ]; then ok "the shell is the SAME process across calls"
+else bad "shell state not preserved (got: $out)"; fi
+
+# exit codes have to survive, or callers cannot tell success from failure
+PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "true" >/dev/null 2>&1; a=$?
+PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "(exit 7)" >/dev/null 2>&1; b=$?
+if [ "$a" = "0" ] && [ "$b" = "7" ]; then ok "exit codes survive the socket"
+else bad "exit codes lost (true=$a exit7=$b)"; fi
+
+# A command CAN kill the shell (`exit`, a crash). The daemon must outlive it,
+# or one bad command silently bricks every later call.
+PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "exit 3" >/dev/null 2>&1
+out="$(PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "echo survived" 2>&1 | tail -1)"
+if [ "$out" = "survived" ]; then ok "the daemon respawns a shell that died"
+else bad "daemon bricked after its shell exited (got: $out)"; fi
+
+# output containing the sentinel must not truncate the response
+out="$(PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "echo a; echo b; echo c" 2>&1 | tr '\n' ',')"
+if printf '%s' "$out" | grep -q "a,b,c"; then ok "multi-line output comes back whole"
+else bad "multiline through shelld (got: $out)"; fi
+
+big="$(PHONE_SHELL_SOCK="$SOCK" "$PHONE" sh "seq 1 5000" 2>&1 | wc -l | tr -d ' ')"
+if [ "$big" = "5000" ]; then ok "large output is not truncated at a buffer boundary"
+else bad "large output truncated (got $big lines, wanted 5000)"; fi
+
+PHONE_SHELL_SOCK="$SOCK" "$PHONE" shelld --stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
