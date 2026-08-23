@@ -236,7 +236,31 @@ def dev_read(remote_path, want_bytes=False):
     return out if rc == 0 else (b"" if want_bytes else "")
 
 
+_SHELL_OK = None
+
+
 def have_shell():
+    """Is there a device shell at all? Memoised, and asks the DAEMON first.
+
+    This used to prove liveness by spawning rish — paying the full ~1.14s
+    process launch in front of every verb, purely to answer a yes/no. The
+    persistent shell removed that cost from the command and left it standing
+    in the doorway. Asking the daemon costs ~2ms, and if it answers it IS the
+    shell, so nothing further needs proving.
+    """
+    global _SHELL_OK
+    if _SHELL_OK is None:
+        _SHELL_OK = _probe_shell()
+    return _SHELL_OK
+
+
+def _probe_shell():
+    if os.environ.get("PHONE_NO_DEVICE") and not os.environ.get(
+            "PHONE_SHELL_SOCK"):
+        return False
+    r = shelld_call("true", timeout=8)
+    if r is not None and r[0] == 0:
+        return True
     if have_rish():
         rc, _ = _rish("true", timeout=25)
         if rc == 0:
@@ -269,6 +293,9 @@ def need_shell():
 # the shell did not emit.
 
 SENTINEL = "__PHONE_EOC__"
+
+# How long the daemon waits for one command before killing its shell.
+_SHELLD_DEADLINE = float(os.environ.get("PHONE_SHELL_DEADLINE") or 75)
 
 
 def shell_sock():
@@ -380,7 +407,10 @@ def cmd_shelld(args):
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True,
                                   bufsize=1, env=env,
-                                  cwd=os.path.expanduser("~"))
+                                  cwd=os.path.expanduser("~"),
+                                  # own process group, so a deadline can take
+                                  # the hung child down with the shell
+                                  start_new_session=True)
         return box[0]
 
     spawn()
@@ -389,6 +419,9 @@ def cmd_shelld(args):
         return box[0] is not None and box[0].poll() is None
 
     def run_one(cmd, _retry=True):
+        # Retry only when the shell was ALREADY dead before we wrote — never
+        # after a timeout, because the command may well have taken effect and
+        # re-running a tap or a send is worse than failing.
         # A command can legitimately kill the shell — `exit`, a crash, the OS
         # reaping it. The daemon has to outlive its shell, or one bad command
         # silently bricks every later call.
@@ -405,8 +438,40 @@ def cmd_shelld(args):
             except Exception:
                 return 127, ""
 
-    def _run_in(cmd):
+    def _run_in(cmd, deadline_s=None):
+        # A DEADLINE, because readline() on a hung command blocks the single
+        # accept loop forever: one `uiautomator dump` waiting on a screen that
+        # never goes idle wedged the daemon permanently, and every later
+        # client then waited out its own timeout. Without this the fast path
+        # is slower than the spawn path it replaced, on exactly the screens
+        # that already fail.
+        #
+        # Enforced with a watchdog that kills the shell, NOT with select():
+        # select() reports the fd, but a text-mode reader keeps data in its
+        # own buffer, so select says "nothing readable" while a full response
+        # is sitting there — measured, it silently truncated 5000 lines to
+        # 3499. Blocking readline is correct; the timer is what bounds it.
+        import threading
         proc = box[0]
+        timed_out = [False]
+
+        def _fire():
+            timed_out[0] = True
+            # Kill the whole PROCESS GROUP. Killing just the shell leaves its
+            # child (the actually-hung command) alive holding the same stdout
+            # pipe, so readline never returns and the deadline does nothing —
+            # measured: a 3s deadline still took the full 30s.
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        wd = threading.Timer(deadline_s or _SHELLD_DEADLINE, _fire)
+        wd.daemon = True
+        wd.start()
         proc.stdin.write("%s\n" % cmd)
         proc.stdin.write('printf "%%s %%s\\n" %s "$?"\n' % SENTINEL)
         proc.stdin.flush()
@@ -414,10 +479,16 @@ def cmd_shelld(args):
         while True:
             line = proc.stdout.readline()
             if not line:
+                wd.cancel()
+                if timed_out[0]:
+                    # The shell was killed for running too long. Abandoned,
+                    # not retried: the command may well have taken effect.
+                    return 124, "".join(lines)
                 # The shell ended mid-command (e.g. `exit`). Report what we
                 # got; the next call respawns.
                 return 127, "".join(lines)
             if line.startswith(SENTINEL):
+                wd.cancel()
                 rc_s = line[len(SENTINEL):].strip()
                 try:
                     rc = int(rc_s)
@@ -563,9 +634,25 @@ def get_ui(from_file=None):
             return f.read()
     need_shell()
     # uiautomator writes to a file on the device; /dev/tty streams it back.
-    # The privileged side writes the dump; we read the file ourselves.
-    dev_shell("uiautomator dump /sdcard/ui.xml", timeout=60)
-    out = dev_read("/sdcard/ui.xml")
+    # A UNIQUE path per call, so a stale tree is structurally impossible.
+    # `uiautomator dump` fails routinely — it waits for window idle and gives
+    # up on anything animating (video, a spinner, an ad), on secure windows,
+    # and with the screen off. Writing to a fixed path meant those failures
+    # silently served the PREVIOUS screen, and `find` then handed out
+    # coordinates for a screen that was no longer there. That is the worst
+    # failure this system can have: the agent taps something real, believing
+    # it saw it.
+    remote = "/sdcard/.phone/ui-%d-%d.xml" % (os.getpid(),
+                                              int(time.time() * 1000))
+    rc, marker = dev_shell(
+        "mkdir -p /sdcard/.phone && uiautomator dump %s && echo __DUMP_OK__"
+        % remote, timeout=60)
+    if rc != 0 or "__DUMP_OK__" not in (marker or ""):
+        die("could not read the UI tree: the dump failed (screen off, a "
+            "secure window, or the screen never went idle). Nothing guessed.",
+            4)
+    out = dev_read(remote)
+    dev_shell("rm -f %s" % remote, timeout=15)
     if "<hierarchy" not in (out or ""):
         die("could not read the UI tree (the screen may be off or secure)", 4)
     i = out.index("<hierarchy")
@@ -956,10 +1043,14 @@ def cmd_media(args):
 def cmd_screen(args):
     need_shell()
     out_path = args.out or "screen.png"
-    # Same split: capture to /sdcard as shell, then read the bytes here.
-    # Streaming a PNG through the bridge hits the same truncation.
-    dev_shell("screencap -p /sdcard/.phone-shot.png", timeout=60)
-    data = dev_read("/sdcard/.phone-shot.png", want_bytes=True)
+    # Same split, and the same unique-path rule: a screenshot that failed
+    # must not hand back the last one that worked.
+    remote = "/sdcard/.phone/shot-%d-%d.png" % (os.getpid(),
+                                                int(time.time() * 1000))
+    rc, _m = dev_shell("mkdir -p /sdcard/.phone && screencap -p %s" % remote,
+                       timeout=60)
+    data = dev_read(remote, want_bytes=True) if rc == 0 else b""
+    dev_shell("rm -f %s" % remote, timeout=15)
     if not data and not os.environ.get("PHONE_NO_DEVICE") \
             and shutil.which("adb") and adb_ready():
         _rc, data = adb("exec-out", "screencap -p", timeout=60,

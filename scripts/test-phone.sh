@@ -402,6 +402,51 @@ else bad "large output truncated (got $big lines, wanted 5000)"; fi
 
 PHONE_SHELL_SOCK="$SOCK" "$PHONE" shelld --stop >/dev/null 2>&1
 
+echo "== a FAILED ui dump must never serve the previous screen"
+# uiautomator dump fails routinely (animating surface, secure window, screen
+# off). Writing to a fixed path meant those failures silently returned the
+# LAST screen, and `find` then handed out coordinates for something no longer
+# there — the agent taps a real button believing it saw it.
+STUB="$T/stubbin"; mkdir -p "$STUB"
+printf '#!/bin/sh\ncase "$1" in\n  dump) exit 1 ;;\n  *) exit 0 ;;\nesac\n' > "$STUB/uiautomator"
+printf '#!/bin/sh\nexit 0\n' > "$STUB/mkdir_ok"
+chmod +x "$STUB/uiautomator"
+SOCK2="$T/stale.sock"
+PHONE_SHELL_SOCK="$SOCK2" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK2" ] && break; sleep 0.4; done
+out="$(PATH="$STUB:$PATH" PHONE_SHELL_SOCK="$SOCK2" "$PHONE" ui 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && ! printf '%s' "$out" | grep -qE "^[0-9]+,[0-9]+"; then
+  ok "a failed dump exits non-zero and emits NO screen content"
+else bad "STALE SCREEN served after a failed dump (rc=$rc out=$(printf '%s' "$out" | head -2))"; fi
+PHONE_SHELL_SOCK="$SOCK2" "$PHONE" shelld --stop >/dev/null 2>&1
+
+echo "== the liveness check must not cost a process spawn"
+if grep -q "_SHELL_OK" "$HERE/lib/phone" && \
+   grep -A6 "def _probe_shell" "$HERE/lib/phone" | grep -q "shelld_call"; then
+  ok "have_shell is memoised and asks the daemon before spawning anything"
+else bad "have_shell still probes by spawning"; fi
+
+echo "== a hung command must not wedge the daemon for everyone else"
+# The accept loop is single-threaded: without a deadline, one command that
+# never returns (a uiautomator dump on a screen that never goes idle) blocks
+# every later client forever, making the fast path slower than the spawn path
+# it replaced.
+SOCK3="$T/wedge.sock"
+PHONE_SHELL_SOCK="$SOCK3" PHONE_SHELL_ARGV=sh PHONE_SHELL_DEADLINE=3 \
+  "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK3" ] && break; sleep 0.4; done
+start=$(date +%s)
+PHONE_SHELL_SOCK="$SOCK3" "$PHONE" sh "sleep 30" >/dev/null 2>&1; hrc=$?
+mid=$(date +%s)
+out="$(PHONE_SHELL_SOCK="$SOCK3" "$PHONE" sh "echo recovered" 2>&1 | tail -1)"
+end=$(date +%s)
+if [ $((mid-start)) -le 12 ]; then ok "a hung command is abandoned at the deadline ($((mid-start))s)"
+else bad "hung command was not bounded ($((mid-start))s)"; fi
+if [ "$out" = "recovered" ] && [ $((end-mid)) -le 12 ]; then
+  ok "the daemon still serves the NEXT client promptly after a hang"
+else bad "daemon wedged after a hang (out=$out took $((end-mid))s)"; fi
+PHONE_SHELL_SOCK="$SOCK3" "$PHONE" shelld --stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
