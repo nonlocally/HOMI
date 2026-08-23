@@ -284,6 +284,29 @@ if grep -q 'out_path == "-"' "$HERE/lib/phone" && \
   ok "screen supports streaming to stdout for the cockpit"
 else bad "screen --out - missing"; fi
 
+echo "== watchdog: the phone heals itself, because Android will keep killing it"
+# Termux dies on network changes and hard sleeps. A shell loop gets killed
+# too, so the watchdog registers with Android's own JobScheduler — the one
+# scheduler the OS actually honours.
+out="$(PHONE_NO_DEVICE=1 "$PHONE" watchdog --print-only 2>&1)"
+if printf '%s' "$out" | grep -qi "sshd" && printf '%s' "$out" | grep -qi "daemon"; then
+  ok "a heal pass covers sshd and the homi daemon"
+else bad "watchdog coverage (got: $out)"; fi
+if printf '%s' "$out" | grep -qi "wake-lock\|wakelock"; then
+  ok "the heal pass re-takes the wakelock"
+else bad "watchdog wakelock (got: $out)"; fi
+if printf '%s' "$out" | grep -qi "adb"; then
+  ok "the heal pass reconnects adb"
+else bad "watchdog adb (got: $out)"; fi
+
+out="$(PHONE_NO_DEVICE=1 "$PHONE" watchdog --install --print-only 2>&1)"
+if printf '%s' "$out" | grep -q "termux-job-scheduler"; then
+  ok "install registers with Android's JobScheduler (survives process death)"
+else bad "watchdog install (got: $out)"; fi
+if printf '%s' "$out" | grep -q -- "--persisted true"; then
+  ok "the job is persisted, so it survives a reboot too"
+else bad "watchdog not persisted (got: $out)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

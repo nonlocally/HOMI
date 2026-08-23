@@ -882,6 +882,93 @@ def cmd_ptt(args):
     return 0
 
 
+
+# ----------------------------------------------------------------- watchdog
+# Android is hostile to long-lived background work, and a phone is a device
+# that wanders between networks and sleeps hard. Everything else here assumes
+# the phone is reachable; this is what makes that assumption survivable.
+#
+# The scheduler matters as much as the checks. A `while true` loop in Termux
+# gets killed — that is the whole problem — so the watchdog registers with
+# Android's own JobScheduler via termux-job-scheduler, which the OS honours
+# and which persists across reboots.
+
+WATCHDOG_STEPS = (
+    ("wakelock", "termux-wake-lock",
+     "hold the wake-lock so Termux is not reaped while idle"),
+    ("sshd", "pgrep -x sshd >/dev/null 2>&1 || sshd",
+     "sshd is how the fabric reaches this phone at all"),
+    ("daemon", "pgrep -f 'homi.py daemon' >/dev/null 2>&1 || "
+               "(HOMI_SELF=${HOMI_SELF:-aadarshs-pixel-10} "
+               "XDG_RUNTIME_DIR=$HOME/.local/run nohup python3 "
+               "$HOME/.local/share/homi/daemon/current/homi.py daemon "
+               ">> $HOME/.local/state/communicate/homi/daemon.log 2>&1 &)",
+     "the homi daemon carries mail to and from the agent"),
+    ("adb", "adb devices 2>/dev/null | grep -q 'device$' || "
+            "adb connect ${ADB_HEAL_IP:-100.95.137.30}:5555 >/dev/null 2>&1",
+     "adb is pinned to 5555, so reconnecting is a single dial"),
+)
+
+
+def cmd_watchdog(args):
+    if args.install:
+        script = os.path.join(os.path.expanduser("~"), ".local", "bin",
+                              "phone-watchdog.sh")
+        me = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
+        me = os.path.realpath(me)
+        body = ("#!/data/data/com.termux/files/usr/bin/sh\n"
+                "export PATH=\"$HOME/.local/bin:$PREFIX/bin:$PATH\"\n"
+                "%s %s watchdog >> $HOME/.local/state/phone-watchdog.log 2>&1\n"
+                % (sys.executable or "python3", me))
+        argv = ["termux-job-scheduler",
+                "--script", script,
+                "--period-ms", str(args.every * 60 * 1000),
+                "--persisted", "true",
+                "--network", "any"]
+        if args.print_only:
+            print("write %s:" % script)
+            print(body.rstrip())
+            print(" ".join(argv))
+            return 0
+        need_termux()
+        try:
+            d = os.path.dirname(script)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, 0o700)
+            with open(script, "w") as f:
+                f.write(body)
+            os.chmod(script, 0o700)
+        except OSError as e:
+            die("could not write %s (%s)" % (script, e), 4)
+        rc, out = run([shutil.which("termux-job-scheduler") or
+                       "termux-job-scheduler"] + argv[1:], timeout=30)
+        if rc != 0:
+            die("could not register the job: %s" % (out or "").strip(), 4)
+        record("watchdog", {"every_min": args.every}, "act", "installed")
+        print("watchdog registered (every %d min, persisted)" % args.every)
+        return 0
+
+    if args.print_only:
+        for name, cmd, why in WATCHDOG_STEPS:
+            print("%-9s %s" % (name, why))
+            print("          %s" % cmd)
+        return 0
+    need_termux()
+    healed = []
+    for name, cmd, _why in WATCHDOG_STEPS:
+        rc, _out = run(["sh", "-c", cmd], timeout=60)
+        if rc != 0:
+            healed.append(name + "!")
+        else:
+            healed.append(name)
+    # Only record when something actually needed fixing — a watchdog that
+    # writes a line every 15 minutes buries the entries that matter.
+    if any(h.endswith("!") for h in healed):
+        record("watchdog", " ".join(healed), "act", "healed")
+    print(" ".join(healed))
+    return 0
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="phone", add_help=True,
                                 description="drive an Android device as a "
@@ -980,6 +1067,12 @@ def build_parser():
     s.add_argument("--grep")
 
     add("foreground", cmd_foreground, "the app currently on screen")
+
+    s = add("watchdog", cmd_watchdog, "keep this phone reachable")
+    s.add_argument("--install", action="store_true",
+                   help="register with Android's JobScheduler")
+    s.add_argument("--every", type=int, default=15, help="minutes")
+    s.add_argument("--print-only", action="store_true", dest="print_only")
 
     s = add("voice", cmd_voice, "one spoken turn: listen -> a brain -> speak")
     s.add_argument("--to", default="ember", help="agent to think about it")
