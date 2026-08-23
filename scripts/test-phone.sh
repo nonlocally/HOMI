@@ -661,6 +661,56 @@ for must in "look" "lease" "Never guess" "SPOKEN"; do
   else bad "skill missing: $must"; fi
 done
 
+echo "== --device: drive a phone from somewhere else, over a forwarded socket"
+# The on-phone agent is pinned to an old claude on a slow CPU and keeps
+# losing its session. The controller belongs off-device — which only works
+# if the CLI can address a remote phone. It does that by forwarding shelld's
+# socket, so sshd never forks a shell (the ~0.45s that made this feel slow).
+out="$("$PHONE" --device aadarshs-pixel-10 --print-link 2>&1)"
+if printf '%s' "$out" | grep -q "ssh" && printf '%s' "$out" | grep -q -- "-L"; then
+  ok "--device knows how to build the forward"
+else bad "--print-link (got: $out)"; fi
+if printf '%s' "$out" | grep -q "phone-shell.sock"; then
+  ok "the forward targets the device's shelld socket"
+else bad "forward target wrong (got: $out)"; fi
+# A stream-local forward must NOT be handed to an existing mux master: it is
+# accepted and silently never created. Measured, and it cost real time.
+if printf '%s' "$out" | grep -q "ControlPath=none"; then
+  ok "the forward uses a dedicated connection, not the mux"
+else bad "forward would be swallowed by an existing master (got: $out)"; fi
+out="$("$PHONE" --device "bad name; rm -rf" --print-link 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then ok "a hostile device name is refused"
+else bad "device name not validated (out=$out)"; fi
+
+echo "== two drivers racing for the lease: exactly one wins"
+# The lease was correct only because shelld's accept loop happens to be
+# single-threaded — correctness resting on a distant, unrelated property.
+# Make shelld concurrent (the obvious future optimisation) and it goes racy
+# with no test failing and nothing erroring; you just occasionally get two
+# drivers, which is precisely what it exists to prevent. This asserts the
+# invariant itself rather than the property it used to lean on.
+SOCK6="$T/race.sock"
+PHONE_SHELL_SOCK="$SOCK6" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK6" ] && break; sleep 0.4; done
+wins="$(python3 -c "
+import subprocess, threading, os
+env = dict(os.environ); env['PHONE_SHELL_SOCK'] = '$SOCK6'
+won = []
+lock = threading.Lock()
+def go(name):
+    r = subprocess.run(['$PHONE', 'lease', 'acquire', '--as', name],
+                       capture_output=True, env=env)
+    if r.returncode == 0:
+        with lock:
+            won.append(name)
+threads = [threading.Thread(target=go, args=('driver%d' % i,)) for i in range(8)]
+[t.start() for t in threads]; [t.join() for t in threads]
+print(len(won))
+")"
+if [ "$wins" = "1" ]; then ok "8 simultaneous acquires, exactly 1 winner"
+else bad "the lease is racy: $wins winners out of 8"; fi
+"$PHONE" shelld --stop >/dev/null 2>&1
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
