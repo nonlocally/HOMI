@@ -511,7 +511,13 @@ def cmd_shelld(args):
         wd.daemon = True
         wd.start()
         proc.stdin.write("%s\n" % cmd)
-        proc.stdin.write('printf "%%s %%s\\n" %s "$?"\n' % SENTINEL)
+        # A LEADING newline: without it, a command whose output does not end
+        # in one leaves the sentinel on that same line, the startswith()
+        # check never matches, and the daemon waits out the full deadline —
+        # measured at 75.20s for `head -c 100`, with the data already there.
+        # The extra newline is removed from the result below, so output is
+        # byte-identical either way.
+        proc.stdin.write('printf "\\n%%s %%s\\n" %s "$?"\n' % SENTINEL)
         proc.stdin.flush()
         lines = []
         while True:
@@ -532,7 +538,12 @@ def cmd_shelld(args):
                     rc = int(rc_s)
                 except ValueError:
                     rc = 0
-                return rc, "".join(lines)
+                body = "".join(lines)
+                # Drop exactly the newline we injected, so a command that
+                # ended with one keeps it and one that did not stays bare.
+                if body.endswith("\n"):
+                    body = body[:-1]
+                return rc, body
             lines.append(line)
 
     try:
@@ -874,30 +885,59 @@ def cmd_tap(args):
 
 
 def cmd_type(args):
-    need_shell()
+    # No need_shell() here: --print-only must work with no device, so the
+    # exact argv can be inspected and tested off-device.
+    import shlex
     text = " ".join(args.text)
     # `input text` mangles multi-word strings: the documented %s-for-space
     # escape silently dropped most of a sentence on this device (measured —
-    # "Written by an AI agent over Shizuku" arrived as "iuku"). Typing word
-    # by word with an explicit SPACE keyevent is slower and correct.
+    # "Written by an AI agent over Shizuku" arrived as "iuku"). So: word by
+    # word with an explicit SPACE keyevent.
+    #
+    # Quote with shlex rather than stripping. The old strip-regex deleted
+    # apostrophes, =, $, <, >, |, backtick and more, so "Don't" became "Dont"
+    # and "x=2" became "x2" — and then it reported success, because it
+    # counted WORDS WHOSE EXIT CODE WAS 0, which says nothing about what
+    # arrived. An actuator that lies about what it typed is worse than one
+    # that fails.
     words = text.split(" ")
-    typed = 0
-    for i, w in enumerate(words):
+    argv = []
+    dropped = []
+    for w in words:
+        # Control characters are the only thing `input text` genuinely cannot
+        # carry; everything else survives quoting.
+        clean = "".join(c for c in w if c.isprintable())
+        if clean != w:
+            dropped.append(w)
+        argv.append(clean)
+    plan = []
+    for i, w in enumerate(argv):
         if i:
-            dev_shell("input keyevent 62")      # KEYCODE_SPACE
-        if not w:
-            continue
-        # Keep the word out of the shell's way; input text takes one token.
-        safe = w.replace("'", "")
-        safe = re.sub(r"[^\w@.,:;!?\"/+()\[\]#&*%-]", "", safe)
-        if not safe:
-            continue
-        rc, _ = dev_shell("input text '%s'" % safe)
-        if rc == 0:
-            typed += 1
-    record("type", text[:200], "act",
-           "typed %d/%d words" % (typed, len([w for w in words if w])))
-    return 0
+            plan.append("input keyevent 62")     # KEYCODE_SPACE
+        if w:
+            plan.append("input text %s" % shlex.quote(w))
+    if args.print_only:
+        print("\n".join(plan))
+        return 0
+    need_shell()
+    delivered = 0
+    for step in plan:
+        rc, _ = dev_shell(step)
+        if rc != 0:
+            break
+        if step.startswith("input text "):
+            delivered += len(argv[len([p for p in plan[:plan.index(step) + 1]
+                                       if p.startswith("input text ")]) - 1])
+    want = sum(len(w) for w in argv)
+    ok_all = (delivered == want and not dropped)
+    record("type", {"requested": text[:200], "sent": " ".join(argv)[:200]},
+           "act", "delivered %d/%d chars%s"
+           % (delivered, want,
+              "; dropped unprintable" if dropped else ""))
+    if not ok_all:
+        sys.stderr.write("phone: typed %d of %d characters\n"
+                         % (delivered, want))
+    return 0 if ok_all else 1
 
 
 def cmd_key(args):
@@ -941,6 +981,26 @@ def cmd_open(args):
     # LAUNCH the app when we can. The deep link is a fallback for when there
     # is no device shell — asking for "whatsapp" and getting a browser open
     # on wa.me is not what anyone means.
+    if p and not have_shell():
+        # LEVEL 1 LAUNCH. Measured on-device: `am start -n <component>`
+        # succeeds from Termux with shizuku down and adb off, because
+        # launching an activity does not need shell UID. Losing the shell
+        # tier must not cost app launching — it is the first step of most
+        # tasks, and the whole tier design is that level 1 keeps working.
+        rc, out = run(["am", "start", "-n", "%s/.MainActivity" % p],
+                      timeout=25)
+        if rc != 0:
+            # Without a shell we cannot resolve the real launcher activity,
+            # so fall back to the monitor-free intent form.
+            rc, out = run(["am", "start", "-a",
+                           "android.intent.action.MAIN", "-c",
+                           "android.intent.category.LAUNCHER", "-n", p],
+                          timeout=25)
+        if rc == 0:
+            record("open", target, "act", "opened (level 1, no shell)")
+            return 0
+        # fall through to the link path below
+
     if p and have_shell():
         if args.print_url:
             die("%r launches as an app, not a link" % target, 2)
@@ -1454,8 +1514,45 @@ WATCHDOG_STEPS = (
      "adb is pinned to 5555, so reconnecting is a single dial"),
     ("shizuku", "test -x $HOME/rish && RISH_APPLICATION_ID=com.termux "
                 "timeout 20 $HOME/rish -c true >/dev/null 2>&1",
-     "shizuku is the shell tier that survives everything; check it answers"),
+     "shizuku is the shell tier; check it still answers"),
+    # The fleet stages this CLI into the daemon directory (it is in
+    # KERNEL_FILES, so it is hash-compared and refreshed like any module).
+    # Putting it on PATH is the activation half: distribution by the kernel,
+    # activation by the watchdog, so a refreshed device runs the new one
+    # without anyone scp-ing it by hand.
+    ("cli", 'K="$HOME/.local/share/homi/daemon/current/phone"; '
+            'if [ -f "$K" ]; then chmod +x "$K" 2>/dev/null; '
+            '[ "$(readlink "$HOME/.local/bin/phone")" = "$K" ] || '
+            'ln -sf "$K" "$HOME/.local/bin/phone"; '
+            'ln -sf "$K" "$PREFIX/bin/phone" 2>/dev/null; fi',
+     "the staged CLI is the one on PATH"),
 )
+
+
+def tier_notice(alive):
+    """Tell the human when the shell tier is gone.
+
+    Shizuku's service can stop while the phone stays up — observed with an
+    uptime of two days — and Level 1 keeps working, which is by design. But
+    a silent loss means the phone quietly sheds half its capability and the
+    agent starts refusing things for reasons nobody can see. So it says so,
+    on the device, with the fix in the notification.
+    """
+    if not have_termux():
+        return
+    if alive:
+        run([shutil.which("termux-notification-remove") or "true",
+             "phone-tier"], timeout=15)
+        return
+    run([shutil.which("termux-notification") or "true",
+         "--title", "phone: shell tier down",
+         "--content", "Shizuku stopped. Screen/tap unavailable; inbox and "
+                      "voice still work. Open Shizuku and start it.",
+         "--id", "phone-tier", "--priority", "high",
+         "--button1", "Open Shizuku",
+         "--button1-action",
+         "am start -n moe.shizuku.privileged.api/"
+         "moe.shizuku.manager.MainActivity"], timeout=20)
 
 
 def cmd_watchdog(args):
@@ -1513,6 +1610,9 @@ def cmd_watchdog(args):
     # writes a line every 15 minutes buries the entries that matter.
     if any(h.endswith("!") for h in healed):
         record("watchdog", " ".join(healed), "act", "healed")
+    # Raise or clear the tier notice based on what we just measured.
+    tier_notice(not any(h.startswith("shizuku") and h.endswith("!")
+                        for h in healed))
     print(" ".join(healed))
     return 0
 
@@ -1557,6 +1657,8 @@ def build_parser():
 
     s = add("type", cmd_type, "type text into the focused field")
     s.add_argument("text", nargs="+")
+    s.add_argument("--print-only", action="store_true", dest="print_only",
+                   help="show the exact input-text argv instead of typing")
 
     s = add("key", cmd_key, "send a keyevent (BACK, HOME, ENTER, ...)")
     s.add_argument("key")
