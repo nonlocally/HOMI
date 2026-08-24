@@ -472,6 +472,78 @@ if [ "$out" = "recovered" ] && [ $((end-mid)) -le 12 ]; then
 else bad "daemon wedged after a hang (out=$out took $((end-mid))s)"; fi
 PHONE_SHELL_SOCK="$SOCK3" "$PHONE" shelld --stop >/dev/null 2>&1
 
+echo "== a daemon must not outlive its socket"
+# Measured on this machine: 730 `phone shelld` processes, 727 of them orphaned
+# to init, some 13 hours old, holding 5GB of swap between them. Every one was
+# created the same way: --stop unlinked the socket and printed "stopped"
+# without ever signalling the process, which then sat in accept() forever on a
+# name nothing could reach, still holding its shell child. Six per test run,
+# and the suite runs often.
+# `kill 0` signals the CALLER'S OWN PROCESS GROUP. A missing pidfile leaves
+# dpid=0, and the first failing assertion then took the entire suite down with
+# `Killed: 9`. Every signal below goes through these, which treat anything
+# under 2 as "no such daemon".
+alivep(){ [ "${1:-0}" -gt 1 ] && kill -0 "$1" 2>/dev/null; }
+reap(){ [ "${1:-0}" -gt 1 ] && kill -9 "$1" 2>/dev/null; return 0; }
+
+REAP="$T/reap.sock"
+PHONE_SHELL_SOCK="$REAP" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$REAP" ] && break; sleep 0.4; done
+if [ -f "$REAP.pid" ] && alivep "$(cat "$REAP.pid" 2>/dev/null)"; then
+  ok "the daemon records a pid a stopper can actually signal"
+else bad "no usable pidfile at $REAP.pid"; fi
+dpid="$(cat "$REAP.pid" 2>/dev/null || echo 0)"
+if alivep "$dpid"; then
+  PHONE_SHELL_SOCK="$REAP" "$PHONE" shelld --stop >/dev/null 2>&1
+  gone=no
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    alivep "$dpid" || { gone=yes; break; }; sleep 0.4
+  done
+  if [ "$gone" = yes ]; then ok "--stop ENDS the daemon, it does not just hide it"
+  else bad "daemon $dpid survived --stop (this is the orphan leak)"; reap "$dpid"; fi
+else
+  bad "--stop unverifiable: no live daemon pid to watch"
+  PHONE_SHELL_SOCK="$REAP" "$PHONE" shelld --stop >/dev/null 2>&1
+fi
+
+# The other half of the leak: a daemon whose socket was taken out from under
+# it (by --stop's unlink, or by a second --start binding the same path) can
+# never be reached again, so nothing will ever close it. It has to notice.
+ORPH="$T/orphan.sock"
+PHONE_SHELL_SOCK="$ORPH" PHONE_SHELL_ARGV=sh PHONE_SHELLD_TICK=1 \
+  "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$ORPH" ] && break; sleep 0.4; done
+opid="$(cat "$ORPH.pid" 2>/dev/null || echo 0)"
+if alivep "$opid"; then
+  rm -f "$ORPH"                     # exactly what the old --stop did
+  gone=no
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    alivep "$opid" || { gone=yes; break; }; sleep 0.5
+  done
+  if [ "$gone" = yes ]; then ok "a daemon that loses its socket exits instead of lingering"
+  else bad "orphaned daemon $opid is still running"; reap "$opid"; fi
+else
+  bad "orphan reaping unverifiable: no live daemon pid to watch"
+  rm -f "$ORPH"
+fi
+
+# And prevention: starting while one is already live must reuse it, not bind
+# over the top and leave the incumbent unreachable.
+DUP="$T/dup.sock"
+PHONE_SHELL_SOCK="$DUP" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$DUP" ] && break; sleep 0.4; done
+first="$(cat "$DUP.pid" 2>/dev/null || echo 0)"
+PHONE_SHELL_SOCK="$DUP" PHONE_SHELL_ARGV=sh "$PHONE" shelld --start >/dev/null 2>&1
+sleep 1
+second="$(cat "$DUP.pid" 2>/dev/null || echo 0)"
+if [ "$first" = "$second" ] && alivep "$first"; then
+  ok "a second --start reuses the live daemon instead of orphaning it"
+else bad "second --start replaced the daemon ($first -> $second)"; fi
+out="$(PHONE_SHELL_SOCK="$DUP" "$PHONE" sh "echo still-here" 2>&1 | tail -1)"
+if [ "$out" = "still-here" ]; then ok "and the reused daemon still serves"
+else bad "reused daemon stopped serving (got: $out)"; fi
+PHONE_SHELL_SOCK="$DUP" "$PHONE" shelld --stop >/dev/null 2>&1
+
 echo "== type must preserve real text, and admit what it dropped"
 # The strip-regex silently deleted apostrophes, =, $, <, >, |, backtick and
 # more, then reported success by counting WORDS WHOSE EXIT CODE WAS 0 — which

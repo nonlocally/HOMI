@@ -275,6 +275,10 @@ while j < len(page):
     j += 1
 literal = page[start:j + 1]
 js = ("var earOn = false, synthOK = true, gen = 0;"
+      # NATIVE is the in-app speech flag. The literal references it, so the
+      # sandbox must define it — false here, because this test is about the
+      # BROWSER path's ear staying live, not about the app path.
+      "var NATIVE = false;"
       "function chunkText(t){ return [t]; }"
       "function speakChunks(){}"
       "var window = { speechSynthesis: { cancel: function(){} } };"

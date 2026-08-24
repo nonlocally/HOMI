@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -489,6 +490,41 @@ SENTINEL = "__PHONE_EOC__"
 
 # How long the daemon waits for one command before killing its shell.
 _SHELLD_DEADLINE = float(os.environ.get("PHONE_SHELL_DEADLINE") or 75)
+# How often the daemon looks up from accept() to ask whether it should still
+# be alive, and how long it may sit unused before deciding it should not.
+# IDLE=0 means "run forever", which is what every daemon here used to do.
+_SHELLD_TICK = float(os.environ.get("PHONE_SHELLD_TICK") or 30)
+_SHELLD_IDLE = float(os.environ.get("PHONE_SHELLD_IDLE") or 3600)
+SHELLD_CTL = "\0shelld "        # NUL: a shell command can never begin this way
+
+
+def _wait_gone(pid, seconds):
+    """True once pid is no longer running. Polled, because there is no
+    portable way to wait on a process that is not our child — and a daemon
+    started with start_new_session() never is."""
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    return False
+
+
+def shell_pidfile(path=None):
+    """Where the daemon says who it is.
+
+    Without this there is no way to END a daemon: unlinking the socket only
+    removes the NAME, leaving the process blocked in accept() on a socket
+    nobody can dial, still holding its device shell. That is not theoretical
+    — it left 727 orphans and 5GB of swap on this machine.
+    """
+    return (path or shell_sock()) + ".pid"
 
 
 def shell_sock():
@@ -555,13 +591,51 @@ def cmd_shelld(args):
     import socket as _s
     path = shell_sock()
     if args.stop:
+        # Ask first, signal second, and only then remove the names.
+        #
+        # The old version did the LAST step alone: it unlinked the socket and
+        # printed "stopped" while the daemon ran on untouched. Every such
+        # "stop" produced an immortal process holding a shell, and a later
+        # --start bound a fresh socket over the same path, orphaning any
+        # incumbent the same way.
+        pidf = shell_pidfile(path)
         try:
-            os.unlink(path)
-        except OSError:
-            pass
+            pid = int(open(pidf).read().strip())
+        except (OSError, ValueError):
+            pid = 0
+        asked = shelld_call(SHELLD_CTL + "stop", timeout=5)
+        gone = _wait_gone(pid, 5.0) if pid > 1 else asked is not None
+        if not gone and pid > 1:
+            # It did not answer (wedged in a command, or its socket was
+            # already taken away). The pidfile is what makes this reachable.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(os.getpgid(pid), sig)
+                except OSError:
+                    try:
+                        os.kill(pid, sig)
+                    except OSError:
+                        break
+                if _wait_gone(pid, 3.0):
+                    gone = True
+                    break
+        for p in (path, pidf):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        if pid > 1 and not gone:
+            die("daemon %d would not die" % pid, 4)
         print("stopped")
         return 0
     if args.start:
+        # A live daemon is reused, never bound over. Binding over the top is
+        # how an incumbent becomes unreachable-but-running, which is the
+        # orphan this whole path exists to prevent.
+        live = shelld_call("true", timeout=5)
+        if live is not None and live[0] == 0:
+            print("shelld already listening on %s" % path)
+            return 0
         # Re-exec ourselves detached; the parent returns immediately.
         me = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         me = os.path.realpath(me)
@@ -569,8 +643,10 @@ def cmd_shelld(args):
         subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                          start_new_session=True)
+        # Wait for the pidfile too, not just the socket: a caller that cannot
+        # see the pid cannot stop what it just started.
         for _ in range(40):
-            if os.path.exists(path):
+            if os.path.exists(path) and os.path.exists(shell_pidfile(path)):
                 print("shelld listening on %s" % path)
                 return 0
             time.sleep(0.25)
@@ -588,6 +664,22 @@ def cmd_shelld(args):
     srv.bind(path)
     os.chmod(path, 0o600)           # this socket IS shell-level power
     srv.listen(8)
+    # Remember WHICH socket file is ours. A path is not an identity: unlink
+    # and rebind gives the same name a different inode, and the daemon that
+    # bound the old one can no longer be reached by anyone. Comparing inodes
+    # is how it finds that out about itself.
+    try:
+        me_st = os.stat(path)
+        my_sock = (me_st.st_dev, me_st.st_ino)
+    except OSError:
+        my_sock = None
+    pidf = shell_pidfile(path)
+    with open(pidf, "w") as f:
+        f.write("%d\n" % os.getpid())
+    try:
+        os.chmod(pidf, 0o600)
+    except OSError:
+        pass
 
     # The lease. Held in this process, and guarded by its OWN lock.
     #
@@ -749,9 +841,36 @@ def cmd_shelld(args):
                 return rc, body
             lines.append(line)
 
+    def still_ours():
+        """False once this daemon can no longer be reached.
+
+        Checked on every idle tick because the two ways a daemon is abandoned
+        — its socket unlinked, or a second daemon binding the same path — are
+        both INVISIBLE from inside accept(). Nothing errors; the process just
+        waits forever on a name that no longer routes to it.
+        """
+        if my_sock is None:
+            return True
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False            # unlinked: nothing can dial us again
+        return (st.st_dev, st.st_ino) == my_sock
+
+    last = time.time()
+    srv.settimeout(_SHELLD_TICK)
+    stopping = False
     try:
-        while True:
-            conn, _ = srv.accept()
+        while not stopping:
+            try:
+                conn, _ = srv.accept()
+            except _s.timeout:
+                if not still_ours():
+                    break           # abandoned — do not become an orphan
+                if _SHELLD_IDLE > 0 and time.time() - last > _SHELLD_IDLE:
+                    break           # nobody has used the fast path in an hour
+                continue
+            last = time.time()
             try:
                 conn.settimeout(120)
                 data = b""
@@ -764,7 +883,12 @@ def cmd_shelld(args):
                 cmd = raw.strip()
                 if not cmd:
                     continue
-                if raw.startswith(LEASE_CTL):
+                if raw.startswith(SHELLD_CTL):
+                    # Answer BEFORE exiting, so the stopper learns it worked
+                    # rather than timing out and resorting to signals.
+                    stopping = True
+                    rc, out = 0, "stopping"
+                elif raw.startswith(LEASE_CTL):
                     rc, out = lease_op(raw[len(LEASE_CTL):].strip())
                 else:
                     rc, out = run_one(cmd)
@@ -778,15 +902,27 @@ def cmd_shelld(args):
                 except OSError:
                     pass
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        # Only clean up the names if they are still OURS. A daemon that was
+        # replaced must not delete the live socket on its way out.
+        if still_ours():
+            for p in (path, pidf):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        # Take the shell's whole process GROUP. terminate() on the shell alone
+        # leaves whatever it was running mid-command alive and holding the
+        # same pipes — the same mistake the deadline watchdog above already
+        # had to correct.
         try:
             if box[0]:
-                box[0].terminate()
+                os.killpg(os.getpgid(box[0].pid), signal.SIGKILL)
         except Exception:
-            pass
+            try:
+                if box[0]:
+                    box[0].kill()
+            except Exception:
+                pass
     return 0
 
 
@@ -1140,7 +1276,17 @@ def get_ui(from_file=None):
         die("could not read the UI tree: the dump failed (screen off, a "
             "secure window, or the screen never went idle). Nothing guessed.",
             4)
-    out = dev_read(remote)
+    # CHECKED, because this read is exactly where the corruption was first
+    # noticed. A UI tree is 20-80 KB, which is squarely in the range where
+    # large reads come back with a region substituted by earlier content —
+    # right length, right rc, and still opening with <hierarchy and closing
+    # with </hierarchy>, so every guard below this line passes a spliced
+    # document. XML being brittle enough to fail parsing was the only reason
+    # anyone noticed at all; that made the screen tier look unreliable when
+    # the transport was at fault.
+    #
+    # Measured before this change: look/ui failed 4 of 8 on a complex screen.
+    _rc, out = dev_shell_checked("cat %s" % remote, timeout=90)
     dev_shell("rm -f %s" % remote, timeout=15)
     if "<hierarchy" not in (out or ""):
         die("could not read the UI tree (the screen may be off or secure)", 4)
@@ -1348,6 +1494,31 @@ def cmd_notifs(args):
 # ------------------------------------------------------------- device verbs
 
 def cmd_say(args):
+    # The BRIDGE first. termux-tts-speak binds a whole TextToSpeech engine
+    # per sentence behind an ssh fork; the app holds one open. Measured
+    # 11ms to first audio warm, against ~0.5s of transport before the old
+    # path has even queued anything. And the bridge reports when speech
+    # actually FINISHED, which termux-tts-speak never could — so an agent
+    # that says two things in a row no longer talks over itself.
+    text = " ".join(args.text)
+    r = bridge_call("say", device=os.environ.get("PHONE_DEVICE"),
+                    wait=max(30, args.timeout) + 30, text=text,
+                    timeout=args.timeout)
+    if r is not None and r.get("ok"):
+        record("say", {"chars": len(text),
+                       "first_audio_ms": r.get("first_audio_ms"),
+                       "tier": "bridge"}, "act", "spoken")
+        return 0
+    if r is not None and r.get("err"):
+        # The bridge answered and refused. That is a real answer, not a
+        # reason to try a worse path that will refuse differently.
+        record("say", {"chars": len(text), "tier": "bridge"}, "act",
+               "failed: %s" % r["err"], rc=1)
+        die(r["err"], 4)
+    return _cmd_say_termux(args)
+
+
+def _cmd_say_termux(args):
     text = " ".join(args.text)
     if not text.strip():
         die("nothing to say", 2)
@@ -1357,6 +1528,23 @@ def cmd_say(args):
 
 
 def cmd_listen(args):
+    # On-device recognition through the bridge, before termux-speech-to-text.
+    # The audio never leaves the phone and there is no network leg at all.
+    r = bridge_call("listen", device=os.environ.get("PHONE_DEVICE"),
+                    wait=args.timeout + 20, timeout=args.timeout)
+    if r is not None and r.get("ok") and (r.get("text") or "").strip():
+        record("listen", {"chars": len(r["text"]), "tier": "bridge"}, "read")
+        print(r["text"])
+        return 0
+    if r is not None and r.get("err"):
+        record("listen", {"tier": "bridge"}, "read",
+               "failed: %s" % r["err"], rc=1)
+        sys.stderr.write("phone: %s\n" % r["err"])
+        return 1
+    return _cmd_listen_termux(args)
+
+
+def _cmd_listen_termux(args):
     need_termux()
     rc, out = termux("termux-speech-to-text", timeout=args.timeout)
     text = (out or "").strip()
@@ -1886,6 +2074,116 @@ def cmd_msg(args):
            "act", "sent")
     print("sent to %s" % num)
     return 0
+
+
+
+# ------------------------------------------------------------- the bridge
+# phonebridge is the app half: a NotificationListenerService and an on-device
+# speech engine, reachable on loopback. It exists for the things shell
+# provably cannot do — firing a notification's reply action needs the live
+# PendingIntent, which only a bound listener ever holds — and for the things
+# shell can only do slowly, like binding a TTS engine per sentence.
+#
+# Reached the same way shelld is: an ssh forward. Same idiom, one more port.
+
+BRIDGE_PORT = 8127
+BRIDGE_TOKEN_PATH = ("/sdcard/Android/data/com.aadarwal.phonebridge/files/"
+                     "token")
+
+
+def bridge_token(device=None):
+    """The shared secret, read from where only the device shell can reach it.
+
+    Loopback is not a permission boundary — every app on the phone can open a
+    socket to 127.0.0.1 — so the token is what separates "has shell on this
+    phone" from "is any app on this phone".
+    """
+    rc, out = dev_shell(merged("cat %s" % BRIDGE_TOKEN_PATH), timeout=25)
+    tok = (out or "").strip()
+    if rc != 0 or not re.match(r"\A[0-9a-f]{16,}\Z", tok):
+        return None
+    return tok
+
+
+def ensure_bridge(device):
+    """Forward the bridge port, if it is not already answering."""
+    if not device:
+        return True
+    if _bridge_alive():
+        return True
+    if not _DEV_RE.match(device or ""):
+        die("bad device name %r" % device, 2)
+    subprocess.run(["pkill", "-f",
+                    "L %d:127.0.0.1:%d" % (BRIDGE_PORT, BRIDGE_PORT)],
+                   capture_output=True)
+    rc, _ = run(["ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+                 "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                 "-o", "ServerAliveInterval=20", "-f", "-N",
+                 "-L", "%d:127.0.0.1:%d" % (BRIDGE_PORT, BRIDGE_PORT),
+                 device], timeout=25)
+    if rc != 0:
+        return False
+    for _ in range(10):
+        time.sleep(0.3)
+        if _bridge_alive():
+            return True
+    return False
+
+
+def _bridge_alive():
+    import socket as _s
+    c = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    c.settimeout(1.5)
+    try:
+        c.connect(("127.0.0.1", BRIDGE_PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+
+
+def bridge_call(op, device=None, wait=90, **kw):
+    """One line of JSON out, one back. None when the bridge is unreachable —
+    which callers treat as "fall back", never as "it said no"."""
+    import socket as _s
+    if not ensure_bridge(device):
+        return None
+    tok = bridge_token(device)
+    if not tok:
+        return None
+    req = dict(kw)
+    req["op"] = op
+    req["token"] = tok
+    c = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    # OUR deadline for the socket, deliberately not named `timeout`: several
+    # ops carry their own `timeout` field, and a collision here meant `talk`
+    # died with "got multiple values for keyword argument" the first time it
+    # ran. Different concepts, different names.
+    c.settimeout(wait)
+    try:
+        c.connect(("127.0.0.1", BRIDGE_PORT))
+        c.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError:
+        return None
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+    try:
+        return json.loads(buf.decode("utf-8", "replace").split("\n", 1)[0])
+    except ValueError:
+        return None
 
 
 # ------------------------------------------------------------ capabilities
@@ -2598,6 +2896,486 @@ def _remote_ledger(device):
     return (rows if isinstance(rows, list) else []), None
 
 
+def cmd_notif_reply(args):
+    """Reply to a message without touching the screen.
+
+    Only the bridge can do this. Shell can SEE a notification's reply action
+    through dumpsys and cannot fire it: a PendingIntent is a live Binder
+    token in system_server, and dumpsys prints a description of it. Verified
+    against AOSP — registerListener admits uid 1000/1001/0, and shell is
+    2000.
+    """
+    r = bridge_call("list", device=os.environ.get("PHONE_DEVICE"))
+    if r is None:
+        die("the phonebridge app is not reachable — is it installed, and is "
+            "its listener granted? (cmd notification allow_listener)", 3)
+    if not r.get("ok"):
+        die(r.get("err") or "the bridge refused", 4)
+    rows = r.get("notifications") or []
+    repliable = [n for n in rows if n.get("repliable")]
+    if args.list:
+        if not repliable:
+            print("(nothing on this phone can be replied to right now)")
+            return 1
+        for n in repliable:
+            print("%-46s %-22s %s" % (n["key"][:46], (n.get("package") or "")[:22],
+                                      (n.get("title") or "")[:30]))
+        return 0
+    if not args.key:
+        die("say which notification: --list to see the keys", 2)
+    if not (args.text or "").strip():
+        die("refusing to send an empty message", 2)
+    got = bridge_call("reply", device=os.environ.get("PHONE_DEVICE"),
+                      key=args.key, text=args.text)
+    if got is None:
+        die("the bridge stopped answering mid-reply — nothing was sent", 3)
+    if not got.get("ok"):
+        record("reply", {"key": args.key[:40]}, "act",
+               "failed: %s" % got.get("err"), rc=1)
+        die(got.get("err") or "the reply was refused", 4)
+    # The message text is NOT recorded. The ledger says a reply was sent and
+    # to which notification; keeping a second copy of the user's outgoing
+    # messages on another machine is not accountability, it is a transcript.
+    record("reply", {"key": args.key[:40], "chars": len(args.text)},
+           "act", "sent")
+    print("sent")
+    return 0
+
+
+
+
+# --------------------------------------------------------- the fast path
+# Asking a frontier model at maximum reasoning effort "what is my battery"
+# costs 30-70 seconds. The speech either side of it costs ~200ms in and 11ms
+# out. So for the handful of things people actually ask a phone most often,
+# the agent is not thinking — it is queueing.
+#
+# These answer from the verbs directly, in about a second, and fall through
+# to the agent the moment a question is not obviously one of them. The bar
+# for matching is deliberately high: answering the WRONG question instantly
+# is worse than answering the right one slowly, and a near-miss here is
+# indistinguishable from the agent having misunderstood.
+
+
+def _spoken_battery(_m):
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return None
+    rc, out = run(remote_exec(dev, ["battery"]), timeout=30)
+    if rc != 0:
+        return None
+    txt = (out or "").strip().split("\n")[0]
+    m = re.search(r"(\d+)%\s+(\S+)", txt)
+    if not m:
+        return None
+    pct, state = m.group(1), m.group(2).lower()
+    return "%s percent, %s." % (pct, "charging" if "charg" in state
+                                and "dis" not in state else "discharging")
+
+
+def _spoken_time(_m):
+    # From the PHONE's clock, not ours. The controller reads an hour ahead of
+    # the device — different timezones — so answering from local time would
+    # be confidently wrong, which is the failure mode this whole codebase
+    # keeps being about.
+    rc, out = dev_shell("date '+%H:%M|%A %d %B'", timeout=20)
+    txt = (out or "").strip()
+    if rc != 0 or "|" not in txt:
+        return None
+    hhmm, day = txt.split("|", 1)
+    try:
+        h, m = [int(x) for x in hhmm.split(":")]
+    except ValueError:
+        return None
+    ampm = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    # Spelled for a SPEAKER, not a display. "12 02" is read aloud as
+    # "twelve two"; "12 oh 2" comes out as a person would say it.
+    if not m:
+        return "It's %d o'clock %s." % (h12, ampm)
+    mins = "oh %d" % m if m < 10 else str(m)
+    return "It's %d %s %s." % (h12, mins, ampm)
+
+
+def _spoken_date(_m):
+    rc, out = dev_shell("date '+%A, %d %B'", timeout=20)
+    txt = (out or "").strip()
+    return ("It's %s." % txt) if rc == 0 and txt else None
+
+
+def _spoken_playing(_m):
+    rc, raw = dev_shell("dumpsys media_session", timeout=30)
+    if rc != 0 or not (raw or "").strip():
+        return None      # could not ask — NOT "nothing is playing"
+    sessions = parse_media_sessions(raw)
+    cur = current_session(sessions)
+    if not cur:
+        return "Nothing is playing."
+    desc = cur.get("description")
+    if cur.get("state") != "PLAYING":
+        return ("Nothing is playing right now. %s is paused."
+                % (desc.split(",")[0] if desc else cur["package"]))
+    return desc.split(",")[0] if desc else "Something is playing."
+
+
+def _spoken_notifs(_m):
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return None
+    rc, out = run(remote_exec(dev, ["notifs", "--json"]), timeout=40)
+    if rc != 0:
+        return None      # could not ask — NOT "nothing is waiting"
+    try:
+        rows = json.loads(out or "[]")
+    except ValueError:
+        return None
+    # A group summary is Android's own rollup, not a message; counting it
+    # reports two things for one.
+    real = [r for r in rows if (r.get("title") or "").strip()
+            and "::SUMMARY::" not in (r.get("tag") or "")]
+    if not real:
+        return "Nothing is waiting."
+    apps = {}
+    for r in real:
+        apps[r.get("packageName", "")] = apps.get(r.get("packageName", ""), 0) + 1
+    top = sorted(apps.items(), key=lambda kv: -kv[1])[:3]
+    bits = ["%d from %s" % (n, p.rsplit(".", 1)[-1]) for p, n in top]
+    return "%d notifications: %s." % (len(real), ", ".join(bits))
+
+
+def _spoken_cal(_m):
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return None
+    rc, out = run(remote_exec(dev, ["cal", "--days", "1", "--json"]), timeout=40)
+    if rc != 0:
+        return None      # could not ask — NOT "nothing on the calendar"
+    try:
+        evs = json.loads(out or "[]")
+    except ValueError:
+        return None
+    if not evs:
+        return "Nothing on the calendar today."
+    first = evs[0]
+    when = time.strftime("%H:%M", time.localtime(first["begin_ms"] / 1000))
+    if len(evs) == 1:
+        return "One thing today: %s at %s." % (first["title"], when)
+    return "%d things today, next is %s at %s." % (len(evs), first["title"], when)
+
+
+def _media_action(action):
+    def go(_m):
+        r = bridge_call("say", device=os.environ.get("PHONE_DEVICE"),
+                        wait=1) and None
+        rc, _o = dev_shell("cmd media_session dispatch %s" % DISPATCH[action],
+                           timeout=25)
+        if rc != 0:
+            return None
+        time.sleep(1.2)
+        cur = current_session(parse_media_sessions(
+            dev_shell("dumpsys media_session", timeout=30)[1] or ""))
+        state = (cur or {}).get("state", "")
+        # Say what actually happened, not what was asked for.
+        if action in ("pause", "stop"):
+            return "Paused." if state != "PLAYING" else "It did not pause."
+        if action == "play":
+            return "Playing." if state == "PLAYING" else "It did not start."
+        return (cur or {}).get("description", "").split(",")[0] or "Skipped."
+    return go
+
+
+# Anchored deliberately. "what is playing" matches; "play something by the
+# artist who wrote the song about playing" does not, and goes to the agent.
+FAST = [
+    (re.compile(r"\bwhat('?s| is)?\s+(the\s+)?time\b|\btime is it\b"),
+     _spoken_time),
+    (re.compile(r"\bwhat('?s| is)?\s+(the\s+)?date\b|\bwhat day is\b"),
+     _spoken_date),
+    (re.compile(r"\b(battery|charge|power)\b.*\b(level|left|at|percent)?\b"),
+     _spoken_battery),
+    (re.compile(r"\bwhat('?s| is)?\s+(playing|this song|the song)\b"),
+     _spoken_playing),
+    (re.compile(r"\b(notifications?|messages?|anything waiting|"
+                r"anything for me)\b"), _spoken_notifs),
+    (re.compile(r"\b(calendar|schedule|on today|my day)\b"), _spoken_cal),
+    (re.compile(r"\b(pause|stop)\b.*\b(music|song|it|playing)\b|\bpause\b\Z"),
+     _media_action("pause")),
+    (re.compile(r"\b(resume|unpause|keep playing)\b|\bplay\b\s*\Z"),
+     _media_action("play")),
+    (re.compile(r"\b(next|skip)\b.*\b(song|track)\b|\bskip\b\Z"),
+     _media_action("next")),
+]
+
+
+def fast_answer(text):
+    """A spoken answer without waking an agent, or None to fall through."""
+    low = " " + text.lower().strip() + " "
+    for pat, fn in FAST:
+        if pat.search(low):
+            try:
+                return fn(pat.search(low))
+            except Exception as e:
+                # Falling through is right — the shortcut must never break
+                # the slow path — but doing it SILENTLY turned "the handler
+                # failed" into "no pattern matched", and cost an hour of
+                # staring at a regex that was correct all along.
+                sys.stderr.write("phone: fast path declined (%s: %s) — "
+                                 "asking the agent instead\n"
+                                 % (fn.__name__, e))
+                return None
+    return None
+
+
+
+# The middle tier can be EITHER a warm fabric agent (a Claude Code session,
+# addressed by name) or codex driven headlessly. They measured close enough
+# that this is a preference rather than a finding:
+#
+#   sistine chapel   haiku 2.0s "peer-device"
+#                    luna  5.6s "peer-device painted the Sistine Chapel
+#                                ceiling, completing it between 1508 and 1512"
+#   train arithmetic haiku 4.5s "4 15"        luna 3.3s "It arrives at 4:15."
+#   battery          haiku 6.5s               luna 8.8s
+#
+# Neither got anything wrong. Note luna's verbosity is a real cost HERE that
+# it would not be on a screen — "peer-device" is the better spoken answer,
+# and every extra clause is another second of someone waiting to talk.
+
+# THIS file, resolved from the module rather than argv[0]. argv[0] is right
+# when someone types `phone`, and wrong the moment this is imported, exec'd,
+# or invoked through a wrapper — where the router then briefs codex to run a
+# binary that does not exist. It spent 53 seconds discovering that and
+# answered ESCALATE, which reads exactly like a question it judged too hard.
+PHONE_SELF = os.path.realpath(globals().get("__file__") or sys.argv[0])
+
+CODEX_ROUTER = ["codex", "exec", "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-m", "gpt-5.6-luna",
+                "-c", "model_reasoning_effort=low",
+                "-c", "service_tier=fast",
+                # MCP off deliberately. A dangling homi entry pointing at a
+                # wiped temp dir was costing 7.4s of handshake timeout on
+                # EVERY codex invocation on this machine — 11.05s down to
+                # 3.66s once repointed. The router has no use for MCP, so it
+                # does not pay for it at all.
+                "-c", "mcp_servers={}"]
+
+
+def _ask_codex(text, device, timeout):
+    """The middle tier, run headlessly. Returns (answer, err)."""
+    brief = (
+        "You answer out loud for someone LISTENING. One or two SHORT "
+        "sentences, no markdown, no preamble, numbers as a person says "
+        "them.\n"
+        "You may run: %s --device %s <verb>\n"
+        "verbs: battery | media --current | notifs | cal --days 1 | "
+        "foreground | contacts <name>\n"
+        "Answer questions on ANY subject from your own knowledge. Reply with "
+        "exactly ESCALATE only if it needs multi-step action, the screen, or "
+        "sending something to a person.\n"
+        "Question: %s" % (PHONE_SELF, device or "", text))
+    try:
+        pr = subprocess.run(CODEX_ROUTER + [brief], capture_output=True,
+                            text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "codex did not run (%s)" % e
+    lines = [l for l in (pr.stdout or "").splitlines()
+             if l.strip() and not l.startswith("[")
+             and "tokens used" not in l.lower()]
+    if not lines:
+        return None, "codex returned nothing"
+    return lines[-1].strip(), None
+
+
+def _ask_agent(to, text, sender, timeout):
+    """Put a spoken turn to an agent and wait for its answer."""
+    argv = ["communicate", "homi", "ask", to, text,
+            "--from", sender, "--timeout", str(timeout)]
+    try:
+        pr = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=timeout + 15)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "could not reach the fabric (%s)" % e
+    out = (pr.stdout or "").strip()
+    if pr.returncode != 0 or not out:
+        return None, ((pr.stderr or "").strip().splitlines() or
+                      ["no answer within %ds" % timeout])[-1]
+    return out, None
+
+
+def cmd_talk(args):
+    """One spoken turn, end to end: hear it, ask an agent, say the answer.
+
+    The loop runs HERE, not on the phone. The phone is ears and mouth — its
+    on-device recogniser and its warm speech engine, both reached over the
+    bridge — while the fabric, the agent and the mailbox all live on this
+    machine. Trying to run it the other way needs a homi daemon and an
+    identity on the phone, neither of which is there, and would buy nothing:
+    the microphone is already reachable from here.
+
+    No button is required, which surprised me. `listen` returns the moment it
+    hears speech, so waiting for a trigger IS the trigger.
+    """
+    device = os.environ.get("PHONE_DEVICE")
+    sender = args.sender or os.environ.get("PHONE_ACTOR") or "phone-voice"
+    wake = (args.wake or "").strip().lower()
+
+    while True:
+        if args.tap:
+            # WAIT FOR THE PERSON, do not hold the microphone.
+            #
+            # The other way round — us calling listen — opened the mic
+            # whether or not anyone meant to speak. That is what took the
+            # phone from 50% to 20% in two hours, and it is why the
+            # recogniser transcribed a television during testing. Here the
+            # tap starts the turn, recognition runs on the device, and the
+            # mic is open for the length of one sentence.
+            #
+            # A long poll rather than repeated polling: the bridge holds the
+            # connection until there is something to hand over, so a tap is
+            # delivered immediately and an idle hour costs nothing.
+            heard = bridge_call("await_turn", device=device,
+                                wait=args.wait + 20, timeout=args.wait)
+            if heard is None:
+                die("the phonebridge app is not reachable — is it installed, "
+                    "and is its voice service running? (am start -n "
+                    "com.aadarwal.phonebridge/.Boot)", 3)
+            if heard.get("timeout"):
+                # Nobody spoke. Not a failure — go round again.
+                if not args.loop:
+                    sys.stderr.write("phone: nobody tapped Talk within %ds\n"
+                                     % args.wait)
+                    return 1
+                continue
+        else:
+            heard = bridge_call("listen", device=device,
+                                wait=args.listen + 20, timeout=args.listen)
+            if heard is None:
+                die("the phonebridge app is not reachable — is it installed "
+                    "and is its voice service running? (am start -n "
+                    "com.aadarwal.phonebridge/.Boot)", 3)
+        text = (heard.get("text") or "").strip()
+        if not text:
+            if not args.loop:
+                sys.stderr.write("phone: %s\n"
+                                 % (heard.get("err") or "nothing heard"))
+                return 1
+            continue
+
+        if wake:
+            # A wake phrase in SOFTWARE, because the hardware hotword
+            # detector only takes models the vendor signed. Without it the
+            # recogniser answers the room: it transcribed a television
+            # during testing, and an agent acting on overheard speech is a
+            # worse failure than one that misses a request.
+            low = text.lower()
+            if wake not in low:
+                if args.verbose:
+                    sys.stderr.write("phone: ignored (no wake phrase): %s\n"
+                                     % text[:60])
+                if not args.loop:
+                    return 1
+                continue
+            text = text[low.index(wake) + len(wake):].strip(" ,.:;-") or text
+
+        record("talk", {"heard_chars": len(text), "to": args.to}, "read")
+        print("heard: %s" % text)
+
+        if not args.no_fast:
+            quick = fast_answer(text)
+            if quick:
+                said = bridge_call("say", device=device, text=quick, wait=90)
+                ok = bool(said and said.get("ok"))
+                record("talk", {"tier": "fast", "answer": quick[:60]}, "act",
+                       "answered without an agent" if ok else
+                       "unconfirmed: fast answer not confirmed spoken",
+                       rc=0 if ok else 1)
+                print("answer (fast): %s" % quick)
+                if not args.loop:
+                    return 0 if ok else 5
+                continue
+
+        # THREE TIERS, and the middle one is why the regexes are not the
+        # whole story. Measured on this setup:
+        #
+        #   regex      ~1.5s   nine question shapes, no model, no judgement
+        #   router     5-10s   a SMALL model, warm — any phrasing, and it
+        #                      genuinely reasons ("is my phone about to
+        #                      die" -> "no, you're at 51 percent")
+        #   agent      ~40s    a frontier model, for work rather than answers
+        #
+        # The regexes survive only because 1.5s is perceptibly better than
+        # 7s on the handful of things people ask constantly. Everything else
+        # should reach a model, because "how much juice have I got left" is
+        # the same question as "what's my battery" and no pattern list ever
+        # ends.
+        answer, err = None, None
+        if args.router:
+            sys.stderr.write("phone: asking %s...\n" % args.router)
+            sys.stderr.flush()
+            t_r = time.time()
+            if args.router == "codex":
+                quick, rerr = _ask_codex(text, device, args.router_timeout)
+            else:
+                quick, rerr = _ask_agent(args.router, "[spoken] " + text,
+                                         sender, args.router_timeout)
+            took = time.time() - t_r
+            if quick and "ESCALATE" not in quick.upper():
+                said = bridge_call("say", device=device, text=quick, wait=120)
+                ok = bool(said and said.get("ok"))
+                record("talk", {"tier": "router", "router": args.router,
+                                "took_s": round(took, 1)}, "act",
+                       "answered by the fast tier" if ok else
+                       "unconfirmed: router answer not confirmed spoken",
+                       rc=0 if ok else 1)
+                print("answer (%s, %.0fs): %s" % (args.router, took, quick))
+                if not args.loop:
+                    return 0 if ok else 5
+                continue
+            sys.stderr.write("phone: %s %s after %.0fs\n"
+                             % (args.router,
+                                "escalated" if quick else "did not answer",
+                                took))
+
+        # SAY SOMETHING BEFORE THE LONG WAIT. The first time this happened
+        # live the person saw "heard: ..." and then nothing at all — no way
+        # to tell a model thinking from a loop that had died. Silence is the
+        # one response a voice interface must never give.
+        sys.stderr.write("phone: asking %s, this can take a while...\n"
+                         % args.to)
+        sys.stderr.flush()
+        bridge_call("say", device=device, text="One moment.", wait=30)
+
+        # [spoken] so the agent shapes it for an ear rather than a screen —
+        # the same marker the voice page sends.
+        t_ask = time.time()
+        answer, err = _ask_agent(args.to, "[spoken] " + text, sender,
+                                 args.timeout)
+        sys.stderr.write("phone: %s answered in %.0fs\n"
+                         % (args.to, time.time() - t_ask))
+        if err:
+            # Say the failure OUT LOUD. A voice loop that fails silently
+            # leaves someone talking to a phone that has stopped listening,
+            # with nothing to tell them apart.
+            bridge_call("say", device=device,
+                        text="Sorry, I could not reach the agent.")
+            record("talk", {"to": args.to}, "act", "failed: %s" % err, rc=1)
+            sys.stderr.write("phone: %s\n" % err)
+            if not args.loop:
+                return 4
+            continue
+
+        print("answer: %s" % answer)
+        said = bridge_call("say", device=device, text=answer, wait=150)
+        ok = bool(said and said.get("ok"))
+        record("talk", {"to": args.to, "answer_chars": len(answer),
+                        "first_audio_ms": (said or {}).get("first_audio_ms")},
+               "act", "spoke the answer" if ok else
+               "unconfirmed: the answer was not confirmed spoken", rc=0 if ok else 1)
+        if not args.loop:
+            return 0 if ok else 5
+
+
 def cmd_log(args):
     rows = _read_ledger(ledger_path())
     device = os.environ.get("PHONE_DEVICE")
@@ -2980,6 +3758,47 @@ def build_parser():
     s.add_argument("--kind", choices=["act", "read"])
     s.add_argument("--actor", help="only what this driver did")
     s.add_argument("--json", action="store_true")
+
+    s = add("talk", cmd_talk,
+            "hear a spoken turn, ask an agent, say the answer")
+    s.add_argument("--to", default="tongs", help="which agent to ask")
+    s.add_argument("--from", dest="sender", help="who is asking")
+    s.add_argument("--listen", type=int, default=25,
+                   help="seconds to wait for speech (always-listening mode)")
+    # THE DIRECTION: the mini side is agent-driven, the phone side is
+    # person-driven. Everything that happens on this machine is an agent
+    # doing something; everything that happens on the phone starts with its
+    # owner. Always-listening violated that — the controller reached in and
+    # opened someone's microphone — so waiting for the tap is the DEFAULT
+    # and holding the mic open is the thing you have to ask for.
+    s.add_argument("--always-listen", action="store_false", dest="tap",
+                   default=True,
+                   help="hold the microphone open instead of waiting for the "
+                        "Talk button (the phone side is normally person-"
+                        "driven; this inverts that)")
+    s.add_argument("--wait", type=int, default=300,
+                   help="with --tap, seconds to wait for a tap before "
+                        "looping round")
+    s.add_argument("--timeout", type=int, default=180,
+                   help="seconds to wait for the agent")
+    s.add_argument("--wake", help="only act on speech containing this phrase")
+    s.add_argument("--loop", action="store_true", help="keep listening")
+    s.add_argument("--verbose", action="store_true")
+    s.add_argument("--router", default="codex",
+                   help="middle tier: 'codex' (gpt-5.6-luna, fast, low), a "
+                        "fabric agent name like 'swift', or '' to skip it")
+    s.add_argument("--router-timeout", type=int, default=60,
+                   dest="router_timeout")
+    s.add_argument("--no-fast", action="store_true", dest="no_fast",
+                   help="always ask the agent, even for questions a verb "
+                        "could answer in a second")
+
+    s = add("reply", cmd_notif_reply,
+            "reply to a message without the screen (needs phonebridge)")
+    s.add_argument("key", nargs="?", help="notification key, from --list")
+    s.add_argument("text", nargs="?", help="what to say")
+    s.add_argument("--list", action="store_true",
+                   help="show what can be replied to right now")
 
     s = add("capabilities", cmd_capabilities,
             "what this device actually permits, asked live")

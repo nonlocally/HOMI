@@ -38,12 +38,16 @@ class Bridge implements Runnable {
     private final Context ctx;
     private final String token;
     private final Voice voice;
+    private final Speak speak;
     private Thread thread;
 
     Bridge(Context ctx) {
         this.ctx = ctx;
         this.token = loadOrMintToken(ctx);
         this.voice = new Voice(ctx);
+        // Built at construction, not on first use: the whole point is that
+        // the engine is already bound when someone asks it to talk.
+        this.speak = new Speak(ctx);
     }
 
     void start() {
@@ -138,7 +142,11 @@ class Bridge implements Runnable {
             boolean needsListener = !("ping".equals(op)
                     || "voice_status".equals(op)
                     || "voice_download".equals(op)
-                    || "listen".equals(op));
+                    || "listen".equals(op)
+                    || "say".equals(op)
+                    || "say_status".equals(op)
+                    || "shut_up".equals(op)
+                    || "await_turn".equals(op));
             if (needsListener && (!Listener.isConnected() || Listener.get() == null)) {
                 return err(r, "notification listener is not bound — "
                               + "cmd notification allow_listener, then reboot "
@@ -166,6 +174,23 @@ class Bridge implements Runnable {
                     }
                     return r;
                 }
+                case "await_turn": {
+                    // LONG POLL. The controller blocks here until someone
+                    // taps Talk and speaks, so the microphone opens only for
+                    // the length of a sentence instead of continuously — the
+                    // difference between a phone that lasts the day and one
+                    // that went 50% to 20% in two hours.
+                    String heard = Turns.take(q.optInt("timeout", 300));
+                    if (heard == null) {
+                        r.put("ok", false);
+                        r.put("err", "no turn within the wait");
+                        r.put("timeout", true);   // NOT a failure; poll again
+                    } else {
+                        r.put("ok", true);
+                        r.put("text", heard);
+                    }
+                    return r;
+                }
                 case "listen": {
                     for (Map.Entry<String, Object> e :
                             voice.listen(q.optInt("timeout", 20)).entrySet()) {
@@ -176,6 +201,25 @@ class Bridge implements Runnable {
                     }
                     return r;
                 }
+                case "say": {
+                    for (Map.Entry<String, Object> e :
+                            speak.say(q.optString("text", ""),
+                                      q.optInt("timeout", 60)).entrySet()) {
+                        r.put(e.getKey(), e.getValue());
+                    }
+                    return r;
+                }
+                case "say_status": {
+                    for (Map.Entry<String, Object> e : speak.status().entrySet()) {
+                        r.put(e.getKey(), e.getValue());
+                    }
+                    r.put("ok", true);
+                    return r;
+                }
+                case "shut_up":
+                    speak.stop();
+                    r.put("ok", true);
+                    return r;
                 case "list": {
                     JSONArray arr = new JSONArray();
                     for (Map<String, Object> row : L.list()) {

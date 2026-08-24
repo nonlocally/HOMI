@@ -1095,8 +1095,35 @@ if ("serviceWorker" in navigator) {
       setState("idle");
       return;
     }
+    if (NATIVE) {
+      // On-device. The audio never leaves the phone, and there is no
+      // network leg to fail.
+      setState("listening");
+      window.__homiHeard = function (text) {
+        window.__homiHeard = null;
+        if (!text) { setState("idle"); note("didn\'t catch that"); return; }
+        inp.value = text;
+        earOn = true;                        // spoken to, so answer aloud
+        setState("thinking");
+        var f = document.getElementById("composer");
+        if (f) f.dispatchEvent(new Event("submit",
+                               { cancelable: true, bubbles: true }));
+      };
+      window.homi.listen(20);
+      return;
+    }
     listen();                                 // start() inside a tap handler
   });
+
+  // Running inside the homi app? Then speech is NATIVE, and the difference
+  // is not cosmetic: Chrome on Android has no on-device recogniser at all
+  // (its on-device API excludes Android), a ~3-5s silence cutoff, and a
+  // documented-broken continuous mode; speechSynthesis buffers the whole
+  // utterance before making a sound where a held engine starts in ~11ms.
+  // Same page, same board — it just stops going through the browser for the
+  // two things the browser is worst at.
+  var NATIVE = !!(window.homi && window.homi.available
+                  && window.homi.available());
 
   window.__voice = {
     // The send block lives in a DIFFERENT closure and cannot see `earOn`.
@@ -1111,8 +1138,19 @@ if ("serviceWorker" in navigator) {
     // read the asterisks aloud, which is the exact symptom this whole flag
     // exists to prevent. Reading through a getter cannot go stale.
     get earOn() { return earOn; },
+    native: NATIVE,
     speak: function (text) {
-      if (!earOn || !synthOK) return;
+      if (!earOn) return;
+      if (NATIVE) {
+        // No chunking. chunkText exists because Chrome truncates around 15
+        // seconds; a real engine has no such limit, and splitting a sentence
+        // introduces pauses a person hears as hesitation.
+        gen++;
+        try { window.homi.stopSpeaking(); } catch (e) {}
+        window.homi.say(text);
+        return;
+      }
+      if (!synthOK) return;
       gen++;
       window.speechSynthesis.cancel();
       speakChunks(chunkText(text), gen);

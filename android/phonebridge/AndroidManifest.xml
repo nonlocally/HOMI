@@ -32,6 +32,7 @@
     <!-- Loopback only. The bridge is reached the same way `phone shelld` is:
          an ssh forward from the controller. Nothing listens off-device. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
@@ -47,9 +48,27 @@
         </intent>
     </queries>
 
-    <application android:label="phonebridge"
+    <application android:label="homi"
+                 android:icon="@android:drawable/ic_menu_compass"
                  android:allowBackup="false"
+                 android:usesCleartextTraffic="false"
                  android:hasCode="true">
+
+        <!-- The window onto the fabric. A launcher icon at last: everything
+             else this app does is invisible, which is exactly why it never
+             felt like an app. The icon is a PLATFORM drawable so we still
+             ship no resources of our own. -->
+        <activity
+            android:name=".Homi"
+            android:exported="true"
+            android:label="homi"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
 
         <!-- BIND_NOTIFICATION_LISTENER_SERVICE is a signature permission the
              SYSTEM holds, not us. Declaring it here is how we say "only the
@@ -83,5 +102,31 @@
             android:name=".VoiceService"
             android:exported="false"
             android:foregroundServiceType="microphone"/>
+
+        <!-- The Talk button on the notification. A receiver, not an
+             activity: tapping Talk must not bring anything to the screen,
+             since the point is to speak without looking at the phone. -->
+        <receiver
+            android:name=".TalkReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.aadarwal.phonebridge.TALK"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- A Quick Settings tile, so Talk is one swipe away from the lock
+             screen. The icon is a PLATFORM drawable — this app ships no
+             resources of its own, which is what keeps the build to four
+             tool invocations and no Gradle. -->
+        <service
+            android:name=".TalkTile"
+            android:exported="true"
+            android:icon="@android:drawable/ic_btn_speak_now"
+            android:label="Talk"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE"/>
+            </intent-filter>
+        </service>
     </application>
 </manifest>
