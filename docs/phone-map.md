@@ -601,6 +601,67 @@ from a real table is not automatically an answer to your question.
 
 ---
 
+## Where the phone is
+
+### Read the current location
+**Route:** state. **`phone where` does not work.**
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+`phone where` exits **1 with zero bytes and no message whatsoever**. It shells
+out to `termux-location`, which fails here; `cmd_where` prints only stdout and
+returns 1, so the reason never reaches you. A verb that fails silently is
+worse than one that fails — you cannot tell it apart from "no location".
+
+The state tier has the answer:
+
+    phone sh 'dumpsys location 2>&1 | grep -m1 "last location="'
+    → last location=Location[network <lat>,<lon> hAcc=100.0
+        et=+2d11h54m48s258ms alt=-8.0 vAcc=34.25882 ...]
+
+`Location Setting: true`, provider `network`, `hAcc=100.0` — 100 m.
+
+**`et=` is an absolute stamp, not an age — read it carefully.** It is the
+time *since boot* at which the fix was taken, so a fix from one minute ago on
+a phone that has been up for days reads `et=+2d11h54m48s`. Taking that as an
+age would make you throw away a perfectly fresh location. The age is:
+
+    age = (time since boot) - et
+
+Measured together: `/proc/uptime` = **215784.84 s**, `et` = 2d11h54m48.258s =
+**215688.26 s**, so the fix was **97 seconds old** — not two and a half days.
+
+    phone sh 'cut -d" " -f1 /proc/uptime; dumpsys location 2>&1 |
+              grep -m1 "last location="'
+
+Read both in the same call, or the subtraction drifts.
+
+This is the "climb down, never up" case in miniature: the verb built for the
+job is broken, the tier above it is unavailable, and a `dumpsys` grep answers
+in one call — provided you read the timestamp for what it is.
+
+### The clipboard
+**Route:** none established. **Verified:** 2026-08-23, Android 16 (sdk 36).
+
+`phone clip get` returns rc=0 and **zero bytes**, which cannot be told apart
+from an empty clipboard. There is no state-tier fallback either:
+
+    $ phone sh 'cmd clipboard get-primary 2>&1'
+    No shell command implementation.
+
+The clipboard service exposes no shell command on this build. Android has
+restricted clipboard reads to the foreground app and the active IME since
+Android 10, so a background read returning nothing is the expected outcome
+rather than a bug — but **that is inference, not observation**: this entry
+cannot distinguish "empty" from "blocked", and no read here would settle it
+without putting known content on the clipboard first. That would overwrite
+whatever the owner had copied, which is destroying something this agent did
+not create, so it was not done.
+
+Recorded as: **no reliable clipboard read, and the failure mode is silent.**
+Deliberately not tested further.
+
+---
+
 ## What the tiers actually cost
 
 **Measured:** 2026-08-23, Android 16 (sdk 36), controller over the forwarded
