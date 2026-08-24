@@ -761,6 +761,27 @@ def cmd_lease(args):
 # With PHONE_SHELL_SOCK pointed at the forward, every verb in this file works
 # unchanged from another machine. That is the whole trick.
 
+
+# Verbs that are Termux's own, not the device shell's. The forwarded socket
+# runs commands at SHELL uid, and Termux's binaries live in an app-private
+# prefix that shell uid cannot read — so these cannot ride the fast path at
+# all. They run AS THE APP, on the device, over ssh. Slower (Termux's sshd
+# forks a shell, ~0.45s) and correct, which is the right trade: a --device
+# that silently covered only half the verbs would look like a broken phone.
+TERMUX_VERBS = {"say", "listen", "notifs", "notify", "battery", "torch",
+                "where", "clip", "photo", "ptt", "voice", "watchdog"}
+
+
+def remote_exec(device, argv_rest):
+    """Run `phone <verb> ...` on the device itself, as the Termux app."""
+    import shlex as _sh
+    if not _DEV_RE.match(device or ""):
+        die("bad device name %r" % device, 2)
+    remote = " ".join(_sh.quote(w) for w in (["phone"] + argv_rest))
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=accept-new", device, remote]
+
+
 REMOTE_SOCK = "/data/data/com.termux/files/usr/tmp/phone-shell.sock"
 _DEV_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,62}\Z")
 
@@ -2078,6 +2099,7 @@ def main(argv):
     argv = list(argv)
     device = os.environ.get("PHONE_DEVICE")
     print_link = False
+    print_plan = False
     out = []
     i = 1
     while i < len(argv):
@@ -2094,6 +2116,10 @@ def main(argv):
             print_link = True
             i += 1
             continue
+        if a == "--print-plan":
+            print_plan = True
+            i += 1
+            continue
         out.append(a)
         i += 1
     argv = [argv[0]] + out
@@ -2102,6 +2128,22 @@ def main(argv):
         if not device:
             die("--print-link needs --device", 2)
         print(" ".join(link_argv(device, local_sock_for(device))))
+        return 0
+
+    verb0 = out[0] if out else ""
+    if device and verb0 in TERMUX_VERBS:
+        argv_r = remote_exec(device, out)
+        if print_plan:
+            print("run on the device (termux-api, not shell): %s"
+                  % " ".join(argv_r))
+            return 0
+        r = subprocess.run(argv_r, timeout=180)
+        return r.returncode
+    if print_plan:
+        if not device:
+            die("--print-plan needs --device", 2)
+        print("run here against the forwarded socket %s"
+              % local_sock_for(device))
         return 0
     if device:
         ensure_link(device)
