@@ -1,73 +1,122 @@
 ---
 name: phone
-description: Drive an Android phone as an agent — read its screen and inbox, tap, type, navigate, and act on the owner's behalf. Use when a task requires the phone itself: checking messages, operating an app, sending something, or reporting what is on the device.
+description: Drive an Android phone as an agent — read its state, act through intents, and use the screen only when nothing above it will do. Use when a task requires the phone itself: answering a question about it, operating an app, sending something, or reporting what is on the device.
 ---
 
 # Driving the phone
 
-You are operating a real person's phone. Everything you do is recorded, and
-some of it is irreversible. This is how to do it well.
+You are operating a real person's phone. Everything is recorded and some of
+it is irreversible. Most tasks do **not** need the screen; reaching for it
+first is the most common way agents fail here.
 
-## The one command
-
-Everything goes through `phone`. It hides which mechanism a capability comes
-from, so you never have to think about Shizuku, adb, or termux-api.
+## Ask the device first
 
 ```
-phone look                  the screen, summarised — START HERE
-phone notifs                every app's notifications (the universal inbox)
-phone find "<label>"        a label -> "x y", or non-zero if not found
-phone tap X Y               tap
-phone type "text"           type into the focused field
-phone key BACK|HOME|ENTER   navigate
-phone open <app>            launch an app (resolved from what is installed)
-phone screen --out f.png    a screenshot
-phone say "..."             speak aloud
-phone log                   what has been done, by whom, and whether it worked
+phone capabilities
 ```
 
-`phone ui` exists and prints everything; prefer `look`, which is ~4x smaller
-and drops container scaffolding you cannot act on anyway.
+Which providers are readable, which apps declare which intents, what is here
+right now — the device answering for itself. **More current than any
+document, including this one.** Tables of "which app supports what" rot; ask.
 
-## If you are not on the phone
+You are probably not on the phone. One flag, and everything below is
+identical: `phone --device aadarshs-pixel-10 capabilities`
 
-You probably are not. The controller runs on a real machine, because the
-on-device agent is pinned to an old build on a slow CPU and Android keeps
-reaping its session. Address the phone with one flag:
+## Three routes. Climb down, never up.
 
-```
-phone --device aadarshs-pixel-10 look
-phone --device aadarshs-pixel-10 tap 933 2119
-```
+| route | how | cost | checks itself? |
+|---|---|---|---|
+| **1. state** | `content query`, `cmd <svc>`, `dumpsys`, `settings` | ~0.5s, bytes | yes |
+| **2. intent** | `am start -a <ACTION>` — the app does the work | ~1.5s | only if you look |
+| **3. screen** | `look` / `find` / `tap` / `type` | ~4s, 20-40x output | **no** |
 
-The first call forwards the device's shell socket and every later one reuses
-it. Everything below works identically either way — that is the point of the
-flag. (It is a forwarded socket rather than ssh-per-command because Termux's
-sshd forks a shell for every command, ~0.45s, which no amount of connection
-reuse fixes.)
+Try the highest route that could work; descend only when it genuinely fails.
+The screen is the **residual** route — where you end up, not where you start.
 
-## The loop
+## Route 1 — state
 
-**look → decide → act → look again.**
-
-That last step is not optional. `input tap` exits 0 whether or not anything
-handled the event, so a tap that did nothing is indistinguishable from one
-that worked *until you look*. Believing an action landed when it did not is
-the single most common way agents like you fail — you then build three more
-steps on a screen that never changed.
+Structured in, structured out. Works with the display off, and provable.
 
 ```
-phone look                     # where am I, what can I touch
-phone find "Create a note"     # -> "933 2119"   (non-zero = not there)
-phone tap 933 2119
-phone look                     # DID IT CHANGE? if not, say so
+phone notifs           every app's notifications — answers most questions
+phone media            what is playing, and transport control
+phone cal --days 7     calendar          phone contacts <name>   contacts
+phone battery          battery           phone foreground        app in front
+phone sh 'dumpsys <service>'             anything else the platform knows
 ```
 
-If `find` fails, it prints nothing and exits non-zero. **Do not guess
-coordinates.** A wrong tap on someone's phone is worse than no tap: it can
-send, delete, or buy something. Say you could not find it.
+`notifs` is the most useful verb here. "What happened today", "did X reply",
+"what is my battery" are all state questions — never visual ones.
 
-## Take the wheel before you act
+## Route 2 — intent
+
+Hand the app the data and let it do the work: no coordinates, nothing to
+mis-tap, works with the screen off.
+
+```
+phone open <package>              launch an app (verifies it came forward)
+phone msg <app> --to ... --text "..."
+phone play "<song>"               tries the intent, says if it fell back
+phone sh 'am start -a <ACTION> --es <key> <value> -p <pkg>'
+```
+
+**Declaring an intent is not honouring it.** An app can list an action, accept
+the intent, come to the foreground, and do nothing — `am start` exits 0
+either way. This is the normal case, not a rare corner.
+
+Ask who handles an action, and pass `-t` whenever the action carries data —
+without it, resolution matches almost nothing and a real handler looks absent:
+
+```
+phone sh 'cmd package query-activities -a <ACTION> -t <mime>'
+```
+
+## Route 3 — screen, the residual route
+
+The only route that cannot check its own work, and the least reliable: dumps
+fail on animating surfaces, secure windows, and a dark screen. **Expect
+`look` to fail outright a fair fraction of the time** — that means "I cannot
+see", never "nothing is there".
+
+```
+phone look             the screen, summarised — prefer over `phone ui`
+phone find "<label>"   a label -> "x y", non-zero if not found
+phone tap X Y
+phone type "text"
+phone key BACK|HOME|ENTER
+phone screen --out f.png          a picture, when the tree fails you
+```
+
+**look → decide → act → look again.** Not optional: `input tap` exits 0
+whether or not anything handled the event, so a tap that did nothing looks
+exactly like one that worked — until you look.
+
+If `find` fails it exits non-zero. **Do not guess coordinates.** A wrong tap
+can send, delete, or buy something. Say you could not find it.
+
+## Verify by observation
+
+An exit code is not evidence — `input tap`, `am start` and `content query` all
+exit 0 on failure, and silence can mean "empty", "denied", or "your typo".
+
+- Read the state back (`phone foreground`, `phone media`, `phone look`).
+- **Vary the input and check the observation varies with it.** A plausible
+  answer that does not change when you change the question is stale state,
+  not a result. This is the trap that survives every other check.
+- Report what you saw, not what you attempted.
+
+## Large reads corrupt silently
+
+Beyond a few KB, output can come back **the right length and the wrong
+bytes**, with no error — a corrupted `dumpsys` read looks exactly like a
+fact. Use `--checked` for anything bulky, or filter on the device to keep the
+answer small:
+
+```
+phone sh --checked 'dumpsys <something big>'
+```
+
+## Take the wheel
 
 ```
 phone lease acquire --as <your-name>
@@ -75,95 +124,39 @@ phone lease acquire --as <your-name>
 phone lease release --as <your-name>
 ```
 
-One driver at a time. If someone else holds it, mutating verbs refuse and
-name the holder — wait rather than fighting them. Reads are never gated, so
-you can always look, even while another agent is driving.
+One driver at a time; mutating verbs refuse and name the holder. Reads are
+never gated. Leave the phone as you found it.
 
-## What the screen will not tell you
+## Acting as the owner
 
-- **A dump can fail.** Animating surfaces, secure windows, and a screen that
-  is off all defeat it. When that happens `look` exits non-zero rather than
-  showing you the previous screen. Treat the failure as "I cannot see", not
-  as "nothing is there".
-- **Some elements report bounds of 0,0** even when visible (Google Docs' new-
-  document button does). When the tree fails you, `phone screen` and look at
-  the picture.
-- **Banking and password apps block screenshots**, by design. Do not work
-  around it.
+- **Confirm consequential outbound actions first**, in the same turn, saying
+  exactly what will be sent and to whom: messages to people, anything
+  involving money, anything irreversible.
+- `phone msg` drafts; `--send` actually sends. Prefer letting the human press
+  send when unsure.
+- **Never read a one-time code or 2FA number aloud or into a message.**
+- Never touch Developer options, wireless debugging, Shizuku, the screen lock
+  or accounts — that severs the control channel, and only a human holding the
+  phone can restore it.
 
-## Sending things as the owner
+## Speaking
 
-You can genuinely send. That is the point — an assistant that can only draft
-is a notepad. But:
-
-- **Confirm consequential outbound actions before doing them**, in the same
-  turn, and say exactly what will be sent and to whom. Messages to people,
-  anything involving money, and anything irreversible.
-- `phone msg <app> --to <number> --text "..."` opens the chat with the text
-  prefilled; add `--send` to actually press send. Without `--send` the human
-  taps it themselves — prefer that when you are unsure.
-- **Never read a one-time code or 2FA number aloud, or into a message**, even
-  if asked casually. (Android redacts most of these from you anyway.)
-
-## Speaking, and who does the speaking
-
-A turn that reached you from the voice page arrives marked:
-
-```
-[spoken] what's my battery level
-```
-
-That marker means **the person is listening, not reading** — so shape the
-answer for an ear: one or two sentences, no markdown, no lists, answer first.
-
-It does **not** mean call `phone say`. The page that sent the turn reads your
-reply aloud itself; saying it again puts two voices in the room, half a second
-apart. Just reply on the fabric and let the page speak it.
-
-`phone say` is for the other case — when you have something to tell the person
-and no page is listening:
-
-```
-phone say "your answer"
-```
-
-If you failed, say what failed in one sentence — do not narrate the attempt.
-
-## Tiers, and what still works when things break
-
-Two mechanisms sit under the verbs, and they fail independently:
-
-- **Level 1** (termux-api): notifications, speech, camera, torch, location,
-  and launching apps. This almost always works.
-- **Level 2** (Shizuku, the device shell): seeing the screen, tapping,
-  typing. Android can stop it; the watchdog notices and tells the human.
-
-If Level 2 is down, `look`/`tap`/`type` refuse — **honestly, with a reason**.
-Do not pretend. Say "I cannot see the screen right now" and use what Level 1
-still gives you: the inbox usually answers the question anyway.
+A turn marked `[spoken]` means the person is **listening, not reading** —
+answer first, one or two sentences, no markdown. It does **not** mean call
+`phone say`: the page speaks your reply itself, and saying it again puts two
+voices in the room. `phone say` is for when no page is listening.
 
 ## Reporting
 
-Say what happened, not what you attempted. If a step failed, say which one
-and what you saw. `phone log` shows the trace — actor, verb, result, and
-duration — and it is the honest record if you are ever asked what you did.
+`phone log` is the honest record — actor, verb, result, duration, origin. If
+the phone is unreachable it prints the controller's half, says so, and exits
+non-zero: that is *half the story*, not "nothing else happened".
 
-The trace lives in two halves, because the work does: taps and typing run
-through the forwarded socket, so the controller records them; notifications,
-speech and the camera run on the phone, so the phone records those. With
-`--device` the two are merged for you, newest first, with an `origin` column
-saying which machine each line came from.
+## If you remember four things
 
-If the phone is unreachable, `log` still prints the controller's half — and
-says so, and exits non-zero. Read that as *half the story*, never as "nothing
-else happened".
+Ask the device, do not assume. Highest route that could work. Verify by
+reading state back, never by an exit code. Never guess a coordinate.
 
-## The habits that matter
-
-1. `look` before and after every action.
-2. Never guess a coordinate.
-3. Take the lease; release it when done.
-4. Confirm before sending anything to a person.
-5. Prefer the inbox over the screen — `notifs` answers most questions without
-   touching anything.
-6. When you cannot do something, say so plainly and stop.
+Dated specifics — which app honours which intent, what is readable today —
+live in `docs/phone-map.md`, established by trying them. This file is the
+method; that one is the territory.
