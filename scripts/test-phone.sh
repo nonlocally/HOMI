@@ -975,6 +975,83 @@ if [ $rc -ne 0 ] && [ ! -f "$ST/bad.png" ]; then
 else bad "wrote non-image bytes as a screenshot (rc=$rc out=$out)"; fi
 rm -rf "$ST"
 
+echo "== capabilities: ask the device, do not trust a table in a document"
+# Every capability fact won tonight is dated. Apple Music declares
+# MEDIA_PLAY_FROM_SEARCH today; shell holds READ_SMS on Android 16 today.
+# Written into a skill as fact, both start lying on some future release and
+# nothing tells anyone. So the skill teaches METHOD and this verb supplies
+# FACTS, live, from the phone in front of you.
+#
+# The load-bearing distinction is three-valued: yes / no / could-not-check.
+# Collapsing "I could not look" into "no" is exactly the bug that made an
+# empty package list read as "the app is missing", and an empty SMS table
+# read as "SMS is blocked".
+CT="$(mktemp -d)"
+cat > "$CT/adb" <<'CEOF'
+#!/bin/sh
+case "$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
+  shell)
+    case "$*" in
+      *"content://com.android.contacts"*) printf 'Row: 0 display_name=A, data1=+1\n' ;;
+      *"content://sms"*)                  printf 'No result found.\n' ;;
+      *"content://call_log"*)             printf 'Error while accessing provider:call_log\njava.lang.SecurityException: Permission Denial\n' ;;
+      *"list-sessions"*)                  printf 'Sessions:\n  tag=x, package=com.apple.android.music\n' ;;
+      *"query-activities"*)               printf '      packageName=com.apple.android.music\n      packageName=com.spotify.music\n' ;;
+      *"enabled_notification_listeners"*) printf 'com.termux.api/com.termux.api.apis.NotificationListAPI\n' ;;
+      *"ro.build.version.release"*)       printf '16\n' ;;
+      *"ro.build.version.sdk"*)           printf '36\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+CEOF
+chmod +x "$CT/adb"
+out="$(PATH="$CT:$PATH" TMPDIR="$CT" PHONE_LEDGER="$CT/l.jsonl" \
+       "$PHONE" capabilities --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+c = d["capabilities"]
+assert c["contacts"]["ok"] is True, c["contacts"]
+# An empty table is READABLE, not denied — the distinction that took a
+# permission dump to settle by hand.
+assert c["sms"]["ok"] is True, c["sms"]
+assert "empty" in c["sms"]["detail"].lower(), c["sms"]
+# A real SecurityException IS denial, and must read differently.
+assert c["call_log"]["ok"] is False, c["call_log"]
+assert "deni" in c["call_log"]["detail"].lower(), c["call_log"]
+assert c["media_session"]["ok"] is True, c["media_session"]
+assert "com.apple.android.music" in c["play_from_search"]["detail"], c
+assert d["android"]["release"] == "16", d["android"]
+' 2>/dev/null; then
+  ok "capabilities reports yes / no / empty-but-readable distinctly"
+else bad "capabilities probe (got: $out)"; fi
+
+# With no device at all, every answer must be "could not check" — never "no".
+out="$(TMPDIR="$CT" PHONE_NO_DEVICE=1 PHONE_LEDGER="$CT/l2.jsonl" \
+       "$PHONE" capabilities --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+# Everything that depends on the DEVICE must be unknown. termux_api is
+# excluded deliberately: with no device in play that is a true statement
+# about this machine, not a guess about a phone. Addressed WITH --device,
+# capabilities runs ON the phone instead, precisely so that answer is
+# about the phone rather than about whoever is asking.
+dev = {k: v["ok"] for k, v in d["capabilities"].items() if k != "termux_api"}
+assert all(v is None for v in dev.values()), dev
+' 2>/dev/null; then
+  ok "no device means unknown, never a confident no"
+else bad "unknown vs no (got: $out)"; fi
+
+out="$(PATH="$CT:$PATH" TMPDIR="$CT" PHONE_LEDGER="$CT/l3.jsonl" \
+       "$PHONE" capabilities 2>&1)"
+if printf '%s' "$out" | grep -qi "contacts" && printf '%s' "$out" | grep -qi "call_log"; then
+  ok "capabilities prints a table a human can read"
+else bad "capabilities human output (got: $out)"; fi
+rm -rf "$CT"
+
 echo "== play should ASK the app, not hunt its UI for a coordinate"
 # Playing a song by searching the app, dumping the whole UI tree to read
 # artist names, and tapping a row is the computer-use pattern. Android has a

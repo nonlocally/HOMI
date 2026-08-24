@@ -1737,6 +1737,156 @@ def cmd_msg(args):
     return 0
 
 
+# ------------------------------------------------------------ capabilities
+# Every capability fact in this file is dated. Shell holds READ_SMS on
+# Android 16 today; Apple Music declares MEDIA_PLAY_FROM_SEARCH today; six
+# packages answer that intent on THIS Pixel and a different six will answer
+# it on the next one. Written into a skill as fact, each of those starts
+# lying on some future release and nothing tells anybody.
+#
+# So the skill teaches METHOD and this verb supplies FACTS — live, from the
+# phone in front of you. An agent that needs to know what is possible here
+# asks the device, the way it should have all along.
+#
+# Three-valued on purpose: True / False / None-for-could-not-check. Folding
+# "I could not look" into "no" is the single mistake this codebase has made
+# most often — an empty package list read as "the app is missing", an empty
+# SMS table read as "SMS is blocked". A capability probe that cannot say
+# "I don't know" manufactures confident wrong answers, which is worse than
+# no probe at all.
+
+
+def _cap_termux():
+    """Is termux-api present ON THE PHONE — not on whoever is asking.
+
+    Every other probe here runs through dev_shell, which the forwarded
+    socket carries to the device, so those are already answers about the
+    phone. This one is not: have_termux() looks at the local PATH, and on a
+    controller that is a fact about a Mac being reported as a fact about a
+    Pixel. The one verb whose job is to avoid confident wrong answers must
+    not open with one.
+
+    Asked over ssh as a plain shell test, deliberately not as `phone
+    something` — a diagnostic that needs the device's copy of this file to
+    be up to date is useless exactly when you most want it.
+    """
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return {"ok": bool(have_termux()),
+                "detail": "termux-api binaries on PATH"
+                if have_termux() else "not on this machine's PATH"}
+    if not _DEV_RE.match(dev):
+        return {"ok": None, "detail": "bad device name"}
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=accept-new", dev,
+            "command -v termux-tts-speak >/dev/null 2>&1 && echo yes || echo no"]
+    try:
+        pr = subprocess.run(argv, capture_output=True, text=True, timeout=25)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": None, "detail": "could not ask %s (%s)" % (dev, e)}
+    if pr.returncode != 0:
+        return {"ok": None, "detail": "could not reach %s" % dev}
+    yes = (pr.stdout or "").strip() == "yes"
+    return {"ok": yes,
+            "detail": "termux-api present on %s" % dev if yes else
+            "termux-api not installed on %s" % dev}
+
+
+def _cap_provider(uri, label):
+    """Readable, denied, or unknown — and EMPTY IS READABLE."""
+    rc, out = dev_shell("content query --uri %s --projection _id" % uri,
+                        timeout=30)
+    if rc != 0:
+        return (None, "could not run the query")
+    text = (out or "").strip()
+    if "Exception" in text or "Permission Denial" in text:
+        last = text.splitlines()[-1] if text.splitlines() else text
+        return (False, "denied: %s" % last[:80])
+    if "No result found" in text:
+        return (True, "readable, currently empty")
+    return (True, "readable")
+
+
+def probe_capabilities():
+    """What can this device actually do, right now."""
+    caps, android = {}, {"release": None, "sdk": None}
+    if not have_shell():
+        for k in ("contacts", "calendar", "sms", "call_log", "media_session",
+                  "notification_listeners", "notification_replies",
+                  "play_from_search"):
+            caps[k] = {"ok": None, "detail": "no device shell to ask"}
+        caps["termux_api"] = _cap_termux()
+        return {"android": android, "capabilities": caps}
+
+    for key, prop in (("release", "ro.build.version.release"),
+                      ("sdk", "ro.build.version.sdk")):
+        rc, out = dev_shell("getprop %s" % prop, timeout=20)
+        android[key] = (out or "").strip() or None if rc == 0 else None
+
+    for key, uri in (
+            ("contacts", "content://com.android.contacts/data/phones"),
+            ("calendar", "content://com.android.calendar/calendars"),
+            ("sms", "content://sms"),
+            ("call_log", "content://call_log/calls")):
+        ok, detail = _cap_provider(uri, key)
+        caps[key] = {"ok": ok, "detail": detail}
+
+    rc, out = dev_shell("cmd media_session list-sessions", timeout=25)
+    if rc != 0:
+        caps["media_session"] = {"ok": None, "detail": "could not ask"}
+    else:
+        pkgs = re.findall(r"package=([A-Za-z0-9._]+)", out or "")
+        caps["media_session"] = {
+            "ok": True,
+            "detail": ("%d session(s): %s" % (len(pkgs), ", ".join(sorted(set(pkgs)))))
+            if pkgs else "no app is holding a media session"}
+
+    rc, out = dev_shell(
+        "settings get secure enabled_notification_listeners", timeout=20)
+    if rc != 0:
+        caps["notification_listeners"] = {"ok": None, "detail": "could not ask"}
+    else:
+        names = [n.split("/")[0] for n in (out or "").strip().split(":") if n.strip()]
+        caps["notification_listeners"] = {
+            "ok": bool(names),
+            "detail": ", ".join(sorted(set(names))) or "none enabled"}
+
+    rc, out = dev_shell("dumpsys notification --noredact", timeout=40)
+    if rc != 0:
+        caps["notification_replies"] = {"ok": None, "detail": "could not ask"}
+    else:
+        n = len(re.findall(r"[Rr]emoteInput", out or ""))
+        caps["notification_replies"] = {
+            "ok": n > 0,
+            "detail": ("%d direct-reply action(s) on screen now — but firing "
+                       "one needs a notification listener, not this shell" % n)
+            if n else "no repliable notifications right now"}
+
+    handlers = intent_handlers(PLAY_FROM_SEARCH)
+    caps["play_from_search"] = ({"ok": None, "detail": "could not ask"}
+                                if handlers is None else
+                                {"ok": bool(handlers),
+                                 "detail": ", ".join(sorted(handlers))
+                                 or "no app declares it"})
+    caps["termux_api"] = _cap_termux()
+    return {"android": android, "capabilities": caps}
+
+
+def cmd_capabilities(args):
+    d = probe_capabilities()
+    record("capabilities", {"n": len(d["capabilities"])}, "read")
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return 0
+    a = d["android"]
+    print("android %s (sdk %s)" % (a.get("release") or "?", a.get("sdk") or "?"))
+    for k in sorted(d["capabilities"]):
+        v = d["capabilities"][k]
+        mark = {True: "yes", False: "no", None: "?"}[v["ok"]]
+        print("  %-24s %-4s %s" % (k, mark, v["detail"]))
+    return 0
+
+
 # ------------------------------------------------- the structured providers
 # Shell UID is not just a way to press keys on the screen. com.android.shell
 # declares READ_CONTACTS / READ_CALENDAR / READ_SMS / READ_CALL_LOG in its
@@ -2635,6 +2785,10 @@ def build_parser():
     s.add_argument("--limit", type=int, default=40)
     s.add_argument("--kind", choices=["act", "read"])
     s.add_argument("--actor", help="only what this driver did")
+    s.add_argument("--json", action="store_true")
+
+    s = add("capabilities", cmd_capabilities,
+            "what this device actually permits, asked live")
     s.add_argument("--json", action="store_true")
 
     s = add("cal", cmd_cal, "what is on the calendar")
