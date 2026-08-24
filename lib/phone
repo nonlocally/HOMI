@@ -2807,6 +2807,136 @@ def cmd_notif_reply(args):
 
 
 
+
+# --------------------------------------------------------- the fast path
+# Asking a frontier model at maximum reasoning effort "what is my battery"
+# costs 30-70 seconds. The speech either side of it costs ~200ms in and 11ms
+# out. So for the handful of things people actually ask a phone most often,
+# the agent is not thinking — it is queueing.
+#
+# These answer from the verbs directly, in about a second, and fall through
+# to the agent the moment a question is not obviously one of them. The bar
+# for matching is deliberately high: answering the WRONG question instantly
+# is worse than answering the right one slowly, and a near-miss here is
+# indistinguishable from the agent having misunderstood.
+
+
+def _spoken_battery(_m):
+    rc, out = run(remote_exec(os.environ.get("PHONE_DEVICE"), ["battery"])
+                  if os.environ.get("PHONE_DEVICE") else ["true"], timeout=30)
+    txt = (out or "").strip().split("\n")[0]
+    m = re.search(r"(\d+)%\s+(\S+)", txt)
+    if not m:
+        return None
+    pct, state = m.group(1), m.group(2).lower()
+    return "%s percent, %s." % (pct, "charging" if "charg" in state
+                                and "dis" not in state else "discharging")
+
+
+def _spoken_playing(_m):
+    sessions = parse_media_sessions(
+        dev_shell("dumpsys media_session", timeout=30)[1] or "")
+    cur = current_session(sessions)
+    if not cur:
+        return "Nothing is playing."
+    desc = cur.get("description")
+    if cur.get("state") != "PLAYING":
+        return ("Nothing is playing right now. %s is paused."
+                % (desc.split(",")[0] if desc else cur["package"]))
+    return desc.split(",")[0] if desc else "Something is playing."
+
+
+def _spoken_notifs(_m):
+    rc, out = run(remote_exec(os.environ.get("PHONE_DEVICE"),
+                              ["notifs", "--json"])
+                  if os.environ.get("PHONE_DEVICE") else ["true"], timeout=40)
+    try:
+        rows = json.loads(out or "[]")
+    except ValueError:
+        return None
+    # A group summary is Android's own rollup, not a message; counting it
+    # reports two things for one.
+    real = [r for r in rows if (r.get("title") or "").strip()
+            and "::SUMMARY::" not in (r.get("tag") or "")]
+    if not real:
+        return "Nothing is waiting."
+    apps = {}
+    for r in real:
+        apps[r.get("packageName", "")] = apps.get(r.get("packageName", ""), 0) + 1
+    top = sorted(apps.items(), key=lambda kv: -kv[1])[:3]
+    bits = ["%d from %s" % (n, p.rsplit(".", 1)[-1]) for p, n in top]
+    return "%d notifications: %s." % (len(real), ", ".join(bits))
+
+
+def _spoken_cal(_m):
+    rc, out = run(remote_exec(os.environ.get("PHONE_DEVICE"),
+                              ["cal", "--days", "1", "--json"])
+                  if os.environ.get("PHONE_DEVICE") else ["true"], timeout=40)
+    try:
+        evs = json.loads(out or "[]")
+    except ValueError:
+        return None
+    if not evs:
+        return "Nothing on the calendar today."
+    first = evs[0]
+    when = time.strftime("%H:%M", time.localtime(first["begin_ms"] / 1000))
+    if len(evs) == 1:
+        return "One thing today: %s at %s." % (first["title"], when)
+    return "%d things today, next is %s at %s." % (len(evs), first["title"], when)
+
+
+def _media_action(action):
+    def go(_m):
+        r = bridge_call("say", device=os.environ.get("PHONE_DEVICE"),
+                        wait=1) and None
+        rc, _o = dev_shell("cmd media_session dispatch %s" % DISPATCH[action],
+                           timeout=25)
+        if rc != 0:
+            return None
+        time.sleep(1.2)
+        cur = current_session(parse_media_sessions(
+            dev_shell("dumpsys media_session", timeout=30)[1] or ""))
+        state = (cur or {}).get("state", "")
+        # Say what actually happened, not what was asked for.
+        if action in ("pause", "stop"):
+            return "Paused." if state != "PLAYING" else "It did not pause."
+        if action == "play":
+            return "Playing." if state == "PLAYING" else "It did not start."
+        return (cur or {}).get("description", "").split(",")[0] or "Skipped."
+    return go
+
+
+# Anchored deliberately. "what is playing" matches; "play something by the
+# artist who wrote the song about playing" does not, and goes to the agent.
+FAST = [
+    (re.compile(r"\b(battery|charge|power)\b.*\b(level|left|at|percent)?\b"),
+     _spoken_battery),
+    (re.compile(r"\bwhat('?s| is)?\s+(playing|this song|the song)\b"),
+     _spoken_playing),
+    (re.compile(r"\b(notifications?|messages?|anything waiting|"
+                r"anything for me)\b"), _spoken_notifs),
+    (re.compile(r"\b(calendar|schedule|on today|my day)\b"), _spoken_cal),
+    (re.compile(r"\b(pause|stop)\b.*\b(music|song|it|playing)\b|\bpause\b\Z"),
+     _media_action("pause")),
+    (re.compile(r"\b(resume|unpause|keep playing)\b|\bplay\b\s*\Z"),
+     _media_action("play")),
+    (re.compile(r"\b(next|skip)\b.*\b(song|track)\b|\bskip\b\Z"),
+     _media_action("next")),
+]
+
+
+def fast_answer(text):
+    """A spoken answer without waking an agent, or None to fall through."""
+    low = " " + text.lower().strip() + " "
+    for pat, fn in FAST:
+        if pat.search(low):
+            try:
+                return fn(pat.search(low))
+            except Exception:
+                return None       # never let the shortcut break the slow path
+    return None
+
+
 def _ask_agent(to, text, sender, timeout):
     """Put a spoken turn to an agent and wait for its answer."""
     argv = ["communicate", "homi", "ask", to, text,
@@ -2873,6 +3003,20 @@ def cmd_talk(args):
 
         record("talk", {"heard_chars": len(text), "to": args.to}, "read")
         print("heard: %s" % text)
+
+        if not args.no_fast:
+            quick = fast_answer(text)
+            if quick:
+                said = bridge_call("say", device=device, text=quick, wait=90)
+                ok = bool(said and said.get("ok"))
+                record("talk", {"tier": "fast", "answer": quick[:60]}, "act",
+                       "answered without an agent" if ok else
+                       "unconfirmed: fast answer not confirmed spoken",
+                       rc=0 if ok else 1)
+                print("answer (fast): %s" % quick)
+                if not args.loop:
+                    return 0 if ok else 5
+                continue
 
         # [spoken] so the agent shapes it for an ear rather than a screen —
         # the same marker the voice page sends.
@@ -3295,6 +3439,9 @@ def build_parser():
     s.add_argument("--wake", help="only act on speech containing this phrase")
     s.add_argument("--loop", action="store_true", help="keep listening")
     s.add_argument("--verbose", action="store_true")
+    s.add_argument("--no-fast", action="store_true", dest="no_fast",
+                   help="always ask the agent, even for questions a verb "
+                        "could answer in a second")
 
     s = add("reply", cmd_notif_reply,
             "reply to a message without the screen (needs phonebridge)")
