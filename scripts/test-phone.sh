@@ -7,6 +7,14 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHONE="$HERE/lib/phone"
 T="$(mktemp -d /tmp/phone-test.XXXXXX)"
+# The ledger is the accountability record, so the suite must never write to
+# the real one. It did: every lease and shell-verb test that did not set
+# PHONE_LEDGER itself appended to ~/.local/state/communicate/phone-actions.jsonl,
+# leaving 138 rows with actors named "intruder", "ghost" and "driver1" in the
+# file a human is supposed to consult to find out who touched their phone.
+# Exported once here so it is the default for every invocation; the tests that
+# set it explicitly still override it.
+export PHONE_LEDGER="$T/default-ledger.jsonl"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); printf 'ok   %s\n' "$*"; }
 bad(){ fail=$((fail+1)); printf 'FAIL %s\n' "$*"; }
@@ -725,6 +733,129 @@ out="$("$PHONE" --device aadarshs-pixel-10 --print-plan tap 1 2 2>&1)"
 if printf '%s' "$out" | grep -qi "socket\|forward\|local"; then
   ok "a shell verb still takes the fast forwarded path"
 else bad "shell verb routing (got: $out)"; fi
+
+echo "== the actor has to cross the ssh hop, or the trace says anon"
+# The ledger's whole job is WHO. A termux verb runs on the DEVICE, so it is
+# the device's `phone` that writes the record -- and PHONE_ACTOR is an
+# environment variable on the CONTROLLER, which ssh does not forward. So
+# every notifs/clip/where/photo/listen from a remote controller logged as
+# "anon": the reads of personal data, which are exactly the ones the record
+# exists for, and exactly the ones that cannot be traced back to who asked.
+out="$(PHONE_ACTOR=tongs "$PHONE" --device aadarshs-pixel-10 --print-plan notifs 2>&1)"
+if printf '%s' "$out" | grep -q "PHONE_ACTOR=tongs"; then
+  ok "the remote command carries the actor"
+else bad "actor lost across the hop (got: $out)"; fi
+
+# ...and it must survive being a hostile string, since it lands in a shell.
+# Grepping the plan is not enough here, and getting this wrong is subtle:
+# shlex.quote("PHONE_ACTOR=a; rm") yields "'PHONE_ACTOR=a; rm'", which reads
+# as a fully quoted word -- and a word whose NAME part is quoted stops being
+# an assignment and becomes a command name. The far shell would hunt for a
+# binary called that and never run phone at all. It greps fine and is
+# silently broken, so ask a real shell instead: run the planned remote
+# string with a stub `phone` on PATH and see what it actually receives.
+STUB="$(mktemp -d)"
+cat > "$STUB/phone" <<'STUBEOF'
+#!/bin/sh
+printf 'ACTOR=[%s]\n' "$PHONE_ACTOR"
+printf 'ARGV=[%s]\n' "$*"
+STUBEOF
+chmod +x "$STUB/phone"
+EVIL='a; rm -rf /'
+plan="$(PHONE_ACTOR="$EVIL" "$PHONE" --device aadarshs-pixel-10 --print-plan notifs 2>&1)"
+# The plan line is "run on the device (...): ssh <opts> <host> <remote>".
+# The remote command is everything after the hostname.
+remote="${plan#*aadarshs-pixel-10 }"
+got="$(PATH="$STUB:$PATH" sh -c "$remote" 2>&1)"
+rm -rf "$STUB"
+if [ "$got" = "ACTOR=[$EVIL]
+ARGV=[notifs]" ]; then
+  ok "a real shell sees the actor as a value and still runs phone"
+else bad "hostile actor mangles the far command (got: $got)"; fi
+
+# An unset actor must not send a bare PHONE_ACTOR= that overrides whatever
+# the device itself would have said.
+out="$(env -u PHONE_ACTOR "$PHONE" --device aadarshs-pixel-10 --print-plan notifs 2>&1)"
+if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
+  ok "no actor set means no actor forced on the device"
+else bad "empty actor forced across (got: $out)"; fi
+
+echo "== a remote hop is the LAST hop"
+# If the device's own environment names a device (a two-phone fleet, a
+# stray export), the far `phone` would hop onward -- and every row it
+# returned would still be labelled with THIS device's name, because that is
+# the only name the caller knows. The origin column would then quietly
+# attribute a third machine's actions to the phone in your hand, which is
+# worse than not having the column. Cheaper to make the far side incapable
+# of hopping than to teach the labelling about hops it cannot see.
+HT="$(mktemp -d)"
+cat > "$HT/phone" <<'HEOF'
+#!/bin/sh
+printf 'DEVICE=[%s]\n' "$PHONE_DEVICE"
+HEOF
+chmod +x "$HT/phone"
+plan="$(PHONE_ACTOR=tongs "$PHONE" --device aadarshs-pixel-10 --print-plan notifs 2>&1)"
+remote="${plan#*aadarshs-pixel-10 }"
+got="$(PATH="$HT:$PATH" PHONE_DEVICE=some-other-phone sh -c "$remote" 2>&1)"
+rm -rf "$HT"
+if [ "$got" = "DEVICE=[]" ]; then
+  ok "the far side cannot hop onward (PHONE_DEVICE cleared across the wire)"
+else bad "far side could re-hop (got: $got)"; fi
+
+echo "== the trace is split across two machines, so log has to merge it"
+# Shell-tier verbs (tap, type, look, key) execute through the forwarded
+# socket, so the CONTROLLER's process writes their ledger line -- on the
+# controller. Termux verbs run on the device, so the DEVICE writes theirs.
+# Two ledgers, on two machines, each holding half the story: `phone log`
+# here showed taps with no reads, `phone log` there showed reads with no
+# taps, and neither could answer "what has been done to my phone, by whom".
+MT="$(mktemp -d)"
+cat > "$MT/ledger.jsonl" <<'LEOF'
+{"ts": 100.0, "verb": "tap", "kind": "act", "actor": "tongs", "ms": 12, "rc": 0, "detail": "933 2119"}
+{"ts": 300.0, "verb": "type", "kind": "act", "actor": "tongs", "ms": 20, "rc": 0, "detail": "hello"}
+LEOF
+# A stub ssh standing in for the device's own ledger.
+cat > "$MT/ssh" <<'SEOF'
+#!/bin/sh
+echo '[{"ts": 200.0, "verb": "notifs", "kind": "read", "actor": "tongs", "ms": 9, "rc": 0, "detail": "all"}]'
+SEOF
+chmod +x "$MT/ssh"
+# TMPDIR too, so no forwarded socket left over from a real run can be
+# found and make this pass for a reason the test did not arrange.
+out="$(PATH="$MT:$PATH" TMPDIR="$MT" PHONE_LEDGER="$MT/ledger.jsonl" \
+       "$PHONE" --device aadarshs-pixel-10 log --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+verbs = [r["verb"] for r in rows]
+assert verbs == ["type", "notifs", "tap"], verbs      # newest first, interleaved
+o = {r["verb"]: r.get("origin") for r in rows}
+assert o["notifs"] == "aadarshs-pixel-10", o
+assert o["tap"] == "here" and o["type"] == "here", o
+' 2>/dev/null; then
+  ok "log merges both ledgers in time order, each row saying where it came from"
+else bad "split ledger not merged (got: $out)"; fi
+
+# The device being unreachable must not make the local half vanish -- a
+# partial answer is worth having, an empty one that looks complete is not.
+cat > "$MT/ssh" <<'SEOF'
+#!/bin/sh
+echo "ssh: connect to host aadarshs-pixel-10 port 22: Host is down" >&2
+exit 255
+SEOF
+chmod +x "$MT/ssh"
+out="$(PATH="$MT:$PATH" TMPDIR="$MT" PHONE_LEDGER="$MT/ledger.jsonl" \
+       "$PHONE" --device aadarshs-pixel-10 log 2>&1)"
+rc=$?
+if printf '%s' "$out" | grep -q "tap" && printf '%s' "$out" | grep -qi "could not read\|unreachable"; then
+  ok "an unreachable device still shows local rows, and says the half is missing"
+else bad "unreachable device handling (got: $out)"; fi
+# ...and it must not exit 0. A caller asking what was done to the phone would
+# read success as "and that was all of it".
+if [ "$rc" -ne 0 ]; then
+  ok "a half-trace exits non-zero"
+else bad "partial trace exited 0 (looked complete)"; fi
+rm -rf "$MT"
 
 echo
 echo "pass=$pass fail=$fail"
