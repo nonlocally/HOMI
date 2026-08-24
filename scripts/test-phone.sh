@@ -781,6 +781,7 @@ if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
 else bad "empty actor forced across (got: $out)"; fi
 
 cat > "$T/media.txt" <<'MEDIAEOF'
+  Media button session is com.apple.android.music/androidx.media3.session.id.com.apple.android.music/11 (userId=0)
   Sessions Stack - have 3 sessions:
     androidx.media3.session.id.com.apple.android.music com.apple.android.music/androidx.media3.session.id.com.apple.android.music/11 (userId=0)
       ownerPid=25851, ownerUid=10338, userId=0
@@ -974,6 +975,156 @@ if [ $rc -ne 0 ] && [ ! -f "$ST/bad.png" ]; then
   ok "non-image bytes are refused, and no file is left behind"
 else bad "wrote non-image bytes as a screenshot (rc=$rc out=$out)"; fi
 rm -rf "$ST"
+
+echo "== media: dispatch goes to the BUTTON session, not the one you meant"
+# Found by ranger, on the device, watching rather than reasoning:
+# `cmd media_session dispatch` takes no session argument. It goes to the
+# "media button session" -- the app that last held AUDIO -- which is not
+# necessarily the foreground app and not necessarily the one you just
+# addressed. With YouTube Music foregrounded, active, and holding a loaded
+# queue, `dispatch play` started APPLE MUSIC and left YT Music frozen at 0.
+#
+# That breaks the verification I shipped: before/after was compared on
+# `current_session`, which re-ranks after the dispatch. If the dispatch lands
+# on a different app, the ranking can hand back a DIFFERENT session
+# afterwards, the states differ, and the move gets reported as success --
+# crediting one app's playback to another. So the target has to be named,
+# and before/after compared on the same package.
+out="$("$PHONE" media --from "$T/media.txt" --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+btn = [s for s in d if s.get("media_button")]
+assert len(btn) == 1, btn
+assert btn[0]["package"] == "com.apple.android.music", btn
+others = [s for s in d if not s.get("media_button")]
+assert all(s["package"] != "com.apple.android.music" for s in others), others
+' 2>/dev/null; then
+  ok "the session that will receive a dispatch is identified"
+else bad "media button session not identified (got: $out)"; fi
+
+out="$("$PHONE" media --from "$T/media.txt" 2>&1)"
+if printf '%s' "$out" | grep -q "<- keys" ; then
+  ok "and it is marked in the human view, so nobody has to guess"
+else bad "button session unmarked in human output (got: $out)"; fi
+
+echo "== an app name must resolve to THAT app, or to nothing"
+# The sharpest bug ranger found, and it is the same class as tapping a wrong
+# coordinate: `--app chrome` resolved to com.google.android.apps.chromecast.app
+# — Google Home — and printed "(no notifications)", which reads as a clean
+# negative about Chrome. `open chrome` would have LAUNCHED Google Home.
+#
+# Two causes, both fixed here:
+#   1. resolution ran against `pm list packages -3`, third-party only, so
+#      every system app (chrome, youtube, photos, calendar) was invisible —
+#      including ones the CLI's own error message advertises as valid.
+#   2. on a miss it substring-matched and took the single hit. "chrome" is a
+#      substring of "chromecast". Wrong app, full confidence, no warning.
+#
+# The rule now: match whole dotted SEGMENTS, never substrings, and refuse
+# ambiguity by name instead of picking the shortest.
+NT="$(mktemp -d)"
+mkpkgs() {   # $1 = full `pm list packages` output
+  cat > "$NT/adb" <<EOF
+#!/bin/sh
+while [ "\$1" = "-s" ]; do shift 2; done
+case "\$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n'; exit 0 ;;
+  shell|exec-out)
+    shift
+    case "\$*" in
+      *"pm list packages -3"*) printf 'package:com.google.android.apps.chromecast.app\n' ;;
+      *"pm list packages"*)    printf '$1' ;;
+      *resolve-activity*)      printf '%s/.Main\n' "\${*##* }" ;;
+      *am\ start*)             exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$NT/adb"
+}
+
+# A phone with Google Home and NO Chrome. Asking for chrome must fail.
+mkpkgs 'package:com.google.android.apps.chromecast.app\npackage:com.google.android.youtube\n'
+out="$(PATH="$NT:$PATH" TMPDIR="$NT" PHONE_LEDGER="$NT/l.jsonl" \
+       "$PHONE" open chrome 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && ! printf '%s' "$out" | grep -q "chromecast"; then
+  ok "a name that is only a SUBSTRING of another package is refused"
+else bad "chrome resolved to the wrong app (rc=$rc out=$out)"; fi
+
+# The same phone: youtube is a SYSTEM package, absent from -3, and must
+# still resolve — the old code could not see it at all.
+out="$(PATH="$NT:$PATH" TMPDIR="$NT" PHONE_LEDGER="$NT/l2.jsonl" \
+       "$PHONE" open youtube 2>&1)"; rc=$?
+if ! printf '%s' "$out" | grep -qi "no app matching"; then
+  ok "a system package resolves (the list is no longer third-party only)"
+else bad "system package unresolvable (rc=$rc out=$out)"; fi
+
+# Genuine ambiguity is named, not silently narrowed to the shortest.
+mkpkgs 'package:com.foo.notes\npackage:com.bar.notes\n'
+out="$(PATH="$NT:$PATH" TMPDIR="$NT" "$PHONE" open notes 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "com.foo.notes" \
+   && printf '%s' "$out" | grep -q "com.bar.notes"; then
+  ok "two candidates are both named, and nothing is chosen"
+else bad "ambiguity silently resolved (rc=$rc out=$out)"; fi
+rm -rf "$NT"
+
+echo "== the device's stderr must not vanish on the way back"
+# Found by ranger, and it is the signature failure of this whole codebase in
+# a new place: a denied `content query` comes back as RC=0 with NO output,
+# which is byte-for-byte identical to "readable and empty". The verb built
+# specifically to tell those two apart could not tell them apart.
+#
+# The stub `adb` here is a REAL shell, so the redirection semantics under
+# test are the actual ones, not a string I asserted about.
+ET="$(mktemp -d)"
+cat > "$ET/adb" <<'EEOF'
+#!/bin/sh
+case "$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
+  shell)   shift; sh -c "$*" ;;
+  *) exit 0 ;;
+esac
+EEOF
+chmod +x "$ET/adb"
+
+out="$(PATH="$ET:$PATH" TMPDIR="$ET" PHONE_LEDGER="$ET/l.jsonl" \
+       "$PHONE" sh 'echo OUT; echo ERR >&2' 2>/dev/null)"
+if printf '%s' "$out" | grep -q "OUT" && printf '%s' "$out" | grep -q "ERR"; then
+  ok "phone sh surfaces the device's stderr, not just its stdout"
+else bad "device stderr dropped (got: $out)"; fi
+
+# And the load-bearing property of the wrapper itself, exercised by a REAL
+# shell rather than an adb stub. Two things have to hold together: stderr
+# comes back, AND the command's own exit status survives — a subshell or a
+# pipe would give us the wrapper's status instead, which would turn every
+# failure into a success at the exact moment we started reading stderr.
+if python3 - <<'PYEOF'
+import subprocess, sys, importlib.util, pathlib
+spec = importlib.util.spec_from_loader("phone", None)
+src = pathlib.Path("lib/phone").read_text()
+ns = {}
+exec(compile(src.split("def dev_shell(")[0], "phone", "exec"), ns)
+merged = ns["merged"]
+
+# stderr arrives
+r = subprocess.run(["sh", "-c", merged("echo OUT; echo ERR >&2")],
+                   capture_output=True, text=True)
+assert "OUT" in r.stdout and "ERR" in r.stdout, r
+# exit status is the COMMAND's, not the wrapper's
+r = subprocess.run(["sh", "-c", merged("echo boom >&2; exit 7")],
+                   capture_output=True, text=True)
+assert r.returncode == 7, r.returncode
+assert "boom" in r.stdout, r
+# and success stays success
+r = subprocess.run(["sh", "-c", merged("true")], capture_output=True, text=True)
+assert r.returncode == 0, r.returncode
+PYEOF
+then
+  ok "the wrapper returns stderr AND preserves the command's exit status"
+else bad "merged() wrapper semantics"; fi
+rm -rf "$ET"
 
 echo "== capabilities: ask the device, do not trust a table in a document"
 # Every capability fact won tonight is dated. Apple Music declares
