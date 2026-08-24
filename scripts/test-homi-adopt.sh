@@ -624,14 +624,16 @@ def has_item(f):
     return any('HOMI_SELF' in c for c in ha.plan(f, loc)[1])
 # the probe runs non-login/non-interactive, so env is empty even when the
 # human HAS configured it — the item must clear on the profile, not the env
-cfg   = has_item(dict(base, homi_self='', homi_self_files=['.bash_profile']))
-envd  = has_item(dict(base, homi_self='aadarshs-pixel-10', homi_self_files=[]))
-none  = has_item(dict(base, homi_self='', homi_self_files=[]))
-# configured in a file THIS shell never reads is not configured
-wrong = has_item(dict(base, homi_self='', homi_self_files=['.zshenv']))
+# the login shell's answer is the authority — that is what the agent gets
+cfg   = has_item(dict(base, homi_self_value='ember', homi_self_files=['.bash_profile']))
+envd  = has_item(dict(base, homi_self='ember', homi_self_files=[]))
+none  = has_item(dict(base, homi_self='', homi_self_value='', homi_self_files=[]))
+# an export the login shell cannot actually produce is NOT configured,
+# however many files it appears in
+wrong = has_item(dict(base, homi_self='', homi_self_value='', homi_self_files=['.zshenv']))
 print(cfg, envd, none, wrong)")"
 if [ "$r" = "False False True True" ]; then
-  ok "profile export clears it; env clears it; nothing set keeps it; wrong-shell file keeps it"
+  ok "login-shell value clears it; env clears it; nothing keeps it; a file the shell cannot yield keeps it"
 else bad "homi_self check (got: $r)"; fi
 
 echo "== the probe actually looks in the profiles (not just \$HOMI_SELF)"
@@ -640,6 +642,67 @@ sc = ha.probe_script('a@mini')
 print('HOMI_SELF_FILES=' in sc, '.bash_profile' in sc, '.zshenv' in sc)")"
 if [ "$r" = "True True True" ]; then ok "probe reports which profiles carry the export"
 else bad "probe homi_self files (got: $r)"; fi
+
+echo "== HOMI_SELF is read back from the device's own LOGIN shell, and inlined into the daemon"
+r="$(PY "
+base = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h',
+            xdg='', ssh_ip='1.2.3.4', cc_collision=False, own_key=True,
+            fabric_key=True, hub_key_there=True, reverse_ok=True, shim=True,
+            tmux_bin='/x/tmux', claude_bin='/x/claude', kernel_hash='SAME',
+            py3=True, homi_self='', homi_self_files=[])
+loc = dict(kernel_hash='SAME', my_addr='a@m', reverse_candidates=['1.2.3.4'])
+named = dict(base, homi_self_value='aadarshs-pixel-10')
+acts, cl = ha.plan(named, loc)
+rst = [a for a in acts if a['step']=='restart_daemon'][0]
+seen = []
+def cap(addr, cmd, timeout=60):
+    seen.append(cmd); return (0, '9')
+ha.execute('u@h', [rst], named, dict(my_addr='a@m', here_dir='/tmp'),
+           ssh=cap, say=lambda s: None)
+print(rst.get('homi_self'), 'HOMI_SELF=aadarshs-pixel-10' in seen[0],
+      any('HOMI_SELF' in c for c in cl))")"
+if [ "$r" = "aadarshs-pixel-10 True False" ]; then
+  ok "the read-back name rides into the daemon start; no checklist once configured"
+else bad "homi_self read-back (got: $r)"; fi
+
+echo "== unconfigured: the item names the CONSEQUENCE, not the state"
+r="$(PY "
+base = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h',
+            xdg='', ssh_ip='1.2.3.4', cc_collision=False, own_key=True,
+            fabric_key=True, hub_key_there=True, reverse_ok=True, shim=True,
+            tmux_bin='/x/tmux', claude_bin='/x/claude', kernel_hash='SAME',
+            py3=True, homi_self='', homi_self_value='', homi_self_files=[])
+loc = dict(kernel_hash='SAME', my_addr='a@m', reverse_candidates=['1.2.3.4'])
+cl = ha.plan(base, loc)[1]
+item = [c for c in cl if 'HOMI_SELF' in c][0]
+# and the wrong-shell diagnostic
+wrong = ha.plan(dict(base, homi_self_files=['.zshenv']), loc)[1]
+witem = [c for c in wrong if 'HOMI_SELF' in c][0]
+print('identity' in item, '.zshenv' in witem and 'bash' in witem)")"
+if [ "$r" = "True True" ]; then
+  ok "says the daemon has no identity; and names the wrong-shell file when that is the cause"
+else bad "homi_self checklist text (got: $r)"; fi
+
+echo "== the probe asks the LOGIN shell, and always emits the key"
+r="$(PY "
+sc = ha.probe_script('a@m')
+print('HOMI_SELF_VALUE=' in sc, '-lc' in sc, sc.count('HOMI_SELF_VALUE=') >= 2)")"
+if [ "$r" = "True True True" ]; then
+  ok "\$SHELL -lc read-back with an unconditional default"
+else bad "probe read-back (got: $r)"; fi
+
+echo "== a device with no HOMI_SELF never gets an empty one inlined"
+r="$(PY "
+f = dict(os='Darwin', is_termux=False, login_shell='/bin/zsh', home='/U',
+         xdg='', cc_collision=True, homi_self_value='')
+seen = []
+def cap(addr, cmd, timeout=60):
+    seen.append(cmd); return (0, '9')
+ha.execute('u@h', [{'step':'restart_daemon','env':True}], f,
+           dict(my_addr='a@m', here_dir='/tmp'), ssh=cap, say=lambda s: None)
+print('HOMI_SELF=' not in seen[0], 'XDG_RUNTIME_DIR' in seen[0])")"
+if [ "$r" = "True True" ]; then ok "no name, no HOMI_SELF in the launch; the runtime dir still rides"
+else bad "empty homi_self guard (got: $r)"; fi
 
 echo
 echo "pass=$pass fail=$fail"
