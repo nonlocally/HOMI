@@ -43,8 +43,33 @@ final class Api {
 
     private static volatile String token = null;
     private static volatile String handle = null;
+    private static volatile String device = null;
 
     private Api() {}
+
+    /**
+     * Learn which device this is, from the file the installer plants.
+     *
+     * An app cannot see the tailnet, so it cannot discover its own fabric
+     * name — but the router needs it, or a question like "what is my battery"
+     * has no phone to ask and escalates to an agent instead. Measured before
+     * this existed: 48 seconds and an escalation, for a question the regex
+     * tier answers in about one.
+     */
+    static void init(android.content.Context ctx) {
+        if (device != null) return;
+        try {
+            java.io.File dir = ctx.getExternalFilesDir(null);
+            if (dir == null) return;
+            java.io.File f = new java.io.File(dir, "device");
+            if (!f.exists()) return;
+            byte[] b = new byte[128];
+            int n = new java.io.FileInputStream(f).read(b);
+            if (n > 0) device = new String(b, 0, n, StandardCharsets.UTF_8).trim();
+        } catch (Exception e) {
+            Log.w(Listener.TAG, "could not read the device name", e);
+        }
+    }
 
     static String handle() {
         return handle;
@@ -255,6 +280,64 @@ final class Api {
             if (o.has("ok") && !o.optBoolean("ok")) {
                 throw new Exception(o.optString("err", "send refused"));
             }
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    /** What the ladder answered, and which tier answered it. */
+    static final class Answer {
+        String tier = "";
+        String text = "";
+        boolean escalate = false;
+    }
+
+    /**
+     * Put a question to the tier ladder: regex, then the small fast model,
+     * then — only if those cannot — a report that it needs an agent.
+     *
+     * This is the path the TALK button was missing. Without it every spoken
+     * turn went straight to whichever agent was selected, so "tell me about
+     * X" reached a frontier coding model at high effort and took the best
+     * part of a minute. The middle tier answers the same question in four
+     * seconds from its own knowledge.
+     */
+    static Answer ask(String text) throws Exception {
+        ensureToken();
+        JSONObject req = new JSONObject();
+        req.put("text", text);
+        if (device != null && !device.isEmpty()) req.put("device", device);
+        byte[] body = req.toString().getBytes(StandardCharsets.UTF_8);
+
+        HttpURLConnection c = (HttpURLConnection) new URL(BASE + "/api/ask").openConnection();
+        try {
+            c.setRequestMethod("POST");
+            c.setConnectTimeout(10000);
+            // The router is allowed to think. A read timeout shorter than the
+            // ladder's own budget would turn a slow answer into a failure and
+            // send the turn to an agent — the exact escalation this avoids.
+            c.setReadTimeout(120000);
+            c.setDoOutput(true);
+            c.setFixedLengthStreamingMode(body.length);
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("X-Homi", "1");
+            c.setRequestProperty("X-Homi-Token", token);
+            OutputStream os = c.getOutputStream();
+            os.write(body);
+            os.flush();
+            int code = c.getResponseCode();
+            String resp = slurp(code >= 400 ? c.getErrorStream() : c.getInputStream());
+            if (code == 403) {
+                refreshToken();
+                return ask(text);
+            }
+            if (code >= 400) throw new ApiError(code, resp);
+            JSONObject o = new JSONObject(resp.isEmpty() ? "{}" : resp);
+            Answer a = new Answer();
+            a.tier = o.optString("tier", "");
+            a.text = o.optString("answer", "");
+            a.escalate = o.optBoolean("escalate", false);
+            return a;
         } finally {
             c.disconnect();
         }

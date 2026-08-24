@@ -544,6 +544,56 @@ if [ "$out" = "still-here" ]; then ok "and the reused daemon still serves"
 else bad "reused daemon stopped serving (got: $out)"; fi
 PHONE_SHELL_SOCK="$DUP" "$PHONE" shelld --stop >/dev/null 2>&1
 
+echo "== the regex tier must not answer a request to ACT"
+# Measured: "open whatsapp and send my mother a message about dinner" was
+# answered by the fast path with "17 notifications: 5 from youtube, 2 from
+# gms" — the word "message" matched the notifications pattern, so a request to
+# SEND one was silently swallowed by a read of ones RECEIVED. The person is
+# told about YouTube and their mother never hears from them.
+#
+# The patterns are matched on nouns with no regard for whether the sentence is
+# a question or an instruction. Asserted on the DECISION rather than the
+# answer, so it holds with no device attached.
+cat > "$T/fastmatch.py" <<'PY'
+import importlib.machinery, importlib.util, sys
+spec = importlib.util.spec_from_loader(
+    "phonemod", importlib.machinery.SourceFileLoader("phonemod", sys.argv[1]))
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+for line in sys.stdin.read().splitlines():
+    if not line.strip():
+        continue
+    got = m.fast_match(line)
+    print("%s\t%s" % ("none" if got is None else got[1].__name__, line))
+PY
+
+printf '%s\n' \
+  "open whatsapp and send my mother a message about dinner" \
+  "send peer a message saying I am running late" \
+  "text my mum that I will call her tomorrow" \
+  "reply to that message for me" \
+  "tell fable to merge the branch" \
+  > "$T/act.txt"
+if out="$(python3 "$T/fastmatch.py" "$PHONE" < "$T/act.txt" 2>&1)" \
+   && [ "$(printf '%s' "$out" | grep -vc '^none')" = "0" ]; then
+  ok "a request to send, text, reply or tell is left to the router"
+else bad "the regex tier answered a request to ACT: $(printf '%s' "$out" | grep -v '^none' | head -2)"; fi
+
+# The other half, and the reason this cannot just be "decline anything with a
+# verb": the read questions and the media controls must still match.
+printf '%s\n' \
+  "any messages for me" \
+  "what notifications do I have" \
+  "what is my battery" \
+  "what is playing" \
+  "pause the music" \
+  "skip this track" \
+  > "$T/read.txt"
+if out="$(python3 "$T/fastmatch.py" "$PHONE" < "$T/read.txt" 2>&1)" \
+   && ! printf '%s' "$out" | grep -q '^none'; then
+  ok "questions and media controls still take the fast path"
+else bad "fast path stopped matching things it should: $(printf '%s' "$out" | grep '^none' | head -3)"; fi
+
 echo "== type must preserve real text, and admit what it dropped"
 # The strip-regex silently deleted apostrophes, =, $, <, >, |, backtick and
 # more, then reported success by counting WORDS WHOSE EXIT CODE WAS 0 — which

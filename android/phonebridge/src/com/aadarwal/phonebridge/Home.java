@@ -83,6 +83,7 @@ public class Home extends Activity {
         speak = new Speak(this);
         SharedPreferences p = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         target = p.getString(K_TARGET, DEFAULT_TARGET);
+        Api.init(this);          // which device this is, for phone questions
 
         getWindow().setStatusBarColor(Ui.BG);
         getWindow().setNavigationBarColor(Ui.BG);
@@ -371,9 +372,50 @@ public class Home extends Activity {
             final String said = heard;
             ui.post(() -> {
                 status("you: " + said, Ui.TEXT);
-                setTalkState("SENDING", "→ " + target);
+                setTalkState("THINKING", "asking the router");
             });
 
+            // THE LADDER FIRST, and this is the whole point of the button.
+            //
+            // Sending straight to the selected agent — which is what this did
+            // at first — put "tell me about <person>" in front of a frontier
+            // coding model at high reasoning effort: forty seconds, and a
+            // price to match, for something a small fast model answers from
+            // its own knowledge in four. The agent tier is for WORK. It is
+            // reached when the router says so, and the tier that answered is
+            // shown on screen so it is never a mystery which one ran.
+            Api.Answer routed = null;
+            try {
+                routed = Api.ask(said);
+            } catch (Exception e) {
+                Log.w(Listener.TAG, "router failed", e);
+                // A router that could not run is not a decision to escalate.
+                // Say so, and let the person decide whether to spend an agent
+                // on it — silently promoting every failure to the expensive
+                // tier is exactly the surprise this is fixing.
+                finish_("the router did not answer — " + short_(e)
+                        + " (tap again, or open " + target + " to ask directly)",
+                        Ui.ERR);
+                return;
+            }
+            if (!routed.escalate && !routed.text.isEmpty()) {
+                final String ans = routed.text;
+                final String tier = routed.tier;
+                ui.post(() -> {
+                    status(ans, Ui.TEXT);
+                    setTalkState("SPEAKING", tier);
+                });
+                try {
+                    speak.say(ans, 120);
+                } catch (Throwable e) {
+                    Log.w(Listener.TAG, "speak failed", e);
+                }
+                finish_(null, 0);
+                return;
+            }
+
+            // Only now is this worth an agent's time.
+            ui.post(() -> setTalkState("SENDING", "→ " + target));
             double sentAt = System.currentTimeMillis() / 1000.0;
             try {
                 Api.send(target, said, true);
