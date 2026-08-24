@@ -61,6 +61,15 @@ LINKS = {
     "ytmusic": "https://music.youtube.com/search?q={q}",
     "youtubemusic": "https://music.youtube.com/search?q={q}",
     "spotify": "https://open.spotify.com/search/{q}",
+    # Apple Music is the one actually on this phone. It DOES declare a
+    # play-from-search handler — I first read the query-activities output
+    # through `head` and concluded it did not, which is the same mistake as
+    # trusting any other truncated view of the artifact. Six packages on this
+    # device declare it: Apple Music, Tidal, YouTube Music, YouTube, Play
+    # Movies, Spotify. Which is exactly why the handler set is READ, never
+    # written down here.
+    "applemusic": "https://music.apple.com/search?term={q}",
+    "apple": "https://music.apple.com/search?term={q}",
     "youtube": "https://www.youtube.com/results?search_query={q}",
     "whatsapp": "https://wa.me/",
     "gmail": "https://mail.google.com/",
@@ -1334,12 +1343,16 @@ def launch(url, print_only=False):
         rc, _ = run([exe, url], timeout=30)
         if rc == 0:
             return 0
-    # Level 2 fallback, only if adb happens to be up.
-    if not os.environ.get("PHONE_NO_DEVICE") and shutil.which("adb") \
-            and adb_ready():
-        dev_shell("am start -a android.intent.action.VIEW -d %s"
-                  % json.dumps(url), timeout=30)
-        return 0
+    # Then the DEVICE SHELL — which is the forwarded socket when a
+    # controller is driving, so this is the path that makes `open <url>` and
+    # play's link tier work from another machine at all. Requiring adb here
+    # meant both died with "Termux:API missing and adb is down" on a phone
+    # where the shell was up the whole time.
+    if not os.environ.get("PHONE_NO_DEVICE") and have_shell():
+        rc, _out = dev_shell("am start -a android.intent.action.VIEW -d %s"
+                             % json.dumps(url), timeout=30)
+        if rc == 0:
+            return 0
     die("could not open %s (Termux:API missing and adb is down)" % url, 3)
 
 
@@ -1423,7 +1436,36 @@ PLAY_PKGS = {
     "youtubemusic": "com.google.android.apps.youtube.music",
     "spotify": "com.spotify.music",
     "youtube": "com.google.android.youtube",
+    "applemusic": "com.apple.android.music",
+    "apple": "com.apple.android.music",
 }
+
+
+PLAY_FROM_SEARCH = "android.media.action.MEDIA_PLAY_FROM_SEARCH"
+
+
+def intent_handlers(action):
+    """Which packages declare a handler for this intent, per THE DEVICE.
+
+    Not a table. On this Pixel, YouTube Music implements
+    MEDIA_PLAY_FROM_SEARCH and Apple Music does not — two music apps, same
+    category, different answers. Any hardcoded list is wrong on somebody's
+    phone the day it is written, which is the same mistake the old app-name
+    table made before pkg_of started asking.
+
+    Returns None when we cannot look (no device shell), which is not the
+    same as "nothing handles it".
+    """
+    rc, out = dev_shell("cmd package query-activities -a %s" % action,
+                        timeout=30)
+    if rc != 0:
+        return None
+    pkgs = set()
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line.startswith("packageName="):
+            pkgs.add(line.split("=", 1)[1].strip())
+    return pkgs
 
 
 def cmd_play(args):
@@ -1436,6 +1478,79 @@ def cmd_play(args):
     url = tmpl.replace("{q}", quote_plus(query))
     if args.print_url:
         return launch(url, True)
+
+    # TIER 2 — ask the app. `am start -a MEDIA_PLAY_FROM_SEARCH --es query`
+    # hands the app the words and lets IT do the searching and the choosing.
+    # No UI dump, no coordinate, nothing to mis-tap, and it works with the
+    # screen off. Only if the app does not declare the intent do we drop to
+    # the link, and then we say so — a fallback that stays quiet reads like
+    # the good path worked.
+    pkg = PLAY_PKGS.get(app)
+    handlers = intent_handlers(PLAY_FROM_SEARCH) if pkg else None
+    use_intent = bool(pkg and handlers and pkg in handlers)
+    if use_intent:
+        # -p pins the package and lets Android resolve the component, so we
+        # do not have to carry activity names that change between releases.
+        cmd = ("am start -a %s --es query %s -p %s"
+               % (PLAY_FROM_SEARCH, json.dumps(query), pkg))
+        if args.dry_run:
+            print("tier=intent  %s" % cmd)
+            record("play", {"query": query, "app": app, "tier": "intent",
+                            "dry_run": True}, "act", "planned")
+            return 0
+        rc, _out = dev_shell(cmd, timeout=40)
+        if rc != 0:
+            record("play", {"query": query, "app": app, "tier": "intent"},
+                   "act", "failed: the app refused the intent", rc=1)
+            die("%s did not accept the play intent" % app, 4)
+        # Verify by asking media_session, not by assuming. The intent can be
+        # accepted and resolve to a search screen without playing anything.
+        started = None
+        for _ in range(8):
+            time.sleep(0.7)
+            cur = current_session(parse_media_sessions(
+                dev_shell("dumpsys media_session", timeout=30)[1] or ""))
+            if cur and cur.get("package") == pkg and cur.get("state") == "PLAYING":
+                started = cur
+                break
+        if started:
+            record("play", {"query": query, "app": app, "tier": "intent",
+                            "track": started.get("description")}, "act",
+                   "started")
+            print(describe_session(started))
+            return 0
+        # DECLARING the intent is not the same as HONOURING it. Apple Music
+        # declares MEDIA_PLAY_FROM_SEARCH, accepts it, raises itself to the
+        # foreground — and plays nothing. Without the check above we would
+        # have reported "playing" on the strength of `am start` exiting 0,
+        # which is the whole failure this file keeps being about.
+        #
+        # So the ladder cascades: the tier that did not deliver is recorded
+        # as not having delivered, and the next one is tried. What must never
+        # happen is a silent fallback, because then a working tier and a
+        # broken one produce the same output.
+        record("play", {"query": query, "app": app, "tier": "intent"}, "act",
+               "failed: %s took the intent and started no playback" % app,
+               rc=1)
+        sys.stderr.write("phone: %s accepted the play intent but started "
+                         "nothing; falling back to opening its search\n" % app)
+
+    if args.dry_run:
+        why = ("%s does not declare %s on this device — falling back to the "
+               "link" % (app, PLAY_FROM_SEARCH.rsplit(".", 1)[-1])
+               if handlers is not None else
+               "cannot check what %s declares (no device shell) — falling "
+               "back to the link" % app)
+        print("tier=link  %s\n%s" % (url, why))
+        record("play", {"query": query, "app": app, "tier": "link",
+                        "dry_run": True}, "act", "planned")
+        return 0
+    if handlers is not None and not use_intent:
+        # Only true when the app really has no handler. Saying it after an
+        # intent that WAS declared and simply did nothing sends whoever
+        # reads it looking for a missing manifest entry that is present.
+        sys.stderr.write("phone: %s does not declare a play-from-search "
+                         "handler here; opening its search instead\n" % app)
 
     # Same shape as msg: a https link on a phone without the app opens a
     # browser and exits 0, and "playing" gets reported for a web page.
@@ -1456,13 +1571,36 @@ def cmd_play(args):
     except SystemExit as e:
         # Still record it. "I tried to play something and could not" is
         # exactly what the trace is for; silence would read as never asked.
-        record("play", {"query": query, "app": app}, "act",
+        record("play", {"query": query, "app": app, "tier": "link"}, "act",
                "failed: could not open the link", rc=1)
         raise e
-    record("play", {"query": query, "app": app}, "act",
-           "started" if here else
-           "unconfirmed: opened the link, but there is no device shell to "
-           "confirm %s is installed" % app)
+    # Verify the LINK tier the same way the intent tier is verified. The
+    # verb is `play`; if nothing is playing it did not do what it says on
+    # the tin, whichever route it took. Reporting 0 here would put the
+    # disease back one tier down.
+    playing = None
+    if here and have_shell():
+        for _ in range(6):
+            time.sleep(0.7)
+            cur = current_session(parse_media_sessions(
+                dev_shell("dumpsys media_session", timeout=30)[1] or ""))
+            if cur and cur.get("package") == pkg and cur.get("state") == "PLAYING":
+                playing = cur
+                break
+    record("play", {"query": query, "app": app, "tier": "link",
+                    "track": (playing or {}).get("description")}, "act",
+           "started" if playing else
+           ("opened the app; nothing started playing" if here else
+            "unconfirmed: opened the link, but there is no device shell to "
+            "confirm %s is installed" % app),
+           rc=0 if (playing or not here) else 1)
+    if playing:
+        print(describe_session(playing))
+        return 0
+    if here:
+        sys.stderr.write("phone: opened %s but nothing is playing — it may "
+                         "need a tap to choose a result\n" % app)
+        return 5
     return rc
 
 
@@ -2482,6 +2620,8 @@ def build_parser():
     s.add_argument("query", nargs="+")
     s.add_argument("--app")
     s.add_argument("--print-url", action="store_true", dest="print_url")
+    s.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="say which tier would do the work, and do nothing")
 
     s = add("msg", cmd_msg, "message someone (draft, or --send it)")
     s.add_argument("app")

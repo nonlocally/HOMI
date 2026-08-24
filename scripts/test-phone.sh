@@ -975,6 +975,63 @@ if [ $rc -ne 0 ] && [ ! -f "$ST/bad.png" ]; then
 else bad "wrote non-image bytes as a screenshot (rc=$rc out=$out)"; fi
 rm -rf "$ST"
 
+echo "== play should ASK the app, not hunt its UI for a coordinate"
+# Playing a song by searching the app, dumping the whole UI tree to read
+# artist names, and tapping a row is the computer-use pattern. Android has a
+# standard intent for exactly this -- MEDIA_PLAY_FROM_SEARCH -- and the
+# device will say which apps implement it. Crucially they DIFFER: on this
+# Pixel YouTube Music handles it and Apple Music does not. So the handler
+# table has to be read off the device, never hardcoded, and the fallback has
+# to be honest about being a fallback.
+IT="$(mktemp -d)"
+mkintentstub() {   # $1 = packages that handle MEDIA_PLAY_FROM_SEARCH
+  cat > "$IT/adb" <<EOF
+#!/bin/sh
+case "\$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
+  shell)
+    case "\$*" in
+      *"query-activities"*)
+        for p in $1; do
+          printf '      name=%s.MainActivity\n      packageName=%s\n' "\$p" "\$p"
+        done ;;
+      *"pm list packages"*) printf 'package:com.google.android.apps.youtube.music\npackage:com.apple.android.music\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$IT/adb"
+}
+
+mkintentstub "com.google.android.apps.youtube.music"
+out="$(PATH="$IT:$PATH" TMPDIR="$IT" PHONE_LEDGER="$IT/l.jsonl" \
+       "$PHONE" play "criminal" --app ytmusic --dry-run 2>&1)"
+if printf '%s' "$out" | grep -q "MEDIA_PLAY_FROM_SEARCH" \
+   && printf '%s' "$out" | grep -q "criminal"; then
+  ok "an app that declares the intent is asked directly (no UI)"
+else bad "intent route not chosen (got: $out)"; fi
+
+out="$(PATH="$IT:$PATH" TMPDIR="$IT" PHONE_LEDGER="$IT/l2.jsonl" \
+       "$PHONE" play "criminal" --app applemusic --dry-run 2>&1)"
+# Assert on the TIER CHOSEN, not on the absence of the intent name -- the
+# fallback message legitimately names the intent it could not use, and the
+# first version of this check failed on correct output for saying so.
+if printf '%s' "$out" | grep -q "tier=link" \
+   && printf '%s' "$out" | grep -qi "does not declare" \
+   && ! printf '%s' "$out" | grep -q "tier=intent"; then
+  ok "an app that does NOT declare it says so, and says it is falling back"
+else bad "fallback not announced (got: $out)"; fi
+
+# The tier must be in the record. "played it (asked the app)" and "played it
+# (tapped 540,1203)" are different claims about how much to trust the result.
+PATH="$IT:$PATH" TMPDIR="$IT" PHONE_LEDGER="$IT/l3.jsonl" \
+  "$PHONE" play "criminal" --app ytmusic --dry-run >/dev/null 2>&1
+if [ -s "$IT/l3.jsonl" ] && grep -q '"tier": "intent"' "$IT/l3.jsonl"; then
+  ok "the trace records WHICH tier did the work"
+else bad "tier not recorded (got: $(cat "$IT/l3.jsonl" 2>/dev/null))"; fi
+rm -rf "$IT"
+
 echo "== play must not report playing when it opened a web page"
 # The third sibling of the wa.me shape. play hands a https URL to launch(),
 # which opens a BROWSER when the app is absent and returns 0 -- and play
@@ -1027,7 +1084,11 @@ else bad "ledger claims music that never played"; fi
 # The false-refusal guard: ytmusic is a system package, absent from `apps`.
 out="$(PATH="$PT:$PATH" TMPDIR="$PT" PHONE_LEDGER="$PT/p2.jsonl" \
        "$PHONE" play "some song" --app ytmusic 2>&1)"; rc=$?
-if [ $rc -eq 0 ]; then
+# The claim under test is "not mistaken for MISSING", so assert on the
+# failure mode, not the exit code: under a stub nothing can actually play,
+# so "opened it, nothing started" (5) is the honest outcome and must not be
+# read as a regression. Only "not installed" would be the bug.
+if ! printf '%s' "$out" | grep -qi "not installed"; then
   ok "a SYSTEM music app is not mistaken for a missing one"
 else bad "system app wrongly refused (rc=$rc out=$out)"; fi
 
