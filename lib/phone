@@ -1599,15 +1599,160 @@ def cmd_msg(args):
     return 0
 
 
-def cmd_media(args):
+_STATE_RE = re.compile(r"state=([A-Z_]+)\((\d+)\), position=(-?\d+)")
+
+
+def parse_media_sessions(text):
+    """`dumpsys media_session` -> structured sessions.
+
+    This is the phone TELLING us what is playing. The alternative — the one
+    the agent actually used to play a song tonight — was to dump the UI tree,
+    read artist names off the screen and tap a coordinate. That is computer
+    use, and it is the wrong tool when the device will simply answer the
+    question: app, transport state, position, track, and the error if the
+    session is broken.
+    """
+    out, cur = [], None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line.startswith("package="):
+            cur = {"package": line.split("=", 1)[1].strip(), "active": False,
+                   "state": None, "position_ms": None, "description": None,
+                   "error": None}
+            out.append(cur)
+            continue
+        if cur is None:
+            continue
+        if line.startswith("active="):
+            cur["active"] = line.split("=", 1)[1].strip() == "true"
+        elif line.startswith("state=PlaybackState"):
+            m = _STATE_RE.search(line)
+            if m:
+                cur["state"] = m.group(1)
+                cur["position_ms"] = int(m.group(3))
+            # error=... is last on the line and may contain commas/spaces.
+            em = re.search(r"error=(.+?)\}\s*$", line)
+            if em and em.group(1).strip() != "null":
+                cur["error"] = em.group(1).strip()
+        elif line.startswith("metadata:"):
+            body = line.split(":", 1)[1].strip()
+            dm = re.search(r"description=(.*)$", body)
+            if dm and dm.group(1).strip() not in ("", "null"):
+                cur["description"] = dm.group(1).strip()
+    return out
+
+
+def current_session(sessions):
+    """The session that MATTERS.
+
+    Not the first printed and not merely the first active one: an app can
+    hold an active session that is erroring (Spotify sits there logged out,
+    state=ERROR) and dispatching transport keys at it does nothing. Prefer
+    something actually playing, then something paused with a real position,
+    then anything active and not errored.
+    """
+    def rank(s):
+        if s.get("error") or not s.get("active"):
+            return -1
+        if s.get("state") == "PLAYING":
+            return 3
+        if s.get("state") == "PAUSED":
+            return 2
+        return 1 if s.get("state") else 0
+    best = max(sessions, key=rank) if sessions else None
+    return best if best and rank(best) >= 0 else None
+
+
+def describe_session(s):
+    bits = [s["package"], (s.get("state") or "no state").lower()]
+    if s.get("description"):
+        bits.append(s["description"])
+    if s.get("position_ms") not in (None, -1):
+        bits.append("%d:%02d" % divmod(s["position_ms"] // 1000, 60))
+    if s.get("error"):
+        bits.append("error: %s" % s["error"])
+    return "  ".join(bits)
+
+
+def read_media(args):
+    if getattr(args, "from_", None):
+        with open(args.from_, "r", encoding="utf-8", errors="replace") as f:
+            return parse_media_sessions(f.read())
     need_shell()
-    keys = {"pause": "KEYCODE_MEDIA_PAUSE", "play": "KEYCODE_MEDIA_PLAY",
-            "next": "KEYCODE_MEDIA_NEXT", "prev": "KEYCODE_MEDIA_PREVIOUS",
-            "stop": "KEYCODE_MEDIA_STOP"}
-    rc, _ = dev_shell("input keyevent %s" % keys[args.action])
-    record("media", args.action, "act",
-           "dispatched" if rc == 0 else "failed")
-    return 0 if rc == 0 else 1
+    _rc, out = dev_shell("dumpsys media_session", timeout=40)
+    return parse_media_sessions(out or "")
+
+
+# The transport keys `cmd media_session dispatch` accepts. NOT
+# `input keyevent`: that injects a key into whatever happens to hold audio
+# focus and exits 0 whether or not anything consumed it — the same
+# report-success-you-did-not-observe shape as `input tap`. media_session
+# targets the real session and, with dumpsys, lets us check afterwards.
+DISPATCH = {"play": "play", "pause": "pause", "toggle": "play-pause",
+            "next": "next", "prev": "previous", "stop": "stop"}
+
+
+def cmd_media(args):
+    sessions = read_media(args)
+    if args.action in (None, "status"):
+        if args.current:
+            cur = current_session(sessions)
+            if not cur:
+                print("(nothing is playing)")
+                return 0
+            sessions = [cur]
+        if args.json:
+            print(json.dumps(sessions, indent=2))
+            return 0
+        if not sessions:
+            print("(no media sessions)")
+            return 0
+        for s in sessions:
+            print(describe_session(s))
+        return 0
+
+    need_shell()
+    before = current_session(sessions)
+    rc, _out = dev_shell("cmd media_session dispatch %s"
+                         % DISPATCH[args.action], timeout=25)
+    if rc != 0:
+        record("media", {"action": args.action}, "act", "failed: dispatch", rc=1)
+        die("could not dispatch %s to the media session" % args.action, 4)
+
+    # Watch for the change rather than assuming it. A transport key can be
+    # accepted and ignored — the app may not honour it, or the session may
+    # have gone away between the read and the dispatch.
+    after = None
+    for _ in range(6):
+        time.sleep(0.5)
+        after = current_session(read_media(args))
+        if _media_moved(before, after, args.action):
+            break
+    moved = _media_moved(before, after, args.action)
+    record("media", {"action": args.action,
+                     "package": (after or before or {}).get("package"),
+                     "before": (before or {}).get("state"),
+                     "after": (after or {}).get("state")}, "act",
+           "%s -> %s" % (args.action, (after or {}).get("state") or "gone")
+           if moved else
+           "unconfirmed: dispatched %s, state did not change" % args.action)
+    if after:
+        print(describe_session(after))
+    if not moved:
+        sys.stderr.write("phone: dispatched %s but the session did not "
+                         "change — it may have been ignored\n" % args.action)
+        return 5
+    return 0
+
+
+def _media_moved(before, after, action):
+    """Did the dispatch actually do anything we can see?"""
+    if after is None:
+        return False
+    if action in ("play", "pause", "toggle", "stop"):
+        return (before or {}).get("state") != after.get("state")
+    # next/prev change the track, not the transport state.
+    return (before or {}).get("description") != after.get("description")
 
 
 def cmd_screen(args):
@@ -2222,8 +2367,14 @@ def build_parser():
     s.add_argument("--actor", help="only what this driver did")
     s.add_argument("--json", action="store_true")
 
-    s = add("media", cmd_media, "pause/play/next/prev/stop")
-    s.add_argument("action", choices=["pause", "play", "next", "prev", "stop"])
+    s = add("media", cmd_media, "what is playing, and transport control")
+    s.add_argument("action", nargs="?",
+                   choices=["status", "pause", "play", "toggle", "next",
+                            "prev", "stop"])
+    s.add_argument("--current", action="store_true",
+                   help="only the session that actually matters")
+    s.add_argument("--from", dest="from_", help="parse a dumpsys capture")
+    s.add_argument("--json", action="store_true")
 
     s = add("screen", cmd_screen, "screenshot to a png")
     s.add_argument("--out")

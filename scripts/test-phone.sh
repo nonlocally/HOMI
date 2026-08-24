@@ -780,6 +780,81 @@ if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
   ok "no actor set means no actor forced on the device"
 else bad "empty actor forced across (got: $out)"; fi
 
+cat > "$T/media.txt" <<'MEDIAEOF'
+  Sessions Stack - have 3 sessions:
+    androidx.media3.session.id.com.apple.android.music com.apple.android.music/androidx.media3.session.id.com.apple.android.music/11 (userId=0)
+      ownerPid=25851, ownerUid=10338, userId=0
+      package=com.apple.android.music
+      launchIntent=PendingIntent{c8989d: PendingIntentRecord{eac8ff1 com.apple.android.music startActivity}}
+      mediaButtonReceiver=null
+      active=true
+      flags=7
+      rating type=0
+      controllers: 10
+      state=PlaybackState {state=PAUSED(2), position=45793, buffered position=0, speed=0.0, updated=209717132, actions=7339997, custom actions=[Action:mName='Favorite, mIcon=2131232741], active item id=0, error=null}
+      audioAttrs=AudioAttributes: usage=USAGE_MEDIA content=CONTENT_TYPE_UNKNOWN
+      volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
+      metadata: size=43, description=Criminal, Akon, Vishal Dadlani & Shruti Pathak, Ra-One (Original Motion Picture Soundtrack)
+      queueTitle=null, size=1
+    spotify-media-session com.spotify.music/spotify-media-session/8 (userId=0)
+      ownerPid=24502, ownerUid=10337, userId=0
+      package=com.spotify.music
+      active=true
+      flags=3
+      controllers: 2
+      state=PlaybackState {state=ERROR(7), position=-1, buffered position=0, speed=0.0, updated=133344791, actions=141312, custom actions=[], active item id=-1, error=Please login to use Spotify.}
+      volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
+      metadata: null
+      queueTitle=, size=0
+    play_movies_media com.google.android.videos/play_movies_media/10 (userId=0)
+      ownerPid=23191, ownerUid=10208, userId=0
+      package=com.google.android.videos
+      active=false
+      flags=3
+      controllers: 0
+      state=null
+      metadata: null
+MEDIAEOF
+
+echo "== media: the phone already knows what is playing, structured"
+# Driving Apple Music by dumping the UI tree and tapping a coordinate is the
+# computer-use pattern -- the wrong tool when we hold shell UID. dumpsys
+# media_session carries the app, the transport state, the position and the
+# track, and cmd media_session dispatches transport keys to the right
+# session. No screen, no coordinates, works with the display off.
+out="$("$PHONE" media --from "$T/media.txt" --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+by = {s["package"]: s for s in d}
+am = by["com.apple.android.music"]
+assert am["state"] == "PAUSED", am
+assert am["position_ms"] == 45793, am
+assert am["active"] is True, am
+assert "Criminal" in (am["description"] or ""), am
+sp = by["com.spotify.music"]
+assert sp["state"] == "ERROR", sp
+assert "login" in (sp["error"] or "").lower(), sp
+assert sp["description"] is None, sp
+mv = by["com.google.android.videos"]
+assert mv["active"] is False and mv["state"] is None, mv
+' 2>/dev/null; then
+  ok "media parses sessions: app, state, position, track, error"
+else bad "media session parse (got: $out)"; fi
+
+out="$("$PHONE" media --from "$T/media.txt" 2>&1)"
+if printf '%s' "$out" | grep -q "Criminal" && printf '%s' "$out" | grep -qi "paused"; then
+  ok "media prints what is playing in one line a human can read"
+else bad "media human output (got: $out)"; fi
+
+# The session that MATTERS is the active one holding real playback, not the
+# first one printed, and not the one erroring.
+out="$("$PHONE" media --from "$T/media.txt" --current 2>&1)"
+if printf '%s' "$out" | grep -q "com.apple.android.music" \
+   && ! printf '%s' "$out" | grep -q "spotify"; then
+  ok "--current picks the real session, not an errored or inactive one"
+else bad "--current selection (got: $out)"; fi
+
 echo "== a screenshot has to be able to cross the hop at all"
 # The skill tells the agent: when the tree fails you, take a screenshot and
 # look at the picture. From a controller that never worked. Binary cannot
