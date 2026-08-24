@@ -121,6 +121,17 @@ _homi_install_launchd() {
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <!-- A LaunchAgent with no ProcessType is spawned as a DAEMON, which means
+       BACKGROUND QoS, and every process it spawns inherits that class. There
+       is no error and no log line; work simply takes several times longer.
+       Measured on this machine: identical CPU-bound work 0.34s at default
+       against 1.23-1.70s under background QoS, and the sibling board daemon
+       ran its router in 46s as a child of launchd versus 4.5s from a shell.
+       The homi is latency-facing infrastructure - a person waits on the other
+       end of mail delivery, a link redial and an ask - so it is Interactive.
+       Verify with: launchctl print gui/$UID/<label> | grep 'spawn type'
+       (the plist is what we wrote; launchd is what actually runs). -->
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$state/launchd.log</string>
   <key>StandardErrorPath</key><string>$state/launchd.log</string>
 </dict>

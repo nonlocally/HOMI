@@ -39,6 +39,26 @@ while [ $SECONDS -lt $deadline ]; do
 done
 if [ "$revived" = "1" ]; then ok "launchd respawned the daemon (pid $PID1 -> $PID2)"; else bad "launchd respawned the daemon"; fi
 
+echo "== QoS: a LaunchAgent with no ProcessType is spawned as a DAEMON, which is"
+echo "   BACKGROUND QoS, and EVERY process it spawns inherits the throttle. No"
+echo "   error, no log line — work just takes several times longer. Measured on"
+echo "   this machine: identical CPU-bound work 0.34s at default, 1.23-1.70s"
+echo "   under background QoS."
+PL="$HOME/Library/LaunchAgents/$HOMI_LABEL.plist"
+if grep -q "ProcessType" "$PL" 2>/dev/null; then
+  ok "the generated plist declares a ProcessType"
+else bad "the generated plist declares a ProcessType (silent background throttle)"; fi
+if grep -A1 "ProcessType" "$PL" 2>/dev/null | grep -qi "Interactive"; then
+  ok "ProcessType is Interactive"
+else bad "ProcessType is Interactive"; fi
+# The plist is what we WROTE; launchd is what actually runs. Ask launchd.
+if launchctl print "gui/$(id -u)/$HOMI_LABEL" 2>/dev/null | grep -q "spawn type = interactive"; then
+  ok "launchd agrees: spawn type = interactive"
+else
+  st="$(launchctl print "gui/$(id -u)/$HOMI_LABEL" 2>/dev/null | grep -o "spawn type = [a-z]*" | head -1)"
+  bad "launchd reports ${st:-no spawn type} (the plist is not what runs)"
+fi
+
 echo "== uninstall"
 if "$COMM" homi uninstall >/dev/null 2>&1; then ok "pm uninstall"; else bad "pm uninstall"; fi
 sleep 1.5
