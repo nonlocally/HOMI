@@ -145,7 +145,8 @@ class Bridge implements Runnable {
                     || "listen".equals(op)
                     || "say".equals(op)
                     || "say_status".equals(op)
-                    || "shut_up".equals(op));
+                    || "shut_up".equals(op)
+                    || "await_turn".equals(op));
             if (needsListener && (!Listener.isConnected() || Listener.get() == null)) {
                 return err(r, "notification listener is not bound — "
                               + "cmd notification allow_listener, then reboot "
@@ -170,6 +171,23 @@ class Bridge implements Runnable {
                     for (Map.Entry<String, Object> e :
                             voice.download(q.optInt("wait", 60)).entrySet()) {
                         r.put(e.getKey(), e.getValue());
+                    }
+                    return r;
+                }
+                case "await_turn": {
+                    // LONG POLL. The controller blocks here until someone
+                    // taps Talk and speaks, so the microphone opens only for
+                    // the length of a sentence instead of continuously — the
+                    // difference between a phone that lasts the day and one
+                    // that went 50% to 20% in two hours.
+                    String heard = Turns.take(q.optInt("timeout", 300));
+                    if (heard == null) {
+                        r.put("ok", false);
+                        r.put("err", "no turn within the wait");
+                        r.put("timeout", true);   // NOT a failure; poll again
+                    } else {
+                        r.put("ok", true);
+                        r.put("text", heard);
                     }
                     return r;
                 }

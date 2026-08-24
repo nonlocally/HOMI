@@ -57,11 +57,23 @@ public class VoiceService extends Service {
         ch.setShowBadge(false);
         nm.createNotificationChannel(ch);
 
+        // The Talk button IS the interface. Everything else this app does is
+        // invisible by design; this is the one part a person touches.
+        android.app.PendingIntent talk = android.app.PendingIntent.getBroadcast(
+            this, 0,
+            new Intent(TalkReceiver.ACTION).setPackage(getPackageName()),
+            android.app.PendingIntent.FLAG_IMMUTABLE
+                | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+
         Notification n = new Notification.Builder(this, CHANNEL)
             .setContentTitle("phonebridge")
-            .setContentText("voice and notifications available")
+            .setContentText("tap Talk to speak")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
+            .addAction(new Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(
+                    this, android.R.drawable.ic_btn_speak_now),
+                "Talk", talk).build())
             .build();
 
         startForeground(NOTIF_ID, n,

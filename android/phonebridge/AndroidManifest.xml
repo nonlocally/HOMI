@@ -83,5 +83,31 @@
             android:name=".VoiceService"
             android:exported="false"
             android:foregroundServiceType="microphone"/>
+
+        <!-- The Talk button on the notification. A receiver, not an
+             activity: tapping Talk must not bring anything to the screen,
+             since the point is to speak without looking at the phone. -->
+        <receiver
+            android:name=".TalkReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.aadarwal.phonebridge.TALK"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- A Quick Settings tile, so Talk is one swipe away from the lock
+             screen. The icon is a PLATFORM drawable — this app ships no
+             resources of its own, which is what keeps the build to four
+             tool invocations and no Gradle. -->
+        <service
+            android:name=".TalkTile"
+            android:exported="true"
+            android:icon="@android:drawable/ic_btn_speak_now"
+            android:label="Talk"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE"/>
+            </intent-filter>
+        </service>
     </application>
 </manifest>

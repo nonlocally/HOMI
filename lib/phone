@@ -3005,6 +3005,13 @@ def fast_answer(text):
 # it would not be on a screen — "peer-device" is the better spoken answer,
 # and every extra clause is another second of someone waiting to talk.
 
+# THIS file, resolved from the module rather than argv[0]. argv[0] is right
+# when someone types `phone`, and wrong the moment this is imported, exec'd,
+# or invoked through a wrapper — where the router then briefs codex to run a
+# binary that does not exist. It spent 53 seconds discovering that and
+# answered ESCALATE, which reads exactly like a question it judged too hard.
+PHONE_SELF = os.path.realpath(globals().get("__file__") or sys.argv[0])
+
 CODEX_ROUTER = ["codex", "exec", "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "-m", "gpt-5.6-luna",
@@ -3030,7 +3037,7 @@ def _ask_codex(text, device, timeout):
         "Answer questions on ANY subject from your own knowledge. Reply with "
         "exactly ESCALATE only if it needs multi-step action, the screen, or "
         "sending something to a person.\n"
-        "Question: %s" % (os.path.realpath(sys.argv[0]), device or "", text))
+        "Question: %s" % (PHONE_SELF, device or "", text))
     try:
         pr = subprocess.run(CODEX_ROUTER + [brief], capture_output=True,
                             text=True, timeout=timeout)
@@ -3078,12 +3085,39 @@ def cmd_talk(args):
     wake = (args.wake or "").strip().lower()
 
     while True:
-        heard = bridge_call("listen", device=device,
-                            wait=args.listen + 20, timeout=args.listen)
-        if heard is None:
-            die("the phonebridge app is not reachable — is it installed and "
-                "is its voice service running? (am start -n "
-                "com.aadarwal.phonebridge/.Boot)", 3)
+        if args.tap:
+            # WAIT FOR THE PERSON, do not hold the microphone.
+            #
+            # The other way round — us calling listen — opened the mic
+            # whether or not anyone meant to speak. That is what took the
+            # phone from 50% to 20% in two hours, and it is why the
+            # recogniser transcribed a television during testing. Here the
+            # tap starts the turn, recognition runs on the device, and the
+            # mic is open for the length of one sentence.
+            #
+            # A long poll rather than repeated polling: the bridge holds the
+            # connection until there is something to hand over, so a tap is
+            # delivered immediately and an idle hour costs nothing.
+            heard = bridge_call("await_turn", device=device,
+                                wait=args.wait + 20, timeout=args.wait)
+            if heard is None:
+                die("the phonebridge app is not reachable — is it installed, "
+                    "and is its voice service running? (am start -n "
+                    "com.aadarwal.phonebridge/.Boot)", 3)
+            if heard.get("timeout"):
+                # Nobody spoke. Not a failure — go round again.
+                if not args.loop:
+                    sys.stderr.write("phone: nobody tapped Talk within %ds\n"
+                                     % args.wait)
+                    return 1
+                continue
+        else:
+            heard = bridge_call("listen", device=device,
+                                wait=args.listen + 20, timeout=args.listen)
+            if heard is None:
+                die("the phonebridge app is not reachable — is it installed "
+                    "and is its voice service running? (am start -n "
+                    "com.aadarwal.phonebridge/.Boot)", 3)
         text = (heard.get("text") or "").strip()
         if not text:
             if not args.loop:
@@ -3594,7 +3628,14 @@ def build_parser():
     s.add_argument("--to", default="tongs", help="which agent to ask")
     s.add_argument("--from", dest="sender", help="who is asking")
     s.add_argument("--listen", type=int, default=25,
-                   help="seconds to wait for speech")
+                   help="seconds to wait for speech (always-listening mode)")
+    s.add_argument("--tap", action="store_true",
+                   help="wait for the Talk button instead of holding the "
+                        "microphone open — the mic opens only while someone "
+                        "is actually speaking")
+    s.add_argument("--wait", type=int, default=300,
+                   help="with --tap, seconds to wait for a tap before "
+                        "looping round")
     s.add_argument("--timeout", type=int, default=180,
                    help="seconds to wait for the agent")
     s.add_argument("--wake", help="only act on speech containing this phrase")
