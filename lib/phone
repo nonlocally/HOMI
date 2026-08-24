@@ -2990,6 +2990,60 @@ def fast_answer(text):
     return None
 
 
+
+# The middle tier can be EITHER a warm fabric agent (a Claude Code session,
+# addressed by name) or codex driven headlessly. They measured close enough
+# that this is a preference rather than a finding:
+#
+#   sistine chapel   haiku 2.0s "peer-device"
+#                    luna  5.6s "peer-device painted the Sistine Chapel
+#                                ceiling, completing it between 1508 and 1512"
+#   train arithmetic haiku 4.5s "4 15"        luna 3.3s "It arrives at 4:15."
+#   battery          haiku 6.5s               luna 8.8s
+#
+# Neither got anything wrong. Note luna's verbosity is a real cost HERE that
+# it would not be on a screen — "peer-device" is the better spoken answer,
+# and every extra clause is another second of someone waiting to talk.
+
+CODEX_ROUTER = ["codex", "exec", "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-m", "gpt-5.6-luna",
+                "-c", "model_reasoning_effort=low",
+                "-c", "service_tier=fast",
+                # MCP off deliberately. A dangling homi entry pointing at a
+                # wiped temp dir was costing 7.4s of handshake timeout on
+                # EVERY codex invocation on this machine — 11.05s down to
+                # 3.66s once repointed. The router has no use for MCP, so it
+                # does not pay for it at all.
+                "-c", "mcp_servers={}"]
+
+
+def _ask_codex(text, device, timeout):
+    """The middle tier, run headlessly. Returns (answer, err)."""
+    brief = (
+        "You answer out loud for someone LISTENING. One or two SHORT "
+        "sentences, no markdown, no preamble, numbers as a person says "
+        "them.\n"
+        "You may run: %s --device %s <verb>\n"
+        "verbs: battery | media --current | notifs | cal --days 1 | "
+        "foreground | contacts <name>\n"
+        "Answer questions on ANY subject from your own knowledge. Reply with "
+        "exactly ESCALATE only if it needs multi-step action, the screen, or "
+        "sending something to a person.\n"
+        "Question: %s" % (os.path.realpath(sys.argv[0]), device or "", text))
+    try:
+        pr = subprocess.run(CODEX_ROUTER + [brief], capture_output=True,
+                            text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "codex did not run (%s)" % e
+    lines = [l for l in (pr.stdout or "").splitlines()
+             if l.strip() and not l.startswith("[")
+             and "tokens used" not in l.lower()]
+    if not lines:
+        return None, "codex returned nothing"
+    return lines[-1].strip(), None
+
+
 def _ask_agent(to, text, sender, timeout):
     """Put a spoken turn to an agent and wait for its answer."""
     argv = ["communicate", "homi", "ask", to, text,
@@ -3090,8 +3144,11 @@ def cmd_talk(args):
             sys.stderr.write("phone: asking %s...\n" % args.router)
             sys.stderr.flush()
             t_r = time.time()
-            quick, rerr = _ask_agent(args.router, "[spoken] " + text,
-                                     sender, args.router_timeout)
+            if args.router == "codex":
+                quick, rerr = _ask_codex(text, device, args.router_timeout)
+            else:
+                quick, rerr = _ask_agent(args.router, "[spoken] " + text,
+                                         sender, args.router_timeout)
             took = time.time() - t_r
             if quick and "ESCALATE" not in quick.upper():
                 said = bridge_call("say", device=device, text=quick, wait=120)
@@ -3543,9 +3600,9 @@ def build_parser():
     s.add_argument("--wake", help="only act on speech containing this phrase")
     s.add_argument("--loop", action="store_true", help="keep listening")
     s.add_argument("--verbose", action="store_true")
-    s.add_argument("--router", default="swift",
-                   help="small warm model tried before the agent "
-                        "(empty string to skip it)")
+    s.add_argument("--router", default="codex",
+                   help="middle tier: 'codex' (gpt-5.6-luna, fast, low), a "
+                        "fabric agent name like 'swift', or '' to skip it")
     s.add_argument("--router-timeout", type=int, default=60,
                    dest="router_timeout")
     s.add_argument("--no-fast", action="store_true", dest="no_fast",
