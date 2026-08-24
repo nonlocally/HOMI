@@ -1008,6 +1008,62 @@ if printf '%s' "$out" | grep -q "<- keys" ; then
   ok "and it is marked in the human view, so nobody has to guess"
 else bad "button session unmarked in human output (got: $out)"; fi
 
+echo "== the device's stderr must not vanish on the way back"
+# Found by ranger, and it is the signature failure of this whole codebase in
+# a new place: a denied `content query` comes back as RC=0 with NO output,
+# which is byte-for-byte identical to "readable and empty". The verb built
+# specifically to tell those two apart could not tell them apart.
+#
+# The stub `adb` here is a REAL shell, so the redirection semantics under
+# test are the actual ones, not a string I asserted about.
+ET="$(mktemp -d)"
+cat > "$ET/adb" <<'EEOF'
+#!/bin/sh
+case "$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
+  shell)   shift; sh -c "$*" ;;
+  *) exit 0 ;;
+esac
+EEOF
+chmod +x "$ET/adb"
+
+out="$(PATH="$ET:$PATH" TMPDIR="$ET" PHONE_LEDGER="$ET/l.jsonl" \
+       "$PHONE" sh 'echo OUT; echo ERR >&2' 2>/dev/null)"
+if printf '%s' "$out" | grep -q "OUT" && printf '%s' "$out" | grep -q "ERR"; then
+  ok "phone sh surfaces the device's stderr, not just its stdout"
+else bad "device stderr dropped (got: $out)"; fi
+
+# And the load-bearing property of the wrapper itself, exercised by a REAL
+# shell rather than an adb stub. Two things have to hold together: stderr
+# comes back, AND the command's own exit status survives — a subshell or a
+# pipe would give us the wrapper's status instead, which would turn every
+# failure into a success at the exact moment we started reading stderr.
+if python3 - <<'PYEOF'
+import subprocess, sys, importlib.util, pathlib
+spec = importlib.util.spec_from_loader("phone", None)
+src = pathlib.Path("lib/phone").read_text()
+ns = {}
+exec(compile(src.split("def dev_shell(")[0], "phone", "exec"), ns)
+merged = ns["merged"]
+
+# stderr arrives
+r = subprocess.run(["sh", "-c", merged("echo OUT; echo ERR >&2")],
+                   capture_output=True, text=True)
+assert "OUT" in r.stdout and "ERR" in r.stdout, r
+# exit status is the COMMAND's, not the wrapper's
+r = subprocess.run(["sh", "-c", merged("echo boom >&2; exit 7")],
+                   capture_output=True, text=True)
+assert r.returncode == 7, r.returncode
+assert "boom" in r.stdout, r
+# and success stays success
+r = subprocess.run(["sh", "-c", merged("true")], capture_output=True, text=True)
+assert r.returncode == 0, r.returncode
+PYEOF
+then
+  ok "the wrapper returns stderr AND preserves the command's exit status"
+else bad "merged() wrapper semantics"; fi
+rm -rf "$ET"
+
 echo "== capabilities: ask the device, do not trust a table in a document"
 # Every capability fact won tonight is dated. Apple Music declares
 # MEDIA_PLAY_FROM_SEARCH today; shell holds READ_SMS on Android 16 today.
