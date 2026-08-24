@@ -339,20 +339,43 @@ the `events` table, which does not.
 ## Messages
 
 ### Reply to a message without touching the screen
-**Route:** none yet. **Established:** 2026-08-23.
+**Route:** none. **Established:** 2026-08-23. **Premise corrected:**
+2026-08-23 — see below.
 
-There are 26 live direct-reply (`RemoteInput`) actions in the notification
-dump at any given moment, so the capability is right there. But shell
-**cannot** fire one: a `PendingIntent` is a live Binder token held in
-`system_server`, and `dumpsys` prints only a description of it. There is no
-path from that text back to a fireable object, by design.
+The conclusion stands and the reason for it is unchanged: a `PendingIntent` is
+a live Binder token held in `system_server`, and `dumpsys` prints only a
+*description* of it. There is no path from that text back to a fireable
+object, by design. Firing one needs a process holding the live
+`Notification.Action` — a bound `NotificationListenerService`. Termux:API has
+listener access on this device but exposes list-only; reply is unimplemented
+upstream.
 
-Firing one requires a process holding the live `Notification.Action` — i.e. a
-bound `NotificationListenerService`. Termux:API already *has* listener access
-on this device but exposes list-only; reply is unimplemented upstream (three
-open feature requests).
+**The premise was wrong, though, and it is worth correcting loudly.** This
+entry used to say there were "26 live direct-reply (`RemoteInput`) actions in
+the notification dump at any given moment, so the capability is right there".
+There are not. All 26 hits are one extras key, printed once per notification
+record and **null every time**:
 
-Under investigation. Nothing here is settled.
+    $ phone sh 'dumpsys notification --noredact 2>&1 | grep -i remoteInputHistory
+                | sort | uniq -c'
+    26 android.remoteInputHistory=null
+
+`android.remoteInputHistory` is a standard field on every notification, not an
+action. Counting it counted notifications. Searching for actual reply actions
+finds **none** — `grep -c "Action\["` returns 0 — and the packages owning
+those 26 lines are Weather, Turbo, Tailscale, Apple Music and YouTube, none of
+which has a reply box.
+
+So the honest state is stronger than "we cannot fire one": **there is
+currently nothing to fire.** This phone has no messaging notifications at all,
+which is consistent with an out-of-service SIM, an empty SMS table, and no
+third-party messenger installed. Whether the shell could reach a reply action
+if one existed remains unproven either way — and untestable here without
+someone sending a message, which the charter forbids arranging.
+
+Note also that a case-sensitive `grep RemoteInput` returns **0** while
+`grep -i` returns 26. The field is `remoteInputHistory`. Getting that wrong in
+either direction produces a confident number and a wrong story.
 
 ---
 
@@ -375,6 +398,90 @@ Android *group summaries*: `title: ""`, `content: ""`, and a `tag` containing
 Filter on `"::SUMMARY::" not in tag` if you want one line per actual item;
 `phone notifs` currently prints both, which is why YouTube appears twice per
 video.
+
+### What `--json` actually carries
+**Verified:** 2026-08-23, Android 16 (sdk 36), 23 notifications from 12 apps.
+
+Exactly **eight** fields, and only three are always populated:
+
+| field | populated | notes |
+|---|---|---|
+| `key` | 23/23 | `userId\|pkg\|id\|tag\|uid` — the join key to `dumpsys` |
+| `packageName` | 23/23 | |
+| `when` | 23/23 | but see below — one of them is 1969 |
+| `title` | 17/23 | empty on every group summary |
+| `content` | 16/23 | |
+| `tag` | 15/23 | `null` for single-notification apps |
+| `group` | 13/23 | set only for grouped apps |
+| `id` | 10/23 | often 0 |
+
+**`lines`, `bigText` and `text` never appear.** `body_of()` falls through to
+them for MessagingStyle notifications — group chats, the ones that matter —
+but on this device the listener does not emit them at all, so that fallback
+cannot fire. Whether a real MessagingStyle notification would carry them here
+is **untested**: there are none on this phone to try (see below).
+
+`notifs` does **not** go through the corrupting bulk-read path. It calls
+`termux-notification-list` — a real `NotificationListenerService` — which
+returns ~8 KB. The equivalent `dumpsys notification --noredact` is **545 KB**,
+and reading *that* through the bridge is exactly the hazard described under
+"Large reads". Five consecutive `notifs --json` runs were byte-identical.
+**This is the one bulky-looking surface you can trust.**
+
+### Group summaries, structurally
+**Verified:** 2026-08-23. 6 of 23 were summaries.
+
+A summary has **`group` set, and `title` and `content` both empty**. Google's
+apps also put `::SUMMARY::` in the `tag`, but the empty-title-and-content rule
+does not depend on that convention:
+
+    summaries = [n for n in items
+                 if n.get("group") and not n.get("title") and not n.get("content")]
+
+Children carry the same `group` and a `when` within a second of the summary's.
+`phone notifs` prints both, which is why YouTube appears twice per video.
+Drop summaries and 23 items become 17 real ones.
+
+### Telling a real event from app chrome
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+The `--json` fields cannot do it — nothing in those eight says "this is an
+event". The signal is `flags`, which lives only in `dumpsys`:
+
+| flags | what it is | examples here |
+|---|---|---|
+| `ONGOING_EVENT` / `NO_CLEAR` / `FOREGROUND_SERVICE` | permanent service chrome, never news | phonebridge, Termux, Tailscale |
+| `AUTO_CANCEL` | a real, dismissible event | weather, GMS, Willow, YouTube, Turbo |
+| `ONLY_ALERT_ONCE\|NO_CLEAR` | media transport | Apple Music |
+
+Filter it on the device so the read stays small:
+
+    phone sh 'dumpsys notification --noredact 2>&1 |
+              grep -o "pkg=[^ ]* .*flags=[A-Z_|]*"'
+
+**But the discriminator you actually want is not available on this phone.**
+A notification with a *direct-reply action* is almost certainly a message from
+a person — and there are **zero** of those here (next section). Every one of
+the 23 notifications present is app noise. So "tell a real message from noise"
+is, today, untestable on this device rather than solved.
+
+### `when` — three traps
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+1. **It is device-local time, and the controller's clock disagrees.** Read
+   back to back: controller `23:31:32`, device `22:31:34` — **an hour apart**.
+   `--since` compares against these device-local strings, so a window computed
+   from the controller's clock is off by an hour and silently returns the
+   wrong set. Get "now" from the phone: `phone sh 'date "+%Y-%m-%d %H:%M:%S"'`.
+2. **Not every notification sets it.** Apple Music's reads
+   `1969-12-31 18:00:00` — epoch 0. Since `phone notifs` sorts by `when`
+   descending, **the currently-playing track sorts last**, looking like the
+   oldest thing on the phone. Media and ongoing notifications are the ones to
+   watch for.
+3. A summary and its children share `when` to within a second, so it is no
+   help in separating them. Use the structural rule above.
+
+In `dumpsys` the same value appears raw as `when=<epoch-millis>/<epoch-millis>`.
 
 ### App names once resolved to the wrong app — **fixed 2026-08-23**
 **Was true until:** `0bce460` *"an app name now resolves to that app, or to
