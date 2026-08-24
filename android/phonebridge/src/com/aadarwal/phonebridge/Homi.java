@@ -14,14 +14,20 @@ import android.widget.FrameLayout;
 import java.util.Map;
 
 /**
- * homi — the window onto the fabric.
+ * The transcript view — one conversation, rendered by the fabric.
  *
- * NOT a rewrite of the board. The fabric already renders agents, merged
- * conversations and device state, and the mailbox is the source of truth for
- * all of it. Reimplementing any of that here would make the phone a SECOND
- * source of truth, which is the one thing this app must never become — a
- * phone is the device most likely to be lost, wiped, or flat, and history
- * that exists only here is unreachable exactly when it matters.
+ * This was the whole app once, and being the whole app is what made homi feel
+ * like a bookmark: you opened it and got a web page you could already reach
+ * from Chrome. Home now owns the front door, and this is what opens when you
+ * tap an agent.
+ *
+ * Still NOT a rewrite of the board. The fabric already renders merged
+ * conversations, and the mailbox is the source of truth for all of it.
+ * Reimplementing THAT here would make the phone a second source of truth,
+ * which is the one thing this app must never become — a phone is the device
+ * most likely to be lost, wiped, or flat, and history that exists only here is
+ * unreachable exactly when it matters. A native home screen is a second VIEW,
+ * which costs nothing; a native message store would be a second TRUTH.
  *
  * So this is a shell that supplies the three things a browser on Android
  * cannot, all of which already work in this app:
@@ -42,6 +48,11 @@ import java.util.Map;
  * app to four build tools and no Gradle.
  */
 public class Homi extends Activity {
+
+    /** Which conversation to open. Absent means the board's own index. */
+    static final String EXTRA_URL = "com.aadarwal.phonebridge.URL";
+    /** Only for the task label in Recents — the page renders its own header. */
+    static final String EXTRA_TITLE = "com.aadarwal.phonebridge.TITLE";
 
     // The fabric's own front end. Reachable from the phone over Tailscale.
     private static final String BOARD = "https://agents.aadarwal.com/";
@@ -68,12 +79,28 @@ public class Homi extends Activity {
         web.addJavascriptInterface(new Bridge_(), "homi");
 
         FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Ui.BG);
+        // NO inset padding here, unlike Home. The board's own pages are built
+        // for edge to edge — viewport-fit=cover plus env(safe-area-inset-*) —
+        // so padding the container as well pushed the page's header down by
+        // the height of the status bar TWICE and left a black band above it.
+        // Native views need the insets applied for them; a page that already
+        // asked for the cutout does not.
         root.addView(web, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
-        web.loadUrl(BOARD);
+        String url = getIntent() == null ? null
+                     : getIntent().getStringExtra(EXTRA_URL);
+        // Only ever our own board. An Intent extra is an input, and an app
+        // that will load whatever URL it is handed is one any other app on the
+        // phone can point at anything.
+        if (url == null || !url.startsWith(Api.BASE + "/")) url = BOARD;
+        String label = getIntent() == null ? null
+                       : getIntent().getStringExtra(EXTRA_TITLE);
+        if (label != null && !label.isEmpty()) setTitle(label);
+        web.loadUrl(url);
         // The bridge and the voice service belong to the app, not to this
         // window — opening homi should not be what makes voice work.
         VoiceService.ensureRunning(this);
