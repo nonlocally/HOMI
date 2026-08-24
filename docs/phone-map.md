@@ -43,6 +43,23 @@ phone --device aadarshs-pixel-10 capabilities
 2026-05-05. Shell tier via Shizuku; `phone` reaches it either on-device or
 from a controller over a forwarded socket.
 
+### Which `phone` you are running matters
+**Verified:** 2026-08-23.
+
+There is more than one `lib/phone` on this machine and they do not have the
+same verbs. `ranger`'s `launch.sh` puts the **main checkout** on `PATH`
+(`communicate/lib`), and that build is older — it has no `capabilities`, no
+`media --current`, no `contacts`, no `cal`. Running the first command this
+charter tells you to run gets you:
+
+    phone: unknown verb 'capabilities'
+
+The current build is the one in the worktree
+(`.claude/worktrees/ranger/lib/phone`). If a verb the map documents does not
+exist, check which binary you resolved before concluding the map is stale:
+
+    which phone && phone --help | head -3
+
 ---
 
 ## Music
@@ -84,8 +101,60 @@ the foreground, and starts nothing; `media --current` still reads PAUSED
 afterwards. Declaring an intent is not honouring it. For Apple Music,
 search-and-play still needs the screen.
 
-Untested: whether YouTube Music honours it (it declares it). Worth being the
-first thing checked.
+**YouTube Music honours the SEARCH half and not the PLAY half.** Fired
+`-a MEDIA_PLAY_FROM_SEARCH --es query "criminal ra one" -p
+com.google.android.apps.youtube.music`: it came to the foreground, resolved
+the query *correctly*, and built a real queue —
+
+    metadata: description=Criminal, Vishal Dadlani, Akon & Shruti Pathak
+    queueTitle=Up next, size=25
+    state=PlaybackState {state=PAUSED(2), position=0, speed=1.0}
+
+— and then sat there. `position=0` and the session's `updated=` stamp did not
+move across 10s. `dumpsys media_session`'s "Audio playback (lastly played
+comes first)" listed only Apple Music, so YouTube Music produced no audio at
+all. Fired a second time at an already-warm, already-foreground YouTube
+Music: identical, and `updated=` did not even change, so the second intent
+moved nothing.
+
+So the right summary is not "Apple Music ignores it, YouTube Music works".
+Both fall short, differently, and the difference matters to a caller:
+
+| app | takes intent | resolves the query | starts playing |
+|---|---|---|---|
+| Apple Music | yes | no — lands on its own UI | no |
+| YouTube Music | yes | **yes** — right track, 25-item queue | **no** |
+
+YouTube Music is still the better target: it gets you a loaded queue with the
+right song at item 1, which is one transport command from playing, whereas
+Apple Music gets you a foreground app and nothing else.
+
+Note `lib/phone`'s own docstring at `intent_handlers()` says "YouTube Music
+implements MEDIA_PLAY_FROM_SEARCH and Apple Music does not". Both halves are
+wrong on this device as of today: Apple Music *does* declare it (see
+`capabilities`), and YouTube Music declares it without playing.
+
+### Finish what the intent started — you can't, from shell
+**Route:** none. **Verified:** 2026-08-23, Android 16 (sdk 36).
+
+The obvious repair for the above is to compose the tiers: intent to load the
+queue, then `cmd media_session dispatch play` to start it. **This does not
+work, and it is worse than not working — it starts the wrong app.**
+
+`cmd media_session dispatch` has no way to name a session. It hands the key
+to the *media button session*, and that is the app which last held audio, not
+the app in the foreground. With YouTube Music foregrounded, active, and
+holding a loaded queue, the dump still read:
+
+    Media button session is com.apple.android.music/...
+
+and dispatching `play` started **Apple Music** — its position advanced
+47193 → 47303 — while YouTube Music stayed at `PAUSED, position=0` with an
+unchanged `updated=` stamp. Watched, not inferred. Paused again after.
+
+The consequence for a caller: **a media dispatch is not addressed to the app
+you were just talking to.** Read `Media button session` before dispatching,
+or you will silently drive a different app than the one you meant.
 
 ---
 
