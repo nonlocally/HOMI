@@ -2822,8 +2822,12 @@ def cmd_notif_reply(args):
 
 
 def _spoken_battery(_m):
-    rc, out = run(remote_exec(os.environ.get("PHONE_DEVICE"), ["battery"])
-                  if os.environ.get("PHONE_DEVICE") else ["true"], timeout=30)
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return None
+    rc, out = run(remote_exec(dev, ["battery"]), timeout=30)
+    if rc != 0:
+        return None
     txt = (out or "").strip().split("\n")[0]
     m = re.search(r"(\d+)%\s+(\S+)", txt)
     if not m:
@@ -2833,9 +2837,41 @@ def _spoken_battery(_m):
                                 and "dis" not in state else "discharging")
 
 
+def _spoken_time(_m):
+    # From the PHONE's clock, not ours. The controller reads an hour ahead of
+    # the device — different timezones — so answering from local time would
+    # be confidently wrong, which is the failure mode this whole codebase
+    # keeps being about.
+    rc, out = dev_shell("date '+%H:%M|%A %d %B'", timeout=20)
+    txt = (out or "").strip()
+    if rc != 0 or "|" not in txt:
+        return None
+    hhmm, day = txt.split("|", 1)
+    try:
+        h, m = [int(x) for x in hhmm.split(":")]
+    except ValueError:
+        return None
+    ampm = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    # Spelled for a SPEAKER, not a display. "12 02" is read aloud as
+    # "twelve two"; "12 oh 2" comes out as a person would say it.
+    if not m:
+        return "It's %d o'clock %s." % (h12, ampm)
+    mins = "oh %d" % m if m < 10 else str(m)
+    return "It's %d %s %s." % (h12, mins, ampm)
+
+
+def _spoken_date(_m):
+    rc, out = dev_shell("date '+%A, %d %B'", timeout=20)
+    txt = (out or "").strip()
+    return ("It's %s." % txt) if rc == 0 and txt else None
+
+
 def _spoken_playing(_m):
-    sessions = parse_media_sessions(
-        dev_shell("dumpsys media_session", timeout=30)[1] or "")
+    rc, raw = dev_shell("dumpsys media_session", timeout=30)
+    if rc != 0 or not (raw or "").strip():
+        return None      # could not ask — NOT "nothing is playing"
+    sessions = parse_media_sessions(raw)
     cur = current_session(sessions)
     if not cur:
         return "Nothing is playing."
@@ -2847,9 +2883,12 @@ def _spoken_playing(_m):
 
 
 def _spoken_notifs(_m):
-    rc, out = run(remote_exec(os.environ.get("PHONE_DEVICE"),
-                              ["notifs", "--json"])
-                  if os.environ.get("PHONE_DEVICE") else ["true"], timeout=40)
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return None
+    rc, out = run(remote_exec(dev, ["notifs", "--json"]), timeout=40)
+    if rc != 0:
+        return None      # could not ask — NOT "nothing is waiting"
     try:
         rows = json.loads(out or "[]")
     except ValueError:
@@ -2869,9 +2908,12 @@ def _spoken_notifs(_m):
 
 
 def _spoken_cal(_m):
-    rc, out = run(remote_exec(os.environ.get("PHONE_DEVICE"),
-                              ["cal", "--days", "1", "--json"])
-                  if os.environ.get("PHONE_DEVICE") else ["true"], timeout=40)
+    dev = os.environ.get("PHONE_DEVICE")
+    if not dev:
+        return None
+    rc, out = run(remote_exec(dev, ["cal", "--days", "1", "--json"]), timeout=40)
+    if rc != 0:
+        return None      # could not ask — NOT "nothing on the calendar"
     try:
         evs = json.loads(out or "[]")
     except ValueError:
@@ -2909,6 +2951,10 @@ def _media_action(action):
 # Anchored deliberately. "what is playing" matches; "play something by the
 # artist who wrote the song about playing" does not, and goes to the agent.
 FAST = [
+    (re.compile(r"\bwhat('?s| is)?\s+(the\s+)?time\b|\btime is it\b"),
+     _spoken_time),
+    (re.compile(r"\bwhat('?s| is)?\s+(the\s+)?date\b|\bwhat day is\b"),
+     _spoken_date),
     (re.compile(r"\b(battery|charge|power)\b.*\b(level|left|at|percent)?\b"),
      _spoken_battery),
     (re.compile(r"\bwhat('?s| is)?\s+(playing|this song|the song)\b"),
@@ -2932,8 +2978,15 @@ def fast_answer(text):
         if pat.search(low):
             try:
                 return fn(pat.search(low))
-            except Exception:
-                return None       # never let the shortcut break the slow path
+            except Exception as e:
+                # Falling through is right — the shortcut must never break
+                # the slow path — but doing it SILENTLY turned "the handler
+                # failed" into "no pattern matched", and cost an hour of
+                # staring at a regex that was correct all along.
+                sys.stderr.write("phone: fast path declined (%s: %s) — "
+                                 "asking the agent instead\n"
+                                 % (fn.__name__, e))
+                return None
     return None
 
 
@@ -3018,10 +3071,23 @@ def cmd_talk(args):
                     return 0 if ok else 5
                 continue
 
+        # SAY SOMETHING BEFORE THE LONG WAIT. Falling through to the agent
+        # costs tens of seconds, and the first time this happened live the
+        # person saw "heard: ..." and then nothing at all — no way to tell a
+        # model thinking from a loop that had died. Silence is the one
+        # response a voice interface must never give.
+        sys.stderr.write("phone: no quick answer for that — asking %s, "
+                         "this can take a while...\n" % args.to)
+        sys.stderr.flush()
+        bridge_call("say", device=device, text="One moment.", wait=30)
+
         # [spoken] so the agent shapes it for an ear rather than a screen —
         # the same marker the voice page sends.
+        t_ask = time.time()
         answer, err = _ask_agent(args.to, "[spoken] " + text, sender,
                                  args.timeout)
+        sys.stderr.write("phone: %s answered in %.0fs\n"
+                         % (args.to, time.time() - t_ask))
         if err:
             # Say the failure OUT LOUD. A voice loop that fails silently
             # leaves someone talking to a phone that has stopped listening,
