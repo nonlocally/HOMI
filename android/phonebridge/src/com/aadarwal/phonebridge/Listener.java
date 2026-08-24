@@ -45,6 +45,12 @@ public class Listener extends NotificationListenerService {
             bridge = new Bridge(this);
             bridge.start();
         }
+        // NOT started from here. A system-initiated bind is not one of the
+        // exemptions: starting a mic FGS from this context threw
+        // SecurityException ("must be in the eligible state ... to access the
+        // foreground only permission") and took the whole process down with
+        // it, which is how the bridge came to be answering nothing at all.
+        // The Boot activity starts it instead; see that file.
         Log.i(TAG, "listener connected");
     }
 

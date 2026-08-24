@@ -32,8 +32,20 @@
     <!-- Loopback only. The bridge is reached the same way `phone shelld` is:
          an ssh forward from the controller. Nothing listens off-device. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Apps targeting 30+ cannot see a service they have not declared an
+         interest in. createOnDeviceSpeechRecognizer resolves through a
+         resource overlay rather than a package query, but createSpeechRecognizer
+         does query, so this is here to keep both paths open. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+    </queries>
 
     <application android:label="phonebridge"
                  android:allowBackup="false"
@@ -51,5 +63,25 @@
                 <action android:name="android.service.notification.NotificationListenerService"/>
             </intent-filter>
         </service>
+
+        <!-- Invisible, and started from shell with `am start`. A mic
+             foreground service cannot be STARTED from the background, and
+             this app has no UI so it is permanently backgrounded. Being
+             foreground for an instant is the exemption. -->
+        <activity
+            android:name=".Boot"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay"/>
+
+        <!-- Measured, not assumed: with no foreground service, a listen
+             returned an EMPTY callback trace after 12s. The recogniser never
+             started. Android has blocked background mic since 9, and from 14
+             a mic-touching service must declare the type explicitly. -->
+        <service
+            android:name=".VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"/>
     </application>
 </manifest>

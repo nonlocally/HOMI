@@ -128,6 +128,11 @@ echo "→ granting notification access"
 "$PHONE_BIN" --device "$DEVICE" sh \
   "rm -f $STAGE /data/local/tmp/phonebridge.apk" >/dev/null 2>&1 || true
 
+# Start the mic service through the no-display activity. Shell can start an
+# activity from any state, which is the exemption a background app lacks.
+echo "→ starting the voice service (foreground exemption via Boot)"
+"$PHONE_BIN" --device "$DEVICE" sh "am start -n $PKG/.Boot" >/dev/null 2>&1 || true
+
 echo "→ enabled listeners now:"
 if "$PHONE_BIN" --device "$DEVICE" sh "settings get secure enabled_notification_listeners" \
      | tr ':' '\n' | grep -i phonebridge; then

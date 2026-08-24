@@ -37,11 +37,13 @@ class Bridge implements Runnable {
 
     private final Context ctx;
     private final String token;
+    private final Voice voice;
     private Thread thread;
 
     Bridge(Context ctx) {
         this.ctx = ctx;
         this.token = loadOrMintToken(ctx);
+        this.voice = new Voice(ctx);
     }
 
     void start() {
@@ -128,18 +130,52 @@ class Bridge implements Runnable {
             // Bound-ness is not observable from the caller's side. An unbound
             // listener returns an empty list, which looks exactly like a
             // phone with nothing on it — so refuse instead of answering.
-            if (!Listener.isConnected() || Listener.get() == null) {
+            String op = q.optString("op", "");
+            // Voice does not go through the notification listener at all, so
+            // gating it on bound-ness would refuse a working capability for
+            // an unrelated reason — a wrong diagnosis, which this project
+            // treats as its own class of bug.
+            boolean needsListener = !("ping".equals(op)
+                    || "voice_status".equals(op)
+                    || "voice_download".equals(op)
+                    || "listen".equals(op));
+            if (needsListener && (!Listener.isConnected() || Listener.get() == null)) {
                 return err(r, "notification listener is not bound — "
                               + "cmd notification allow_listener, then reboot "
                               + "or toggle it");
             }
             Listener L = Listener.get();
-            String op = q.optString("op", "");
             switch (op) {
                 case "ping":
                     r.put("ok", true);
                     r.put("bound", true);
                     return r;
+                case "voice_status":
+                    for (Map.Entry<String, Object> e : voice.status().entrySet()) {
+                        Object v = e.getValue();
+                        r.put(e.getKey(), v instanceof List
+                              ? new JSONArray((List<?>) v)
+                              : (v == null ? JSONObject.NULL : v));
+                    }
+                    r.put("ok", true);
+                    return r;
+                case "voice_download": {
+                    for (Map.Entry<String, Object> e :
+                            voice.download(q.optInt("wait", 60)).entrySet()) {
+                        r.put(e.getKey(), e.getValue());
+                    }
+                    return r;
+                }
+                case "listen": {
+                    for (Map.Entry<String, Object> e :
+                            voice.listen(q.optInt("timeout", 20)).entrySet()) {
+                        Object v = e.getValue();
+                        r.put(e.getKey(), v instanceof List
+                              ? new JSONArray((List<?>) v)
+                              : (v == null ? JSONObject.NULL : v));
+                    }
+                    return r;
+                }
                 case "list": {
                     JSONArray arr = new JSONArray();
                     for (Map<String, Object> row : L.list()) {
