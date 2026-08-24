@@ -780,6 +780,54 @@ if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
   ok "no actor set means no actor forced on the device"
 else bad "empty actor forced across (got: $out)"; fi
 
+echo "== msg must not report a draft on a phone without the app"
+# cmd_open already learned this: "asking for whatsapp and getting a browser
+# open on wa.me is not what anyone means". msg never did. It hands
+# https://wa.me/<n> straight to launch(), which opens a BROWSER when
+# WhatsApp is absent, returns 0, and records "drafted" -- so the agent tells
+# the human a message is waiting to be tapped, and there is no message. In
+# the one verb where the whole point is that it can really send.
+AT="$(mktemp -d)"
+mkstub() {   # $1 = package list emitted by `pm list packages -3`
+  cat > "$AT/adb" <<EOF
+#!/bin/sh
+case "\$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
+  shell)   case "\$*" in
+             *"pm list packages"*) printf '$1' ;;
+             *) exit 0 ;;
+           esac ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$AT/adb"
+}
+
+mkstub 'package:com.google.android.keep\npackage:com.spotify.music\n'
+out="$(PATH="$AT:$PATH" TMPDIR="$AT" PHONE_LEDGER="$AT/led.jsonl" \
+       "$PHONE" msg whatsapp --to "+16175551234" --text "hi" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "not installed\|no whatsapp\|is not on"; then
+  ok "msg refuses honestly when WhatsApp is not on the device"
+else bad "msg drafted into thin air (rc=$rc out=$out)"; fi
+if [ ! -s "$AT/led.jsonl" ] || ! grep -q '"drafted"' "$AT/led.jsonl"; then
+  ok "and no draft was claimed in the ledger"
+else bad "ledger claims a draft that cannot exist"; fi
+# --send is the dangerous half: it must refuse on the same evidence, and
+# BEFORE anything is launched, not discover it at the send button.
+out="$(PATH="$AT:$PATH" TMPDIR="$AT" PHONE_LEDGER="$AT/led3.jsonl" \
+       "$PHONE" msg whatsapp --to "+16175551234" --text "hi" --send 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "not installed"; then
+  ok "--send refuses on the same evidence"
+else bad "--send proceeded without the app (rc=$rc out=$out)"; fi
+
+mkstub 'package:com.whatsapp\npackage:com.google.android.keep\n'
+out="$(PATH="$AT:$PATH" TMPDIR="$AT" PHONE_LEDGER="$AT/led2.jsonl" \
+       "$PHONE" msg whatsapp --to "+16175551234" --text "hi" 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && grep -q '"drafted"' "$AT/led2.jsonl" 2>/dev/null; then
+  ok "with WhatsApp installed it still drafts, and says so"
+else bad "installed-app draft path broke (rc=$rc out=$out)"; fi
+rm -rf "$AT"
+
 echo "== a remote hop is the LAST hop"
 # If the device's own environment names a device (a two-phone fleet, a
 # stray export), the far `phone` would hop onward -- and every row it
