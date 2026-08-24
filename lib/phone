@@ -1419,10 +1419,34 @@ def cmd_msg(args):
         url += "?text=%s" % quote(args.text, safe="")
     if args.print_url:
         return launch(url, True)
+
+    # Is WhatsApp actually here? A wa.me link handed to a phone without it
+    # opens a BROWSER, exits 0, and used to be recorded as "drafted" — so the
+    # agent would tell someone a message was sitting waiting to be tapped
+    # when nothing of the kind existed. cmd_open learned this already
+    # ("asking for whatsapp and getting a browser open on wa.me is not what
+    # anyone means"); the verb where it matters most had not.
+    #
+    # installed_packages() is empty when there is no device shell, and an
+    # empty list is "I could not look", not "it is not there" — the two must
+    # not collapse, or losing the shell would start refusing sends on phones
+    # that can perfectly well make them.
+    pkgs = installed_packages()
+    verified = bool(pkgs)
+    if verified and not any(p == "com.whatsapp" for p in pkgs):
+        record("msg", {"app": app, "to": num, "text": args.text,
+                       "sent": False}, "act",
+               "failed: WhatsApp is not installed on this device")
+        die("cannot draft: WhatsApp is not installed on this device. "
+            "(A wa.me link would open a browser, which is not a message.)", 4)
+
     if not args.send:
         rc = launch(url, False)          # dies loudly if it cannot open
         record("msg", {"app": app, "to": num, "text": args.text,
-                       "sent": False}, "act", "drafted")
+                       "sent": False, "verified": verified}, "act",
+               "drafted" if verified else
+               "unconfirmed: opened the chat link, but there is no device "
+               "shell to confirm WhatsApp is installed")
         return rc
 
     # --send needs to TOUCH the screen, which only the adb tier can do.
