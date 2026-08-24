@@ -780,6 +780,79 @@ if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
   ok "no actor set means no actor forced on the device"
 else bad "empty actor forced across (got: $out)"; fi
 
+echo "== play must not report playing when it opened a web page"
+# The third sibling of the wa.me shape. play hands a https URL to launch(),
+# which opens a BROWSER when the app is absent and returns 0 -- and play
+# recorded "act" BEFORE even attempting, so a launch that died outright still
+# left a row asserting music was playing.
+#
+# The trap in fixing it: `apps` lists THIRD-PARTY packages only, and YouTube
+# and YouTube Music are SYSTEM packages on a Pixel. Checking against that
+# list would refuse ytmusic on a phone that has it -- swapping a false
+# success for a false refusal, which is not an improvement.
+PT="$(mktemp -d)"
+mkplaystub() {   # $1 = packages `pm list packages <filter>` should report
+  cat > "$PT/adb" <<EOF
+#!/bin/sh
+case "\$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
+  shell)
+    case "\$*" in
+      *"pm list packages -3"*) printf 'package:com.spotify.music\n' ;;
+      *"pm list packages"*)
+        for p in $1; do
+          case "\$*" in *"\$p"*) printf 'package:%s\n' "\$p" ;; esac
+        done ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$PT/adb"
+}
+
+# A phone with YouTube Music as a SYSTEM app and no Spotify.
+mkplaystub "com.google.android.apps.youtube.music com.google.android.youtube"
+out="$(PATH="$PT:$PATH" TMPDIR="$PT" PHONE_LEDGER="$PT/p1.jsonl" \
+       "$PHONE" play "some song" --app spotify 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "not installed\|is not on"; then
+  ok "play refuses when the music app is absent"
+else bad "play opened a browser and called it playing (rc=$rc out=$out)"; fi
+# Assert on the ABSENCE of a success row, not on a string that does not
+# exist yet -- otherwise this passes today for no reason at all.
+if [ ! -s "$PT/p1.jsonl" ] || python3 -c "
+import json
+rows=[json.loads(l) for l in open('$PT/p1.jsonl') if l.strip()]
+ok=[r for r in rows if r.get('verb')=='play' and not r.get('rc')]
+assert not ok, ok
+" 2>/dev/null; then
+  ok "and no successful play was claimed in the ledger"
+else bad "ledger claims music that never played"; fi
+
+# The false-refusal guard: ytmusic is a system package, absent from `apps`.
+out="$(PATH="$PT:$PATH" TMPDIR="$PT" PHONE_LEDGER="$PT/p2.jsonl" \
+       "$PHONE" play "some song" --app ytmusic 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then
+  ok "a SYSTEM music app is not mistaken for a missing one"
+else bad "system app wrongly refused (rc=$rc out=$out)"; fi
+
+# A launch that fails outright must leave a FAILURE row, not silence and not
+# the success row play used to write before it had any evidence.
+out="$(TMPDIR="$PT" PHONE_NO_DEVICE=1 PHONE_LEDGER="$PT/p3.jsonl" \
+       "$PHONE" play "some song" --app ytmusic 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && [ -s "$PT/p3.jsonl" ] && \
+   python3 -c "
+import json,sys
+rows=[json.loads(l) for l in open('$PT/p3.jsonl') if l.strip()]
+a=rows[-1]
+assert a['verb']=='play', a
+assert a.get('rc'), a
+assert 'fail' in str(a.get('result','')).lower(), a
+" 2>/dev/null; then
+  ok "a failed launch is recorded as a failure, not as playing"
+else bad "failed launch record (rc=$rc ledger=$(cat "$PT/p3.jsonl" 2>/dev/null))"; fi
+rm -rf "$PT"
+
 echo "== msg must not report a draft on a phone without the app"
 # cmd_open already learned this: "asking for whatsapp and getting a browser
 # open on wa.me is not what anyone means". msg never did. It hands
@@ -826,6 +899,22 @@ out="$(PATH="$AT:$PATH" TMPDIR="$AT" PHONE_LEDGER="$AT/led2.jsonl" \
 if [ $rc -eq 0 ] && grep -q '"drafted"' "$AT/led2.jsonl" 2>/dev/null; then
   ok "with WhatsApp installed it still drafts, and says so"
 else bad "installed-app draft path broke (rc=$rc out=$out)"; fi
+# msg has the same die-before-record gap play had: launch() dies loudly when
+# it cannot open anything, and the record was written only after it returned.
+# A message the agent tried and failed to draft left no trace at all, which
+# reads as never having been asked.
+out="$(TMPDIR="$AT" PHONE_NO_DEVICE=1 PHONE_LEDGER="$AT/led4.jsonl" \
+       "$PHONE" msg whatsapp --to "+16175551234" --text "hi" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && [ -s "$AT/led4.jsonl" ] && python3 -c "
+import json
+rows=[json.loads(l) for l in open('$AT/led4.jsonl') if l.strip()]
+a=rows[-1]
+assert a['verb']=='msg', a
+assert a.get('rc'), a
+assert 'fail' in str(a.get('result','')).lower(), a
+" 2>/dev/null; then
+  ok "a draft that could not be opened is recorded as a failure"
+else bad "msg failed launch record (rc=$rc led=$(cat "$AT/led4.jsonl" 2>/dev/null))"; fi
 rm -rf "$AT"
 
 echo "== a remote hop is the LAST hop"
