@@ -525,35 +525,100 @@ So when you are probing — sweeping providers, reading a dozen settings —
 -optimisation; at eighteen probes it is the difference between seven seconds
 and one.
 
-### The screen tier can fail outright — and does
-**Verified:** 2026-08-23, Android 16 (sdk 36), YouTube Music.
+### Large reads from the device come back CORRUPTED — silently
+**Verified:** 2026-08-23, Android 16 (sdk 36), controller over the forwarded
+socket. **This is the most consequential thing in this file.** It is not a
+screen-tier bug; the screen tier is just where it shows up first.
 
-`look` and `ui` parse `uiautomator dump`'s XML, and **YouTube Music's tree is
-not well-formed**:
+**Symptom.** `phone ui` and `phone look` fail intermittently on a complex
+screen — measured **6/10**, **6/10**, and **2/8** (spacing calls 4s apart) on
+YouTube Music — with four different parser errors at wandering offsets:
 
-    phone: could not parse the UI tree
-      (not well-formed (invalid token): line 1, column 49103)
+    not well-formed (invalid token): line 1, column 8192
+    mismatched tag: line 1, column 50457
+    duplicate attribute: line 1, column 9977
+    no element found: line 1, column 0
 
-Seen on a 72 KB dump, and again at column 16328 on a different YouTube Music
-screen. Some attribute in the tree carries a byte the XML parser rejects. The
-failure is intermittent between screens of the *same* app, so a passing `look`
-is not evidence the next one will pass.
+**It is not the phone.** `uiautomator dump` run ten times in one on-device
+loop produced ten byte-identical, well-formed files, every one ending
+`</hierarchy>`. The XML the device writes is fine.
 
-This matters more than a normal bug, because the screen is the tier you drop
-to when the other two have already failed. **The last resort is not
-guaranteed to be available.**
+**It is not truncation.** Received byte counts match the device's `wc -c`
+*exactly*, on good and bad reads alike.
 
-Two things that still work when it happens:
+**It is corruption in the read back.** Diffing a good against a bad capture
+of the *same* file:
 
-- `ui` and `look` fail independently — on one screen `ui` rendered fine while
-  `look` did not. Try both before giving up.
-- The raw dump is still there, and `grep` does not care about well-formedness:
+    sizes: 79894  79894          (identical)
+    first differing byte: 65536  (= exactly 8 x 8192)
+    the bad file's bytes at 65536 are found in the good file at offset 5610
 
-      phone sh 'uiautomator dump /sdcard/d.xml >/dev/null 2>&1;
-                grep -o "text=\"[^\"]*\"" /sdcard/d.xml'
+So at a 64 KiB boundary the reader **splices in bytes from earlier in the
+same stream**. Same length, plausible-looking XML, wrong content. In the
+capture above, `bounds="[200,1364][339,1490]"` runs straight into
+`ce-id="android:id/icon"` — the tail of a `resource-id` from 60 KB earlier.
 
-  That is how the YouTube Music search box was read after both verbs failed.
-  Cruder than `find`, but it does not need the tree to parse.
+**It is not specific to UI dumps.** With a deterministic file — `seq 1 30000`,
+169 KB, so every line states what it should be — **five of six reads came
+back scrambled**, some beginning at line `1861` instead of `1`, one splicing
+`1860` and `2680` into `18602680`. Where corruption starts:
+
+| file size | intact reads |
+|---|---|
+| 3.9 KB | 4/4 |
+| 8.9 KB | 2/4 |
+| 23.9 KB | 2/4 |
+| 60.9 KB | 0/4 |
+| 78.9 KB | 3/4 |
+| 168.9 KB | 1/4 |
+
+Clean below ~4 KB; unreliable from ~8 KB — the pipe-buffer boundary — and it
+does not improve with size. **Any `phone` read over a few KB may be quietly
+wrong**: `dumpsys` output, notification dumps, package lists, anything bulky.
+
+Disabling the persistent shell (`phone shelld --stop`) did **not** change the
+rate (still 6/10), so `shelld` is not the sole path involved — though 65536
+is exactly its `recv` chunk size, which is worth someone's attention.
+
+**Why nothing catches it.** The read exits 0. The length is right. The
+document still contains `<hierarchy` and still ends `</hierarchy>`, so
+`get_ui`'s guards pass. Only a *parser* notices, and only because XML happens
+to be brittle. **A corrupted `dumpsys` read would have been used as fact.**
+The UI tree is the canary, not the victim.
+
+### Reading something big, safely
+**Verified:** 2026-08-23.
+
+Ask the device for the checksum, then read until you match it:
+
+    phone sh 'md5sum /sdcard/x.xml'        # the truth
+    phone sh 'cat /sdcard/x.xml' > local   # the read (strip 1 trailing \n)
+    # compare; retry on mismatch
+
+Five trials against a 78 KB dump converged in **3, 5, 2, 1, 1** attempts —
+always, and cheaply. Anything under ~4 KB does not need this.
+
+`phone ui --from <file>` / `look --from` / `media --from` accept a local
+capture, so a verified read can be parsed offline as many times as you like.
+Note the two-step capture is **not** a workaround by itself — it failed 3/8
+until the md5 check was added. It is the *verification* that fixes it, not
+the extra step.
+
+### When the tree is genuinely unreadable
+`uiautomator dump` also fails outright sometimes — it waits for window idle
+and gives up on anything animating, on secure windows, and with the screen
+off. Then the file is simply absent, and `phone sh 'cat ...'` returns
+`No such file or directory` (51 bytes that are easy to mistake for content if
+you only check the length — I did, for one round).
+
+`grep` on the raw dump still works when the XML will not parse, and does not
+care about well-formedness:
+
+    phone sh 'uiautomator dump /sdcard/d.xml >/dev/null 2>&1;
+              grep -o "text=\"[^\"]*\"" /sdcard/d.xml'
+
+That is how the YouTube Music search box was read. But **grep on a corrupted
+read is corrupt too** — it just cannot tell you so. Verify first.
 
 ---
 
