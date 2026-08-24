@@ -148,6 +148,16 @@ Say what happened, not what you attempted. If a step failed, say which one
 and what you saw. `phone log` shows the trace — actor, verb, result, and
 duration — and it is the honest record if you are ever asked what you did.
 
+The trace lives in two halves, because the work does: taps and typing run
+through the forwarded socket, so the controller records them; notifications,
+speech and the camera run on the phone, so the phone records those. With
+`--device` the two are merged for you, newest first, with an `origin` column
+saying which machine each line came from.
+
+If the phone is unreachable, `log` still prints the controller's half — and
+says so, and exits non-zero. Read that as *half the story*, never as "nothing
+else happened".
+
 ## The habits that matter
 
 1. `look` before and after every action.

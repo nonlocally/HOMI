@@ -771,13 +771,46 @@ def cmd_lease(args):
 TERMUX_VERBS = {"say", "listen", "notifs", "notify", "battery", "torch",
                 "where", "clip", "photo", "ptt", "voice", "watchdog"}
 
+# Verbs that address a device but need no shell on it. `log` reads ledger
+# files — one here, one fetched over ssh — so forwarding a socket for it is
+# pure cost, and worse: a failure to forward would suppress the local half
+# of a trace that reads fine on its own.
+NO_LINK_VERBS = {"log"}
+
 
 def remote_exec(device, argv_rest):
     """Run `phone <verb> ...` on the device itself, as the Termux app."""
     import shlex as _sh
     if not _DEV_RE.match(device or ""):
         die("bad device name %r" % device, 2)
+    # The actor has to be carried EXPLICITLY. These verbs run on the device,
+    # so it is the device's `phone` that writes the ledger line — and
+    # PHONE_ACTOR is an environment variable here, on the controller, which
+    # ssh does not forward (and SendEnv would need sshd's cooperation).
+    # Without this, every notifs/clip/where/photo/listen driven from a
+    # controller logs as "anon": the reads of personal data, which are
+    # precisely the ones the record exists to attribute.
+    #
+    # Only when one is actually set. A bare PHONE_ACTOR= would override
+    # whatever the device would otherwise have said with an empty string.
     remote = " ".join(_sh.quote(w) for w in (["phone"] + argv_rest))
+    # A remote hop is the LAST hop. If the device's own environment names a
+    # device — a two-phone fleet, a stray export in a profile — the far
+    # `phone` would hop onward, and every row it returned would still be
+    # labelled with THIS device's name, because that is the only name the
+    # caller has. The origin column would then attribute a third machine's
+    # actions to the phone in your hand. Cheaper to make the far side
+    # incapable of hopping than to teach the labelling about hops it cannot
+    # see.
+    remote = "PHONE_DEVICE= " + remote
+    who = os.environ.get("PHONE_ACTOR")
+    if who:
+        # Quote the VALUE only. Quoting the whole word — shlex.quote of
+        # "PHONE_ACTOR=a; rm" gives "'PHONE_ACTOR=a; rm'" — stops being an
+        # assignment at all: a word whose name part is quoted is a command
+        # NAME to the shell, so the far side would hunt for a binary with
+        # that name and never run phone. Safe, and silently broken.
+        remote = "PHONE_ACTOR=%s %s" % (_sh.quote(who), remote)
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
             "-o", "StrictHostKeyChecking=accept-new", device, remote]
 
@@ -1656,8 +1689,7 @@ def record(verb, detail, kind="act", result=None, rc=None):
         sys.stderr.write("phone: WARNING could not write the action ledger\n")
 
 
-def cmd_log(args):
-    path = ledger_path()
+def _read_ledger(path):
     rows = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1670,7 +1702,55 @@ def cmd_log(args):
                 except ValueError:
                     continue
     except OSError:
-        rows = []
+        return []
+    return rows
+
+
+def _remote_ledger(device):
+    """The DEVICE's own half of the trace.
+
+    The record is split by where the work runs, not by choice: shell-tier
+    verbs go through the forwarded socket, so this process writes their line
+    here; termux verbs run on the device, so the device writes theirs there.
+    Two machines, half a story each — `log` here showed taps with no reads,
+    `log` there showed reads with no taps.
+
+    Merged at READ time rather than shipped at write time, because writing
+    across the hop would put an ssh round trip on the hot path the forwarded
+    socket exists to remove.
+
+    Returns (rows, error). An error is not an empty list: a device that
+    cannot be reached must not read as a device that did nothing.
+    """
+    argv = remote_exec(device, ["log", "--json", "--limit", "500"])
+    try:
+        pr = subprocess.run(argv, capture_output=True, text=True, timeout=25)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [], str(e)
+    if pr.returncode != 0:
+        tail = (pr.stderr or "").strip().splitlines()
+        return [], (tail[-1] if tail else "exit %d" % pr.returncode)
+    try:
+        rows = json.loads(pr.stdout or "[]")
+    except ValueError:
+        return [], "unreadable ledger from %s" % device
+    return (rows if isinstance(rows, list) else []), None
+
+
+def cmd_log(args):
+    rows = _read_ledger(ledger_path())
+    device = os.environ.get("PHONE_DEVICE")
+    remote_err = None
+    if device:
+        # Only in --device mode does the split exist, so only here does the
+        # output gain an origin. A local run keeps exactly the shape it had.
+        for r in rows:
+            r["origin"] = "here"
+        far, remote_err = _remote_ledger(device)
+        for r in far:
+            r["origin"] = device
+        rows = rows + far
+        rows.sort(key=lambda r: r.get("ts") or 0)
     if args.kind:
         rows = [r for r in rows if r.get("kind") == args.kind]
     if args.actor:
@@ -1680,10 +1760,21 @@ def cmd_log(args):
         rows = rows[:args.limit]
     if args.json:
         print(json.dumps(rows, indent=2))
+        if remote_err:
+            sys.stderr.write("phone: could not read %s's half of the trace: "
+                             "%s\n" % (device, remote_err))
+            return 3
         return 0
+    if remote_err:
+        # Loud, and BEFORE the rows, because the danger is reading a partial
+        # trace as a complete one. Local rows still print: half an answer is
+        # worth having, an empty one that looks whole is not.
+        sys.stderr.write("phone: could not read %s's half of the trace (%s) — "
+                         "what follows is this machine's half only\n"
+                         % (device, remote_err))
     if not rows:
         print("(no actions recorded)")
-        return 0
+        return 3 if remote_err else 0
     import time as _t
     for r in rows:
         when = _t.strftime("%H:%M", _t.localtime(r.get("ts") or 0))
@@ -1695,11 +1786,16 @@ def cmd_log(args):
         who = r.get("actor") or "-"
         ms = r.get("ms")
         bad = "!" if r.get("rc") else " "
-        print("%s %s%s %-9s %-8s %s%s%s"
-              % (when, mark, bad, who[:9], r.get("verb") or "?", det,
+        # The origin column exists only when there are two ledgers to tell
+        # apart. Without --device there is one, and naming it is noise.
+        org = ("%-9s " % (r.get("origin") or "-")[:9]) if device else ""
+        print("%s %s%s %s%-9s %-8s %s%s%s"
+              % (when, mark, bad, org, who[:9], r.get("verb") or "?", det,
                  ("  -> " + str(res)) if res else "",
                  ("  %dms" % ms) if isinstance(ms, int) else ""))
-    return 0
+    # A half-trace does not exit 0. Anything reading this to answer "what
+    # was done to my phone" would take success as "and that was all of it".
+    return 3 if remote_err else 0
 
 
 VOICE_FRAME = (
@@ -2131,6 +2227,11 @@ def main(argv):
         return 0
 
     verb0 = out[0] if out else ""
+    # Publish the chosen device so verbs that need to know WHICH phone they
+    # are talking about — `log`, which has to fetch that device's half of the
+    # split trace — can see it without threading it through every signature.
+    if device:
+        os.environ["PHONE_DEVICE"] = device
     if device and verb0 in TERMUX_VERBS:
         argv_r = remote_exec(device, out)
         if print_plan:
@@ -2145,7 +2246,11 @@ def main(argv):
         print("run here against the forwarded socket %s"
               % local_sock_for(device))
         return 0
-    if device:
+    # `log` reads files; it has no business standing up a device shell. Doing
+    # so made an unreachable phone hide the half of the trace that lives on
+    # THIS machine — the half that is still perfectly readable, and the half
+    # you most want when the device has gone quiet.
+    if device and verb0 not in NO_LINK_VERBS:
         ensure_link(device)
 
     parser = build_parser()
