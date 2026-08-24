@@ -88,15 +88,33 @@ def is_url(s):
 _PKGS = None
 
 
-def installed_packages():
-    """Every third-party package on the device, cached per process."""
-    global _PKGS
-    if _PKGS is None:
-        rc, out = dev_shell("pm list packages -3", timeout=40)
-        _PKGS = sorted(l.replace("package:", "").strip()
-                       for l in (out or "").splitlines() if l.strip()) \
+_PKGS_ALL = None
+
+
+def installed_packages(third_party_only=True):
+    """Packages on the device, cached per process.
+
+    RESOLUTION uses the full list, not `-3`. Third-party-only made every
+    system app invisible — chrome, youtube, photos, calendar — including
+    names the CLI's own error message advertises as valid. Worse, an
+    unresolvable name then fell through to a substring search over the
+    third-party list and took the single hit, so `--app chrome` answered
+    about com.google.android.apps.chromecast.app: Google Home.
+    """
+    global _PKGS, _PKGS_ALL
+    if third_party_only:
+        if _PKGS is None:
+            rc, out = dev_shell("pm list packages -3", timeout=40)
+            _PKGS = sorted(l.replace("package:", "").strip()
+                           for l in (out or "").splitlines() if l.strip()) \
+                if rc == 0 else []
+        return _PKGS
+    if _PKGS_ALL is None:
+        rc, out = dev_shell("pm list packages", timeout=40)
+        _PKGS_ALL = sorted(l.replace("package:", "").strip()
+                           for l in (out or "").splitlines() if l.strip()) \
             if rc == 0 else []
-    return _PKGS
+    return _PKGS_ALL
 
 
 def package_present(pkg):
@@ -133,22 +151,32 @@ def pkg_of(name):
     n = name.strip().lower()
     if "." in name:
         return name
-    pkgs = installed_packages()
+    pkgs = installed_packages(third_party_only=False)
     if not pkgs:                       # no shell — fall back to the aliases
         return APPS.get(n)
     alias = APPS.get(n)
     if alias and alias in pkgs:
         return alias
-    # last path segment match: com.google.android.keep -> "keep"
-    exact = [p for p in pkgs if p.rsplit(".", 1)[-1].lower() == n]
-    if len(exact) == 1:
-        return exact[0]
-    hits = [p for p in pkgs if n in p.lower()]
-    if len(hits) == 1:
-        return hits[0]
-    if hits:
-        # prefer the shortest — com.google.android.keep over ...keep.something
-        return sorted(hits, key=len)[0]
+    # WHOLE SEGMENTS ONLY. "chrome" is a substring of "chromecast", and a
+    # substring search resolved it to Google Home with full confidence and no
+    # warning — the same failure as tapping a coordinate that turned out to
+    # belong to a different button.
+    def segs(p):
+        return [x.lower() for x in p.split(".")]
+
+    last = [p for p in pkgs if segs(p)[-1] == n]
+    if len(last) == 1:
+        return last[0]
+    anywhere = [p for p in pkgs if n in segs(p)]
+    cands = last or anywhere
+    if len(cands) == 1:
+        return cands[0]
+    if cands:
+        # Ambiguity is NAMED, never narrowed. Picking the shortest is a coin
+        # flip wearing a heuristic's clothes, and the caller cannot tell it
+        # happened.
+        die("%r matches %d packages on this device — say which:\n  %s"
+            % (name, len(cands), "\n  ".join(sorted(cands))), 4)
     return None
 
 
@@ -1384,6 +1412,20 @@ def cmd_open(args):
         return launch(target, args.print_url)
     key = target.strip().lower()
     p = pkg_of(target)
+    if not p:
+        # Refuse HERE, before any branch can quietly return 0. The
+        # unresolved-name check used to live at the bottom of this function
+        # and was unreachable whenever a device shell was present: `open
+        # chrome` on a phone without Chrome exited 0 having done nothing at
+        # all, which is the only outcome worse than launching the wrong app.
+        pkgs = installed_packages(third_party_only=False)
+        if pkgs:
+            near = sorted({x.rsplit(".", 1)[-1] for x in pkgs
+                           if key[:4] and key[:4] in x.lower()})[:8]
+            die("no app matching %r on this device%s" %
+                (target, (" — did you mean: %s" % ", ".join(near))
+                 if near else ""), 4)
+        die("unknown app %r and no device shell to check against" % target, 3)
     # LAUNCH the app when we can. The deep link is a fallback for when there
     # is no device shell — asking for "whatsapp" and getting a browser open
     # on wa.me is not what anyone means.

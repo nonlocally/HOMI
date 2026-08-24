@@ -1008,6 +1008,68 @@ if printf '%s' "$out" | grep -q "<- keys" ; then
   ok "and it is marked in the human view, so nobody has to guess"
 else bad "button session unmarked in human output (got: $out)"; fi
 
+echo "== an app name must resolve to THAT app, or to nothing"
+# The sharpest bug ranger found, and it is the same class as tapping a wrong
+# coordinate: `--app chrome` resolved to com.google.android.apps.chromecast.app
+# — Google Home — and printed "(no notifications)", which reads as a clean
+# negative about Chrome. `open chrome` would have LAUNCHED Google Home.
+#
+# Two causes, both fixed here:
+#   1. resolution ran against `pm list packages -3`, third-party only, so
+#      every system app (chrome, youtube, photos, calendar) was invisible —
+#      including ones the CLI's own error message advertises as valid.
+#   2. on a miss it substring-matched and took the single hit. "chrome" is a
+#      substring of "chromecast". Wrong app, full confidence, no warning.
+#
+# The rule now: match whole dotted SEGMENTS, never substrings, and refuse
+# ambiguity by name instead of picking the shortest.
+NT="$(mktemp -d)"
+mkpkgs() {   # $1 = full `pm list packages` output
+  cat > "$NT/adb" <<EOF
+#!/bin/sh
+while [ "\$1" = "-s" ]; do shift 2; done
+case "\$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n'; exit 0 ;;
+  shell|exec-out)
+    shift
+    case "\$*" in
+      *"pm list packages -3"*) printf 'package:com.google.android.apps.chromecast.app\n' ;;
+      *"pm list packages"*)    printf '$1' ;;
+      *resolve-activity*)      printf '%s/.Main\n' "\${*##* }" ;;
+      *am\ start*)             exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$NT/adb"
+}
+
+# A phone with Google Home and NO Chrome. Asking for chrome must fail.
+mkpkgs 'package:com.google.android.apps.chromecast.app\npackage:com.google.android.youtube\n'
+out="$(PATH="$NT:$PATH" TMPDIR="$NT" PHONE_LEDGER="$NT/l.jsonl" \
+       "$PHONE" open chrome 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && ! printf '%s' "$out" | grep -q "chromecast"; then
+  ok "a name that is only a SUBSTRING of another package is refused"
+else bad "chrome resolved to the wrong app (rc=$rc out=$out)"; fi
+
+# The same phone: youtube is a SYSTEM package, absent from -3, and must
+# still resolve — the old code could not see it at all.
+out="$(PATH="$NT:$PATH" TMPDIR="$NT" PHONE_LEDGER="$NT/l2.jsonl" \
+       "$PHONE" open youtube 2>&1)"; rc=$?
+if ! printf '%s' "$out" | grep -qi "no app matching"; then
+  ok "a system package resolves (the list is no longer third-party only)"
+else bad "system package unresolvable (rc=$rc out=$out)"; fi
+
+# Genuine ambiguity is named, not silently narrowed to the shortest.
+mkpkgs 'package:com.foo.notes\npackage:com.bar.notes\n'
+out="$(PATH="$NT:$PATH" TMPDIR="$NT" "$PHONE" open notes 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "com.foo.notes" \
+   && printf '%s' "$out" | grep -q "com.bar.notes"; then
+  ok "two candidates are both named, and nothing is chosen"
+else bad "ambiguity silently resolved (rc=$rc out=$out)"; fi
+rm -rf "$NT"
+
 echo "== the device's stderr must not vanish on the way back"
 # Found by ranger, and it is the signature failure of this whole codebase in
 # a new place: a denied `content query` comes back as RC=0 with NO output,
