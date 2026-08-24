@@ -158,6 +158,121 @@ or you will silently drive a different app than the one you meant.
 
 ---
 
+## Asking the device things — and knowing what the answer meant
+
+Three traps live in the tools themselves, not in Android. Each turns a loud
+failure into a quiet wrong answer, which is the exact thing this file exists
+to prevent.
+
+### `phone sh` throws the device's stderr away
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+`phone sh 'content query --uri content://com.google.android.keep/notes'`
+prints **nothing at all** and exits 0. That looks like "readable and empty".
+It is not. Redirect *on the device* — inside the quotes — and the same
+command says:
+
+    $ phone sh 'content query --uri content://com.google.android.keep/notes 2>&1'
+    java.lang.SecurityException: Permission Denial: opening provider
+      KeepProviderImpl from (null) (pid=..., uid=2000) that is not exported
+      from UID 10314
+
+Same for a completely invented authority: silent without the redirect, a
+stack trace with it. **Put `2>&1` inside every `phone sh` you intend to read
+a result from.** A `2>&1` on the outside catches the controller's stderr, not
+the phone's, and does nothing for this.
+
+### `content query` exits 0 no matter what happened
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+The exit code carries no information — it is 0 for rows, for permission
+denials, and for authorities that do not exist. You must read the *shape* of
+the output. There are five, and they mean different things:
+
+| output | meaning |
+|---|---|
+| `Row: 0 ...` | readable, and there is data |
+| `No result found.` (stdout) | the query ran and matched nothing |
+| `SecurityException: ... requires <PERM>` | denied — and it names the permission you'd need |
+| `SecurityException: ... not exported from UID <n>` | **no permission can fix this**; shell can never open it |
+| `IllegalStateException: Could not find provider` | no such authority — usually your typo |
+| *nothing* | you forgot the on-device `2>&1`; see above |
+
+Two of those deserve care:
+
+- **`No result found.` is ambiguous.** It is what an empty table returns —
+  and also what a *wrong path on a real authority* returns.
+  `content://com.google.android.gms.phenotype/x` says "No result found" and
+  `/x` is not a table. So "empty" is only trustworthy when you know the path
+  is right.
+- **"not exported" is a wall, not a lock.** "requires PERM" means someone
+  with that permission could read it. "not exported from UID" means the app
+  never opened the door to anybody; there is no flag, no grant, no Shizuku
+  tier that gets you in. Stop there and write it down.
+
+### `query-activities` under-reports unless you give it a MIME type
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+The map tells you to ask the device who handles an action. Ask it wrong and
+it lies by omission:
+
+    cmd package query-activities -a android.intent.action.SEND
+      → 4 handlers
+    cmd package query-activities -a android.intent.action.SEND -t text/plain
+      → 17 handlers, including com.google.android.keep
+
+Intent resolution matches action **and data**. An action that normally
+carries data resolves against almost nothing when you omit `-t`, so a handler
+that exists looks absent. Keep really does declare `SEND`/`text/plain`
+(`ShareReceiverActivity`, `exported=true`) — the four-handler answer would
+have had you conclude otherwise.
+
+`MEDIA_PLAY_FROM_SEARCH` takes no data, so the six-package answer above is
+unaffected. Any action that carries a payload is not.
+
+---
+
+## Notes and documents
+
+### Read the notes in Google Keep
+**Route:** none. **Verified:** 2026-08-23, Android 16 (sdk 36).
+
+Keep's authority `com.google.android.keep` exists and resolves —
+`KeepProviderImpl` is right there in `dumpsys package providers` — and it is
+**not exported**:
+
+    SecurityException: ... not exported from UID 10314
+
+That is the wall, not the lock: no permission grant reaches it. **There is no
+state-tier route to Keep note content on this phone**, and no amount of
+Shizuku changes that. Don't spend time on it. (Ten Keep authorities are
+registered; the other nine are file/clipboard/startup plumbing, not notes.)
+
+### Write a note
+**Route:** intent, *declared but untested*. **Established:** 2026-08-23.
+
+Keep declares `android.intent.action.SEND` for `text/plain` via
+`com.google.android.keep.activities.ShareReceiverActivity`, `exported=true`,
+so `am start -a ...SEND -t text/plain --es android.intent.extra.TEXT "..."
+-p com.google.android.keep` should create a note.
+
+**Not fired.** Creating a note is a write, and — given Keep is not readable
+from shell — it is a write this agent could not verify *or clean up* without
+the screen. Declaring is not honouring (see YouTube Music above), so treat
+this as a plausible route, not a working one, until somebody watches it.
+
+`android.intent.action.CREATE_NOTE` resolves to nothing here, with or
+without a MIME type.
+
+### Google Docs
+**Route:** none for content. **Verified:** 2026-08-23.
+
+`com.google.android.apps.docs.editors.docs` registers no readable authority
+of that name (`Could not find provider`). Docs content lives behind the
+account, not on a shell-reachable provider.
+
+---
+
 ## Personal data
 
 ### Contacts, calendar, SMS, call log
