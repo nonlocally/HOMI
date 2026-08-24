@@ -336,6 +336,76 @@ def dev_shell(cmd, timeout=40, want_bytes=False):
 # on-device agent the ability to run any command at all.
 
 
+_CHECK_RE = re.compile(r"\A__PHONE_MD5__ ([0-9a-fA-F]{32}) (-?\d+)\n", re.S)
+
+
+def dev_shell_checked(cmd, timeout=90, attempts=4):
+    """Run a command on the device and PROVE its output arrived intact.
+
+    The persistent shell corrupts large reads. Not truncation — the byte
+    count and the line count come back exactly right, with a region
+    substituted by content from earlier in the stream, sometimes from the
+    PREVIOUS command entirely. Measured over a 169 KB self-verifying payload:
+    plain ssh 4/4 clean, shelld 4/4 corrupt, on-device and over the forward
+    alike. Clean at 4 KB, half at 9 KB, none at 61 KB.
+
+    Every guard we had passes it. rc is 0, the length is right, and a UI dump
+    still opens with <hierarchy and closes with </hierarchy>. XML is merely
+    brittle enough to notice; a package list or a dumpsys has nothing to
+    notice with and would simply be believed.
+
+    So the DEVICE states what it sent, and we check. The command writes to a
+    file there, the file's md5 comes back ahead of the data, and a mismatch
+    is retried. Retries converge quickly (measured 1-5 attempts) because the
+    corruption is intermittent rather than deterministic.
+
+    Root cause is still open — this is a check, not a cure. But a channel
+    that is known to corrupt should be verified whether or not we understand
+    why, and a verified read is correct even if there turn out to be several
+    causes.
+    """
+    # Expanded by the DEVICE's shell, not here. /data/local/tmp is the only
+    # place shell can reliably write on Android (/sdcard is a fuse mount the
+    # installer cannot even read), but honouring TMPDIR first keeps the same
+    # code exercisable off-device instead of needing a test-only flag — the
+    # kind that has caused real damage in this file before.
+    tmp = "${TMPDIR:-/data/local/tmp}/phone-rd-%d-%d" % (
+        os.getpid(), int(time.time() * 1000))
+    # md5 FIRST, then the data: a prefix can be located without trusting the
+    # length of what follows.
+    wrapped = ('{ %s ; } > %s 2>&1; __rc=$?; '
+               'printf "__PHONE_MD5__ %%s %%s\n" '
+               '"$(md5sum %s | cut -d" " -f1)" "$__rc"; '
+               'cat %s; printf "#"; rm -f %s' % (cmd, tmp, tmp, tmp, tmp))
+    last = None
+    for _ in range(attempts):
+        rc, out = dev_shell(wrapped, timeout=timeout)
+        m = _CHECK_RE.match(out or "")
+        if not m:
+            last = "no checksum in the reply"
+            continue
+        want, inner_rc = m.group(1).lower(), int(m.group(2))
+        body = (out or "")[m.end():]
+        # The trailing "#" is load-bearing. The daemon strips ONE trailing
+        # newline from every response — "byte-identical either way" is true
+        # for a human reading it and fatal for a checksum — so a payload
+        # ending in a newline could never match its own md5. Anchoring with a
+        # non-newline byte means nothing is removed. Without this the check
+        # failed 100% of the time, on reads that were perfectly intact.
+        if not body.endswith("#"):
+            last = "the end-anchor is missing — the reply was truncated"
+            continue
+        body = body[:-1]
+        import hashlib
+        got = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
+        if got == want:
+            return inner_rc, body
+        last = "checksum %s, got %s (%d bytes)" % (want[:8], got[:8], len(body))
+    die("the read did not survive the trip after %d attempts — %s. "
+        "This is the known large-read corruption; the data is NOT "
+        "trustworthy, so none is returned." % (attempts, last), 5)
+
+
 def dev_read(remote_path, want_bytes=False):
     """Read a file the device shell just wrote.
 
@@ -727,11 +797,14 @@ def cmd_sh(args):
     # diagnosing, and withholding the half of the output that says WHY is
     # the opposite of useful.
     cmd = merged(" ".join(args.cmd))
-    r = shelld_call(cmd)
-    if r is None:
-        rc, out = dev_shell(cmd, timeout=args.timeout)
+    if args.checked:
+        rc, out = dev_shell_checked(cmd, timeout=args.timeout)
     else:
-        rc, out = r
+        r = shelld_call(cmd)
+        if r is None:
+            rc, out = dev_shell(cmd, timeout=args.timeout)
+        else:
+            rc, out = r
     sys.stdout.write(out if out.endswith("\n") or not out else out + "\n")
     return rc
 
@@ -1933,12 +2006,23 @@ def probe_capabilities():
     if rc != 0:
         caps["notification_replies"] = {"ok": None, "detail": "could not ask"}
     else:
-        n = len(re.findall(r"[Rr]emoteInput", out or ""))
+        # This used to count /[Rr]emoteInput/ and report "26 direct-reply
+        # actions". All 26 were `android.remoteInputHistory=null` — one
+        # standard extras key per notification record, present whether or not
+        # anything is repliable. Case-sensitive RemoteInput matches ZERO.
+        # A capability probe reporting a capability that does not exist is
+        # worse than one reporting nothing.
+        #
+        # dumpsys cannot answer this honestly at all: the authority is
+        # Notification.Action.getRemoteInputs(), which only a bound listener
+        # can call. So say who to ask instead of guessing.
+        hist = len(re.findall(r"remoteInputHistory", out or ""))
         caps["notification_replies"] = {
-            "ok": n > 0,
-            "detail": ("%d direct-reply action(s) on screen now — but firing "
-                       "one needs a notification listener, not this shell" % n)
-            if n else "no repliable notifications right now"}
+            "ok": None,
+            "detail": ("shell cannot tell — dumpsys shows %d "
+                       "remoteInputHistory keys, which are NOT reply actions. "
+                       "Ask the phonebridge listener (op \"list\", field "
+                       "\"repliable\")" % hist)}
 
     handlers = intent_handlers(PLAY_FROM_SEARCH)
     caps["play_from_search"] = ({"ok": None, "detail": "could not ask"}
@@ -2962,6 +3046,9 @@ def build_parser():
     s.add_argument("--ttl", type=int, default=DEFAULT_TTL)
 
     s = add("sh", cmd_sh, "run a raw device-shell command")
+    s.add_argument("--checked", action="store_true",
+                   help="verify the output survived the trip (large reads "
+                        "silently corrupt; see dev_shell_checked)")
     s.add_argument("cmd", nargs="+")
     s.add_argument("--timeout", type=int, default=90)
 

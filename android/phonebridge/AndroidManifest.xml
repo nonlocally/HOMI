@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  phonebridge — the one capability shell UID provably cannot have.
+
+  Shell (uid 2000) can READ every notification through dumpsys, including the
+  fact that 26 of them carry direct-reply actions right now. It cannot FIRE
+  one: a PendingIntent is a live Binder token held in system_server, and
+  dumpsys prints a description of it, not the thing itself. There is no path
+  from that text back to a fireable object.
+
+  Nor can Shizuku shortcut it. INotificationManager.registerListener() calls
+  enforceSystemOrSystemUI(), which admits uid 1000 (system), 1001 (phone) and
+  0 (root), and that check runs SERVER side, inside system_server. Shizuku's
+  trick is bypassing the CLIENT side hidden-API blocklist, a different layer
+  entirely. Verified against AOSP source, not guessed.
+
+  So: an app, holding a bound NotificationListenerService, which is the only
+  process that ever gets the live Notification.Action.
+
+  No launcher activity, no UI, no resources. Installed with `pm install` and
+  granted with `cmd notification allow_listener`, which also happens to be
+  the documented way past Android 13's "Restricted settings" wall for
+  sideloaded apps.
+
+  (XML comments cannot contain a double hyphen, which is why no flag is
+  spelled out above. The first version of this file did spell one out and
+  aapt2 rejected it as an invalid token.)
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="com.aadarwal.phonebridge">
+
+    <!-- Loopback only. The bridge is reached the same way `phone shelld` is:
+         an ssh forward from the controller. Nothing listens off-device. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Apps targeting 30+ cannot see a service they have not declared an
+         interest in. createOnDeviceSpeechRecognizer resolves through a
+         resource overlay rather than a package query, but createSpeechRecognizer
+         does query, so this is here to keep both paths open. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+    </queries>
+
+    <application android:label="phonebridge"
+                 android:allowBackup="false"
+                 android:hasCode="true">
+
+        <!-- BIND_NOTIFICATION_LISTENER_SERVICE is a signature permission the
+             SYSTEM holds, not us. Declaring it here is how we say "only the
+             system may bind this service". -->
+        <service
+            android:name=".Listener"
+            android:exported="true"
+            android:label="phonebridge"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService"/>
+            </intent-filter>
+        </service>
+
+        <!-- Invisible, and started from shell with `am start`. A mic
+             foreground service cannot be STARTED from the background, and
+             this app has no UI so it is permanently backgrounded. Being
+             foreground for an instant is the exemption. -->
+        <activity
+            android:name=".Boot"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay"/>
+
+        <!-- Measured, not assumed: with no foreground service, a listen
+             returned an EMPTY callback trace after 12s. The recogniser never
+             started. Android has blocked background mic since 9, and from 14
+             a mic-touching service must declare the type explicitly. -->
+        <service
+            android:name=".VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"/>
+    </application>
+</manifest>
