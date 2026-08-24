@@ -1447,11 +1447,18 @@ PLAY_FROM_SEARCH = "android.media.action.MEDIA_PLAY_FROM_SEARCH"
 def intent_handlers(action):
     """Which packages declare a handler for this intent, per THE DEVICE.
 
-    Not a table. On this Pixel, YouTube Music implements
-    MEDIA_PLAY_FROM_SEARCH and Apple Music does not — two music apps, same
-    category, different answers. Any hardcoded list is wrong on somebody's
-    phone the day it is written, which is the same mistake the old app-name
-    table made before pkg_of started asking.
+    Not a table, and the reason is sharper than "phones differ".
+
+    This docstring used to say YouTube Music implements
+    MEDIA_PLAY_FROM_SEARCH and Apple Music does not. Both halves were wrong
+    within hours. Apple Music DOES declare it (I had read the handler list
+    through `head` and seen three of six). YouTube Music declares it and
+    honours only half: it foregrounds, resolves the query correctly and
+    builds a real queue, then sits at PAUSED position=0 and plays nothing.
+
+    So a declaration is a hint, not a contract, and a written-down list is
+    wrong faster than anyone will notice. Ask the device, then WATCH what
+    happens.
 
     Returns None when we cannot look (no device shell), which is not the
     same as "nothing handles it".
@@ -2031,12 +2038,22 @@ def parse_media_sessions(text):
     session is broken.
     """
     out, cur = [], None
+    # Which session will actually receive `cmd media_session dispatch`.
+    # The command takes no session argument: it goes to the media button
+    # session — the app that last held AUDIO — which is not necessarily the
+    # foreground app, and not necessarily the one you just addressed with an
+    # intent. Watched on the device: with YouTube Music foregrounded, active
+    # and holding a loaded queue, `dispatch play` started Apple Music.
+    bm = re.search(r"Media button session is ([A-Za-z0-9._]+)/", text or "")
+    button = bm.group(1) if bm else None
     for raw in (text or "").splitlines():
         line = raw.strip()
         if line.startswith("package="):
-            cur = {"package": line.split("=", 1)[1].strip(), "active": False,
+            pkg = line.split("=", 1)[1].strip()
+            cur = {"package": pkg, "active": False,
                    "state": None, "position_ms": None, "description": None,
-                   "error": None}
+                   "error": None,
+                   "media_button": button is not None and pkg == button}
             out.append(cur)
             continue
         if cur is None:
@@ -2083,6 +2100,8 @@ def current_session(sessions):
 
 def describe_session(s):
     bits = [s["package"], (s.get("state") or "no state").lower()]
+    if s.get("media_button"):
+        bits.append("<- keys")
     if s.get("description"):
         bits.append(s["description"])
     if s.get("position_ms") not in (None, -1):
@@ -2130,7 +2149,18 @@ def cmd_media(args):
         return 0
 
     need_shell()
-    before = current_session(sessions)
+    # Verify against the session the keys will actually reach. Comparing
+    # `current_session` before and after re-ranks in between: if the dispatch
+    # lands on a different app, the ranking can hand back a DIFFERENT session
+    # afterwards, the two states differ, and the move reads as success —
+    # crediting one app's playback to another.
+    target = next((x for x in sessions if x.get("media_button")), None)
+    before = target or current_session(sessions)
+    if target and args.strict and current_session(sessions) is not None \
+            and current_session(sessions).get("package") != target["package"]:
+        die("the media keys go to %s, but the session that looks current is "
+            "%s — name what you mean or drop --strict"
+            % (target["package"], current_session(sessions)["package"]), 4)
     rc, _out = dev_shell("cmd media_session dispatch %s"
                          % DISPATCH[args.action], timeout=25)
     if rc != 0:
@@ -2140,10 +2170,19 @@ def cmd_media(args):
     # Watch for the change rather than assuming it. A transport key can be
     # accepted and ignored — the app may not honour it, or the session may
     # have gone away between the read and the dispatch.
+    def _same_session(fresh):
+        """Re-find the SAME app, so before/after is one session's story."""
+        if before is None:
+            return current_session(fresh)
+        for x in fresh:
+            if x.get("package") == before["package"]:
+                return x
+        return None
+
     after = None
     for _ in range(6):
         time.sleep(0.5)
-        after = current_session(read_media(args))
+        after = _same_session(read_media(args))
         if _media_moved(before, after, args.action):
             break
     moved = _media_moved(before, after, args.action)
@@ -2807,6 +2846,9 @@ def build_parser():
                             "prev", "stop"])
     s.add_argument("--current", action="store_true",
                    help="only the session that actually matters")
+    s.add_argument("--strict", action="store_true",
+                   help="refuse to dispatch when the media keys would reach "
+                        "a different app than the one that looks current")
     s.add_argument("--from", dest="from_", help="parse a dumpsys capture")
     s.add_argument("--json", action="store_true")
 

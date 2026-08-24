@@ -781,6 +781,7 @@ if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
 else bad "empty actor forced across (got: $out)"; fi
 
 cat > "$T/media.txt" <<'MEDIAEOF'
+  Media button session is com.apple.android.music/androidx.media3.session.id.com.apple.android.music/11 (userId=0)
   Sessions Stack - have 3 sessions:
     androidx.media3.session.id.com.apple.android.music com.apple.android.music/androidx.media3.session.id.com.apple.android.music/11 (userId=0)
       ownerPid=25851, ownerUid=10338, userId=0
@@ -974,6 +975,38 @@ if [ $rc -ne 0 ] && [ ! -f "$ST/bad.png" ]; then
   ok "non-image bytes are refused, and no file is left behind"
 else bad "wrote non-image bytes as a screenshot (rc=$rc out=$out)"; fi
 rm -rf "$ST"
+
+echo "== media: dispatch goes to the BUTTON session, not the one you meant"
+# Found by ranger, on the device, watching rather than reasoning:
+# `cmd media_session dispatch` takes no session argument. It goes to the
+# "media button session" -- the app that last held AUDIO -- which is not
+# necessarily the foreground app and not necessarily the one you just
+# addressed. With YouTube Music foregrounded, active, and holding a loaded
+# queue, `dispatch play` started APPLE MUSIC and left YT Music frozen at 0.
+#
+# That breaks the verification I shipped: before/after was compared on
+# `current_session`, which re-ranks after the dispatch. If the dispatch lands
+# on a different app, the ranking can hand back a DIFFERENT session
+# afterwards, the states differ, and the move gets reported as success --
+# crediting one app's playback to another. So the target has to be named,
+# and before/after compared on the same package.
+out="$("$PHONE" media --from "$T/media.txt" --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+btn = [s for s in d if s.get("media_button")]
+assert len(btn) == 1, btn
+assert btn[0]["package"] == "com.apple.android.music", btn
+others = [s for s in d if not s.get("media_button")]
+assert all(s["package"] != "com.apple.android.music" for s in others), others
+' 2>/dev/null; then
+  ok "the session that will receive a dispatch is identified"
+else bad "media button session not identified (got: $out)"; fi
+
+out="$("$PHONE" media --from "$T/media.txt" 2>&1)"
+if printf '%s' "$out" | grep -q "<- keys" ; then
+  ok "and it is marked in the human view, so nobody has to guess"
+else bad "button session unmarked in human output (got: $out)"; fi
 
 echo "== capabilities: ask the device, do not trust a table in a document"
 # Every capability fact won tonight is dated. Apple Music declares
