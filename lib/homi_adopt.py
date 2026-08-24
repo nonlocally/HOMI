@@ -56,6 +56,15 @@ def probe_script(my_addr, hub_key_material=""):
         'echo "OS=$(uname -s)"; echo "HOMEDIR=$HOME"; echo "SHELL_=$SHELL"; '
         'echo "UNAME_O=$(uname -o 2>/dev/null)"; echo "PREFIX=$PREFIX"; '
         'echo "HOMI_SELF_=$HOMI_SELF"; '
+        # The probe runs `ssh <host> sh -s`: non-login and non-interactive,
+        # so it reads NO profile. Asking $HOMI_SELF here answers "is it in
+        # MY shell", which is always no — a checklist item keyed on that can
+        # never clear, and a checklist that stays lit after the human did
+        # the thing teaches them to ignore the next one. Ask instead which
+        # profiles actually carry the export.
+        'hsf=""; for f in .bash_profile .bashrc .profile .zshenv .zshrc; do '
+        'grep -qs "^[[:space:]]*export HOMI_SELF=" "$HOME/$f" && '
+        'hsf="$hsf $f"; done; echo "HOMI_SELF_FILES=$hsf"; '
         'echo "XDG=$XDG_RUNTIME_DIR"; '
         'echo "SSHIP=${SSH_CONNECTION%%%% *}"; '
         'o=$(stat -f %%u /tmp/cc-socks 2>/dev/null || '
@@ -111,6 +120,8 @@ def parse_facts(out):
         "is_termux": (kv.get("UNAME_O", "") == "Android"
                       or "com.termux" in kv.get("PREFIX", "")),
         "homi_self": kv.get("HOMI_SELF_", ""),
+        "homi_self_files": [f for f in kv.get("HOMI_SELF_FILES", "").split()
+                            if f],
         "home": kv.get("HOMEDIR", ""),
         "login_shell": kv.get("SHELL_", ""),
         "xdg": kv.get("XDG", ""),
@@ -270,7 +281,17 @@ def plan(facts, local):
         # from the shell. Deleting this export is not a cleanup.
         acts.append({"step": "tmpdir",
                      "profiles": _profile_files(facts.get("login_shell"))})
-        if not facts.get("homi_self"):
+        # Configured means: the export lives in a profile this device's
+        # login shell actually reads. A file for a DIFFERENT shell does not
+        # count — bash reads .bash_profile and stops, so an export sitting
+        # only in .profile or .zshenv never reaches it (a live case: the
+        # export was in .bashrc and .profile, and no shell on the phone had
+        # it, while the daemon worked only because it was set at launch).
+        mine = set(os.path.basename(f) for f in
+                   _profile_files(facts.get("login_shell")))
+        configured = bool(facts.get("homi_self")) or bool(
+            mine & set(facts.get("homi_self_files") or []))
+        if not configured:
             # No MagicDNS on Android, so the device cannot learn its own
             # fabric name. NEVER invent one: a wrong name forks the
             # identity and its mail goes to a device that does not exist.
