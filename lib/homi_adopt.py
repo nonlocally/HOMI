@@ -62,6 +62,18 @@ def probe_script(my_addr, hub_key_material=""):
         # never clear, and a checklist that stays lit after the human did
         # the thing teaches them to ignore the next one. Ask instead which
         # profiles actually carry the export.
+        # Read the VALUE from the device's own login shell in login mode —
+        # by construction the environment its agent gets. Grepping the
+        # assignment cannot resolve HOMI_SELF="$(hostname)", quoting, or a
+        # later reassignment, and would fail quietly toward "configured".
+        # (This is not the bug that was reported: that was reading
+        # $HOMI_SELF in a NON-login sh, which can never see a profile.)
+        # The default is emitted first so the key always exists; the login
+        # shell's own line overwrites it, and any chatter a profile prints
+        # lands on other lines that parse_facts ignores.
+        'echo "HOMI_SELF_VALUE="; '
+        '"$SHELL" -lc \'printf "HOMI_SELF_VALUE=%%s\\n" "$HOMI_SELF"\' '
+        '2>/dev/null; '
         'hsf=""; for f in .bash_profile .bashrc .profile .zshenv .zshrc; do '
         'grep -qs "^[[:space:]]*export HOMI_SELF=" "$HOME/$f" && '
         'hsf="$hsf $f"; done; echo "HOMI_SELF_FILES=$hsf"; '
@@ -122,6 +134,7 @@ def parse_facts(out):
         "homi_self": kv.get("HOMI_SELF_", ""),
         "homi_self_files": [f for f in kv.get("HOMI_SELF_FILES", "").split()
                             if f],
+        "homi_self_value": kv.get("HOMI_SELF_VALUE", ""),
         "home": kv.get("HOMEDIR", ""),
         "login_shell": kv.get("SHELL_", ""),
         "xdg": kv.get("XDG", ""),
@@ -281,24 +294,38 @@ def plan(facts, local):
         # from the shell. Deleting this export is not a cleanup.
         acts.append({"step": "tmpdir",
                      "profiles": _profile_files(facts.get("login_shell"))})
-        # Configured means: the export lives in a profile this device's
-        # login shell actually reads. A file for a DIFFERENT shell does not
-        # count — bash reads .bash_profile and stops, so an export sitting
-        # only in .profile or .zshenv never reaches it (a live case: the
-        # export was in .bashrc and .profile, and no shell on the phone had
-        # it, while the daemon worked only because it was set at launch).
-        mine = set(os.path.basename(f) for f in
-                   _profile_files(facts.get("login_shell")))
-        configured = bool(facts.get("homi_self")) or bool(
-            mine & set(facts.get("homi_self_files") or []))
-        if not configured:
-            # No MagicDNS on Android, so the device cannot learn its own
-            # fabric name. NEVER invent one: a wrong name forks the
-            # identity and its mail goes to a device that does not exist.
-            checklist.append(
-                "this device has no HOMI_SELF and Android has no MagicDNS to "
-                "derive one — export HOMI_SELF=<its fabric name> in its shell "
-                "profile, then re-run adopt")
+        # The login shell's own answer is the authority: it is definitionally
+        # what a shell on that device sees, resolved past quoting, command
+        # substitution and reassignment. The FILE list is kept only as a
+        # diagnostic, for the case where an export exists but in a profile
+        # this shell never reads (bash reads .bash_profile and stops — a
+        # live case: the export sat in .bashrc and .profile, no shell on the
+        # phone had it, and the daemon worked only because it was set by
+        # hand at launch).
+        name = (facts.get("homi_self_value") or facts.get("homi_self") or "")
+        if not name:
+            mine = set(os.path.basename(f) for f in
+                       _profile_files(facts.get("login_shell")))
+            stray = [f for f in (facts.get("homi_self_files") or [])
+                     if f not in mine]
+            # NEVER invent a name: a wrong one does not fail, it FORKS the
+            # identity — mail routes to a name nobody listens on while every
+            # layer reports success.
+            if stray:
+                checklist.append(
+                    "HOMI_SELF is exported in %s, but this device's login "
+                    "shell (%s) does not read that file — so the daemon I "
+                    "just started has no fabric identity. Move the export "
+                    "into %s and re-run adopt"
+                    % (", ".join(stray),
+                       os.path.basename(facts.get("login_shell") or "sh"),
+                       ", ".join(sorted(mine))))
+            else:
+                checklist.append(
+                    "HOMI_SELF is not configured and Android has no MagicDNS "
+                    "to derive it, so the daemon I just started has no fabric "
+                    "identity — export HOMI_SELF=<its fabric name> in %s, "
+                    "then re-run adopt" % ", ".join(sorted(mine)))
 
     if not facts.get("tmux_bin"):
         if facts.get("os") == "Darwin":
@@ -330,12 +357,18 @@ def plan(facts, local):
         # listens in ~/.local/run/cc-socks (the split-brain, proven live).
         need_restart = True
     if need_restart:
+        # Profiles do not reach a non-interactive daemon start — the same
+        # reason XDG_RUNTIME_DIR is inlined. So the identity rides with it,
+        # read back from the one source of truth rather than taken as a
+        # second input that could disagree with the device.
+        _self = (facts.get("homi_self_value") or facts.get("homi_self") or "")
         # `env`: this device was moved off the default cc-socks, so its
         # daemon must be restarted WITH that runtime dir — a profile is not
         # enough (non-interactive ssh sources none on macOS, and a no-systemd
         # Linux like Termux has no runtime dir at all).
         acts.append({"step": "restart_daemon",
-                     "env": provisioned_rt})      # always LAST: post-pair
+                     "env": provisioned_rt,
+                     "homi_self": _self})         # always LAST: post-pair
 
     return acts, checklist
 
@@ -599,6 +632,9 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
             # the plan's own decision is what broke that case.
             env = ('XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/run}" '
                    if (a.get("env") or facts.get("os") == "Darwin") else "")
+            _self = a.get("homi_self") or ""
+            if _self:
+                env += "HOMI_SELF=%s " % shlex.quote(_self)
             rc, out = ssh(addr,
                           "pkill -f 'homi.py daemon' 2>/dev/null; sleep 1; "
                           "%snohup python3 "
