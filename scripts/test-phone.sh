@@ -780,6 +780,53 @@ if ! printf '%s' "$out" | grep -q "PHONE_ACTOR"; then
   ok "no actor set means no actor forced on the device"
 else bad "empty actor forced across (got: $out)"; fi
 
+echo "== a screenshot has to be able to cross the hop at all"
+# The skill tells the agent: when the tree fails you, take a screenshot and
+# look at the picture. From a controller that never worked. Binary cannot
+# ride the forwarded socket (shelld carries text), rish is not on the
+# controller and adb has no device, so the read came back empty and screen
+# died with "screen off or secure surface" -- a diagnosis that sends you to
+# unlock a phone that was never the problem. A capability the skill depends
+# on, absent in the configuration the skill describes, blamed on the user.
+ST="$(mktemp -d)"
+cat > "$ST/ssh" <<'SEOF'
+#!/bin/sh
+# A device that streams a PNG on stdout, as `phone screen --out -` does.
+printf '\211PNG\r\n\032\n'
+printf 'IHDRfake-image-body'
+SEOF
+chmod +x "$ST/ssh"
+out="$(PATH="$ST:$PATH" TMPDIR="$ST" PHONE_LEDGER="$ST/l.jsonl" \
+       "$PHONE" --device aadarshs-pixel-10 screen --out "$ST/got.png" 2>&1)"; rc=$?
+# Compare the magic BYTES. grep skips the line entirely under a UTF-8
+# locale, because \x89 is not valid UTF-8 -- it reported no match on a
+# file that was perfectly correct.
+magic="$(od -An -tx1 -N8 "$ST/got.png" 2>/dev/null | tr -d ' \n')"
+if [ $rc -eq 0 ] && [ "$magic" = "89504e470d0a1a0a" ]; then
+  ok "screen --device streams the image back and writes it HERE"
+else bad "screenshot did not cross the hop (rc=$rc out=$out)"; fi
+
+# The plan must show it running ON the device, not against the socket.
+out="$(TMPDIR="$ST" "$PHONE" --device aadarshs-pixel-10 --print-plan screen 2>&1)"
+if printf '%s' "$out" | grep -q "ssh" && printf '%s' "$out" | grep -q -- "--out -"; then
+  ok "screen is planned to run on the device, streaming to stdout"
+else bad "screen routing (got: $out)"; fi
+
+# Bytes that are not an image must not be written and called a screenshot.
+# An ssh error, a login banner, a shell diagnostic on stdout: all non-empty.
+cat > "$ST/ssh" <<'SEOF'
+#!/bin/sh
+echo "Warning: Permanently added something to known hosts."
+SEOF
+chmod +x "$ST/ssh"
+rm -f "$ST/bad.png"
+out="$(PATH="$ST:$PATH" TMPDIR="$ST" PHONE_LEDGER="$ST/l2.jsonl" \
+       "$PHONE" --device aadarshs-pixel-10 screen --out "$ST/bad.png" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && [ ! -f "$ST/bad.png" ]; then
+  ok "non-image bytes are refused, and no file is left behind"
+else bad "wrote non-image bytes as a screenshot (rc=$rc out=$out)"; fi
+rm -rf "$ST"
+
 echo "== play must not report playing when it opened a web page"
 # The third sibling of the wa.me shape. play hands a https URL to launch(),
 # which opens a BROWSER when the app is absent and returns 0 -- and play

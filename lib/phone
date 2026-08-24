@@ -797,6 +797,19 @@ TERMUX_VERBS = {"say", "listen", "notifs", "notify", "battery", "torch",
 # of a trace that reads fine on its own.
 NO_LINK_VERBS = {"log"}
 
+# Verbs whose RESULT is binary. The forwarded socket cannot carry them:
+# shelld speaks a text protocol with a sentinel, so dev_shell skips it for
+# bytes, and on a controller there is no rish and no adb-attached device
+# either. So `screen` came back empty and died with "screen off or secure
+# surface" — blaming the phone for a hop it could never have crossed, in the
+# one verb the skill tells an agent to reach for when the UI tree fails.
+#
+# They run ON the device, writing to ITS stdout, and the bytes are streamed
+# home. Same trade as the termux verbs: an ssh fork per call, for a
+# capability that otherwise does not exist at all.
+BINARY_VERBS = {"screen"}
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
 
 def remote_exec(device, argv_rest):
     """Run `phone <verb> ...` on the device itself, as the Termux app."""
@@ -2323,6 +2336,51 @@ def main(argv):
     # split trace — can see it without threading it through every signature.
     if device:
         os.environ["PHONE_DEVICE"] = device
+    if device and verb0 in BINARY_VERBS:
+        # Pull our own --out aside: the device streams to ITS stdout, and the
+        # file is written HERE. Leaving --out in the remote argv would write
+        # a screenshot onto the phone and print a path that does not exist
+        # on the machine holding it.
+        local_out, rest, i = "screen.png", [], 1
+        while i < len(out):
+            if out[i] == "--out" and i + 1 < len(out):
+                local_out = out[i + 1]
+                i += 2
+                continue
+            if out[i].startswith("--out="):
+                local_out = out[i].split("=", 1)[1]
+                i += 1
+                continue
+            rest.append(out[i])
+            i += 1
+        argv_r = remote_exec(device, [verb0] + rest + ["--out", "-"])
+        if print_plan:
+            print("run on the device, streaming bytes home: %s"
+                  % " ".join(argv_r))
+            return 0
+        pr = subprocess.run(argv_r, capture_output=True, timeout=180)
+        if pr.returncode != 0 or not pr.stdout:
+            sys.stderr.write((pr.stderr or b"").decode("utf-8", "replace")
+                             or "phone: %s produced nothing on %s\n"
+                             % (verb0, device))
+            return pr.returncode or 4
+        # It has to LOOK like an image. Anything on that stdout is non-empty
+        # — an ssh banner, a known-hosts warning, a shell diagnostic — and
+        # writing those to screen.png would hand back a "screenshot" that no
+        # viewer can open, reported as a success with a path.
+        if not pr.stdout.startswith(PNG_MAGIC):
+            head = pr.stdout[:120].decode("utf-8", "replace").strip()
+            sys.stderr.write("phone: %s did not return an image (got %r) — "
+                             "nothing written\n" % (verb0, head))
+            return 4
+        if local_out == "-":
+            sys.stdout.buffer.write(pr.stdout)
+            sys.stdout.buffer.flush()
+            return 0
+        with open(local_out, "wb") as f:
+            f.write(pr.stdout)
+        print(local_out)
+        return 0
     if device and verb0 in TERMUX_VERBS:
         argv_r = remote_exec(device, out)
         if print_plan:
