@@ -90,6 +90,26 @@ def installed_packages():
     return _PKGS
 
 
+def package_present(pkg):
+    """Is this exact package on the device? True / False / None.
+
+    NOT installed_packages(): that asks `pm list packages -3`, third-party
+    only, and the apps a `play` link targets are frequently SYSTEM packages —
+    on a Pixel, com.google.android.youtube and ...youtube.music both are.
+    Checking the third-party list would refuse to play music on a phone that
+    has the player, which is a false refusal traded for a false success and
+    no better than what it replaced.
+
+    None means "could not look" (no device shell) and must never be read as
+    absence: losing level 2 would otherwise start refusing level 1 work.
+    """
+    rc, out = dev_shell("pm list packages %s" % pkg, timeout=25)
+    if rc != 0:
+        return None
+    want = "package:" + pkg
+    return any(l.strip() == want for l in (out or "").splitlines())
+
+
 def pkg_of(name):
     """Resolve a friendly name to a package that is ACTUALLY on this device.
 
@@ -1383,6 +1403,16 @@ def cmd_open(args):
     die("cannot launch %r: no device shell (start Shizuku)" % target, 3)
 
 
+# Which app each search link actually needs present. Without this, the link
+# is just a https URL and Android hands it to a browser — the wa.me shape.
+PLAY_PKGS = {
+    "ytmusic": "com.google.android.apps.youtube.music",
+    "youtubemusic": "com.google.android.apps.youtube.music",
+    "spotify": "com.spotify.music",
+    "youtube": "com.google.android.youtube",
+}
+
+
 def cmd_play(args):
     from urllib.parse import quote_plus
     query = " ".join(args.query)
@@ -1390,9 +1420,37 @@ def cmd_play(args):
     tmpl = LINKS.get(app)
     if not tmpl or "{q}" not in tmpl:
         die("cannot search in %r — try ytmusic, spotify, or youtube" % app, 2)
-    if not args.print_url:
-        record("play", query, "act")
-    return launch(tmpl.replace("{q}", quote_plus(query)), args.print_url)
+    url = tmpl.replace("{q}", quote_plus(query))
+    if args.print_url:
+        return launch(url, True)
+
+    # Same shape as msg: a https link on a phone without the app opens a
+    # browser and exits 0, and "playing" gets reported for a web page.
+    pkg = PLAY_PKGS.get(app)
+    here = package_present(pkg) if pkg else None
+    if here is False:
+        record("play", {"query": query, "app": app}, "act",
+               "failed: %s is not installed on this device" % app)
+        die("cannot play: %s is not installed on this device. "
+            "(The link would open a browser, which is not music.)" % app, 4)
+
+    # Record AFTER, with the outcome in hand. It used to record before the
+    # attempt, so a launch that died outright still left a row asserting the
+    # music was playing — the ledger stating as fact something no one had
+    # any evidence for yet.
+    try:
+        rc = launch(url, False)
+    except SystemExit as e:
+        # Still record it. "I tried to play something and could not" is
+        # exactly what the trace is for; silence would read as never asked.
+        record("play", {"query": query, "app": app}, "act",
+               "failed: could not open the link", rc=1)
+        raise e
+    record("play", {"query": query, "app": app}, "act",
+           "started" if here else
+           "unconfirmed: opened the link, but there is no device shell to "
+           "confirm %s is installed" % app)
+    return rc
 
 
 SEND_IDS = ("com.whatsapp:id/send", "com.whatsapp:id/send_container")
@@ -1441,7 +1499,16 @@ def cmd_msg(args):
             "(A wa.me link would open a browser, which is not a message.)", 4)
 
     if not args.send:
-        rc = launch(url, False)          # dies loudly if it cannot open
+        try:
+            rc = launch(url, False)      # dies loudly if it cannot open
+        except SystemExit as e:
+            # Record the attempt. It used to die here with nothing written,
+            # so a message the agent tried and failed to draft left no trace
+            # — indistinguishable, later, from never having been asked.
+            record("msg", {"app": app, "to": num, "text": args.text,
+                           "sent": False}, "act",
+                   "failed: could not open the chat", rc=1)
+            raise e
         record("msg", {"app": app, "to": num, "text": args.text,
                        "sent": False, "verified": verified}, "act",
                "drafted" if verified else
