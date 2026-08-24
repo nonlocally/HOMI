@@ -178,6 +178,124 @@ if printf '%s' "$board" | grep -q 'href = "/talk/" + encodeURIComponent'; then
   ok "board page builds /talk hrefs (link construction present)"
 else bad "board page builds /talk hrefs"; fi
 
+echo "== a spoken turn is marked, so the agent knows it is being listened to"
+# The skill tells the agent to answer out loud, in one or two sentences, when
+# a turn was SPOKEN. Nothing sent that signal: the voice page posted the same
+# body as the typed page, so the instruction keyed on a marker the system
+# never produced. The page knows (?v=1 is what turns the ear on) -- say so.
+c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -d '{"to":"scout","text":"how much battery","voice":true}')"
+sleep 1
+IN="$COMM_STATE/homi/mail/scout/inbox.jsonl"
+if [ "$c" = "200" ] && grep -q '\[spoken\] how much battery' "$IN" 2>/dev/null; then
+  ok "voice:true marks the turn [spoken] in the agent's inbox"
+else bad "voice:true marks the turn (http $c)"; fi
+
+if grep -q '\[spoken\] how much battery' "$T/board/talk/scout.jsonl" 2>/dev/null; then
+  ok "the human's transcript records it was spoken, same text the agent got"
+else bad "transcript records the spoken marker"; fi
+
+c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -d '{"to":"scout","text":"typed not spoken"}')"
+sleep 1
+if [ "$c" = "200" ] && grep -q '"text": "typed not spoken"' "$IN" 2>/dev/null; then
+  ok "a typed turn is left alone (no marker)"
+else bad "typed turn unmarked (http $c)"; fi
+
+echo "== the page tells the server when the ear is on"
+# Grepping the page for the flag is NOT enough, and the first version of this
+# test proved it: `voice: earOn` was present and correct-looking, but `earOn`
+# is declared in a different IIFE, so the expression would have thrown
+# ReferenceError the first time anyone pressed send. A string the page
+# contains is not a value the page can compute.
+#
+# So: pull the real body expression out of the page and EVALUATE it, in a
+# scope that has only the globals the browser would have. A free variable
+# throws here exactly as it would there.
+tp="$(curl -sf -m 5 "http://127.0.0.1:$PORT/talk/scout?v=1" 2>/dev/null)"
+printf '%s' "$tp" > "$T/talk-page.html"
+if python3 - "$T/talk-page.html" <<'PYEOF'
+import re, subprocess, sys, json
+page = open(sys.argv[1]).read()
+m = re.search(r"body:\s*JSON\.stringify\((\{.*?\})\),", page, re.S)
+if not m:
+    print("no send body found"); sys.exit(1)
+expr = m.group(1)
+# Only `target`, `text` and real browser globals may appear. `window.__voice`
+# is the published contract; anything else is a free variable.
+for ear, want in ((True, True), (False, False)):
+    js = ("var target='scout', text='hi';"
+          "var window={__voice:{earOn:%s}};"
+          "var out=JSON.stringify(%s);"
+          "console.log(out);" % ("true" if ear else "false", expr))
+    r = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+    if r.returncode != 0:
+        print("body expression does not evaluate:", r.stderr.strip()[:200])
+        sys.exit(1)
+    got = json.loads(r.stdout.strip())
+    if got.get("voice") is not want or got.get("text") != "hi":
+        print("wrong payload for earOn=%s: %r" % (ear, got)); sys.exit(1)
+# And with no voice module at all (speech unsupported), it must not throw.
+js = ("var target='scout', text='hi'; var window={};"
+      "console.log(JSON.stringify(%s));" % expr)
+r = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+if r.returncode != 0 or json.loads(r.stdout.strip()).get("voice") is not False:
+    print("throws or mis-reports when speech is unsupported:", r.stderr.strip()[:200])
+    sys.exit(1)
+PYEOF
+then
+  ok "send body evaluates, and voice tracks the ear (both ways, and absent)"
+else bad "send body is not a computable expression"; fi
+
+echo "== the published ear is live, not a snapshot taken at page load"
+# The test above feeds a MOCKED window.__voice, so it proves the send
+# expression is correct and proves nothing about whether the page ever
+# updates the value it reads. That distinction is not academic: ?v=1 is not
+# the only way the ear turns on -- pressing the mic on an ordinary talk page
+# sets it mid-life, in rec.onend. Publishing `earOn: earOn` copies the
+# boolean once at load, so that path sends voice:false, gets a markdown
+# answer, and reads the asterisks aloud. The exact symptom the flag exists
+# to prevent, surviving in the case it was aimed at.
+#
+# So build the REAL published object and flip the variable the mic path
+# flips. A snapshot fails this; a getter passes it.
+if python3 - "$T/talk-page.html" <<'PYEOF'
+import re, subprocess, sys, json
+page = open(sys.argv[1]).read()
+i = page.find("window.__voice = {")
+if i < 0:
+    print("no __voice export found"); sys.exit(1)
+start = page.index("{", i)
+depth, j = 0, start
+while j < len(page):
+    if page[j] == "{":
+        depth += 1
+    elif page[j] == "}":
+        depth -= 1
+        if depth == 0:
+            break
+    j += 1
+literal = page[start:j + 1]
+js = ("var earOn = false, synthOK = true, gen = 0;"
+      "function chunkText(t){ return [t]; }"
+      "function speakChunks(){}"
+      "var window = { speechSynthesis: { cancel: function(){} } };"
+      "window.__voice = " + literal + ";"
+      "var before = window.__voice.earOn;"
+      "earOn = true;"                       # exactly what rec.onend does
+      "var after = window.__voice.earOn;"
+      "console.log(JSON.stringify({before: before, after: after}));")
+r = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+if r.returncode != 0:
+    print("published voice object does not evaluate:", r.stderr.strip()[:200])
+    sys.exit(1)
+d = json.loads(r.stdout.strip())
+if d.get("before") is not False or d.get("after") is not True:
+    print("stale ear: turning the mic on did not reach the send path", d)
+    sys.exit(1)
+PYEOF
+then
+  ok "turning the ear on mid-life reaches the send path (no stale snapshot)"
+else bad "published ear is a snapshot, not live"; fi
+
 echo "== invalid targets refused"
 c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -d '{"to":"../evil","text":"x"}')"
 if [ "$c" = "400" ]; then ok "bad target name refused (400)"; else bad "bad target refused (got $c)"; fi
