@@ -3629,10 +3629,17 @@ def build_parser():
     s.add_argument("--from", dest="sender", help="who is asking")
     s.add_argument("--listen", type=int, default=25,
                    help="seconds to wait for speech (always-listening mode)")
-    s.add_argument("--tap", action="store_true",
-                   help="wait for the Talk button instead of holding the "
-                        "microphone open — the mic opens only while someone "
-                        "is actually speaking")
+    # THE DIRECTION: the mini side is agent-driven, the phone side is
+    # person-driven. Everything that happens on this machine is an agent
+    # doing something; everything that happens on the phone starts with its
+    # owner. Always-listening violated that — the controller reached in and
+    # opened someone's microphone — so waiting for the tap is the DEFAULT
+    # and holding the mic open is the thing you have to ask for.
+    s.add_argument("--always-listen", action="store_false", dest="tap",
+                   default=True,
+                   help="hold the microphone open instead of waiting for the "
+                        "Talk button (the phone side is normally person-"
+                        "driven; this inverts that)")
     s.add_argument("--wait", type=int, default=300,
                    help="with --tap, seconds to wait for a tap before "
                         "looping round")

@@ -16,6 +16,10 @@ import java.util.concurrent.TimeUnit;
  * runs recognition on the device, and the transcript is handed across. The
  * microphone is open only between the tap and the end of the sentence.
  *
+ * This is the shape the whole split is supposed to have: the mini side is
+ * agent-driven and the phone side is person-driven. An agent may ANSWER on
+ * the phone, but it does not start a turn there.
+ *
  * A queue rather than a callback because the two sides are genuinely
  * independent: the controller may not be listening when someone taps (it
  * could be mid-answer, or not running at all), and someone may tap twice.
