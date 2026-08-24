@@ -3071,13 +3071,51 @@ def cmd_talk(args):
                     return 0 if ok else 5
                 continue
 
-        # SAY SOMETHING BEFORE THE LONG WAIT. Falling through to the agent
-        # costs tens of seconds, and the first time this happened live the
-        # person saw "heard: ..." and then nothing at all — no way to tell a
-        # model thinking from a loop that had died. Silence is the one
-        # response a voice interface must never give.
-        sys.stderr.write("phone: no quick answer for that — asking %s, "
-                         "this can take a while...\n" % args.to)
+        # THREE TIERS, and the middle one is why the regexes are not the
+        # whole story. Measured on this setup:
+        #
+        #   regex      ~1.5s   nine question shapes, no model, no judgement
+        #   router     5-10s   a SMALL model, warm — any phrasing, and it
+        #                      genuinely reasons ("is my phone about to
+        #                      die" -> "no, you're at 51 percent")
+        #   agent      ~40s    a frontier model, for work rather than answers
+        #
+        # The regexes survive only because 1.5s is perceptibly better than
+        # 7s on the handful of things people ask constantly. Everything else
+        # should reach a model, because "how much juice have I got left" is
+        # the same question as "what's my battery" and no pattern list ever
+        # ends.
+        answer, err = None, None
+        if args.router:
+            sys.stderr.write("phone: asking %s...\n" % args.router)
+            sys.stderr.flush()
+            t_r = time.time()
+            quick, rerr = _ask_agent(args.router, "[spoken] " + text,
+                                     sender, args.router_timeout)
+            took = time.time() - t_r
+            if quick and "ESCALATE" not in quick.upper():
+                said = bridge_call("say", device=device, text=quick, wait=120)
+                ok = bool(said and said.get("ok"))
+                record("talk", {"tier": "router", "router": args.router,
+                                "took_s": round(took, 1)}, "act",
+                       "answered by the fast tier" if ok else
+                       "unconfirmed: router answer not confirmed spoken",
+                       rc=0 if ok else 1)
+                print("answer (%s, %.0fs): %s" % (args.router, took, quick))
+                if not args.loop:
+                    return 0 if ok else 5
+                continue
+            sys.stderr.write("phone: %s %s after %.0fs\n"
+                             % (args.router,
+                                "escalated" if quick else "did not answer",
+                                took))
+
+        # SAY SOMETHING BEFORE THE LONG WAIT. The first time this happened
+        # live the person saw "heard: ..." and then nothing at all — no way
+        # to tell a model thinking from a loop that had died. Silence is the
+        # one response a voice interface must never give.
+        sys.stderr.write("phone: asking %s, this can take a while...\n"
+                         % args.to)
         sys.stderr.flush()
         bridge_call("say", device=device, text="One moment.", wait=30)
 
@@ -3505,6 +3543,11 @@ def build_parser():
     s.add_argument("--wake", help="only act on speech containing this phrase")
     s.add_argument("--loop", action="store_true", help="keep listening")
     s.add_argument("--verbose", action="store_true")
+    s.add_argument("--router", default="swift",
+                   help="small warm model tried before the agent "
+                        "(empty string to skip it)")
+    s.add_argument("--router-timeout", type=int, default=60,
+                   dest="router_timeout")
     s.add_argument("--no-fast", action="store_true", dest="no_fast",
                    help="always ask the agent, even for questions a verb "
                         "could answer in a second")
