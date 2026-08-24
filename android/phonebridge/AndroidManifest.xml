@@ -17,10 +17,13 @@
   So: an app, holding a bound NotificationListenerService, which is the only
   process that ever gets the live Notification.Action.
 
-  No launcher activity, no UI, no resources. Installed with `pm install` and
-  granted with `cmd notification allow_listener`, which also happens to be
-  the documented way past Android 13's "Restricted settings" wall for
-  sideloaded apps.
+  Installed with `pm install` and granted with `cmd notification
+  allow_listener`, which also happens to be the documented way past Android
+  13's "Restricted settings" wall for sideloaded apps.
+
+  It has a UI now — a native one, in Home. It still has no RESOURCES: every
+  view is built in code and every icon and theme is a platform drawable, which
+  is what keeps the build to four tool invocations and no Gradle.
 
   (XML comments cannot contain a double hyphen, which is why no flag is
   spelled out above. The first version of this file did spell one out and
@@ -54,21 +57,39 @@
                  android:usesCleartextTraffic="false"
                  android:hasCode="true">
 
-        <!-- The window onto the fabric. A launcher icon at last: everything
-             else this app does is invisible, which is exactly why it never
-             felt like an app. The icon is a PLATFORM drawable so we still
-             ship no resources of our own. -->
+        <!-- The front door, and it is NATIVE. A launcher icon was not enough:
+             the first version opened straight into a WebView on the board, so
+             the app looked exactly like a browser bookmark and none of the
+             things only an app can do (the listener, the on device recogniser,
+             the warm speech engine) were visible anywhere. Home is the screen
+             that shows them.
+
+             Theme.Material.NoActionBar is a PLATFORM style, so we still ship
+             no resources of our own. -->
         <activity
-            android:name=".Homi"
+            android:name=".Home"
             android:exported="true"
             android:label="homi"
             android:launchMode="singleTask"
+            android:theme="@android:style/Theme.Material.NoActionBar"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!-- One conversation, rendered by the fabric. Reached by tapping an
+             agent on Home. NOT singleTask: each agent opens its own instance
+             and Back returns to the list, which is what a person expects from
+             a list of conversations. -->
+        <activity
+            android:name=".Homi"
+            android:exported="false"
+            android:label="homi"
+            android:parentActivityName=".Home"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:configChanges="orientation|screenSize|keyboardHidden"/>
 
         <!-- BIND_NOTIFICATION_LISTENER_SERVICE is a signature permission the
              SYSTEM holds, not us. Declaring it here is how we say "only the

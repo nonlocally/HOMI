@@ -236,6 +236,18 @@ class _Cache:
                 self.at = time.time()
             return self.snap
 
+    def peek(self):
+        """Whatever we already have, or None. NEVER collects.
+
+        For callers on a latency path, where a stale answer beats a fresh one
+        that costs a ping per link and an ssh per device. Measured: an /api/ask
+        that validated its device against cache.get() took 20 seconds around a
+        4 second model call, every time the TTL had lapsed — with a person
+        standing there waiting to be spoken to.
+        """
+        with self.mu:
+            return self.snap
+
 
 
 # ---------------------------------------------------------------- PWA assets
@@ -621,7 +633,7 @@ def serve(port, bind, no_remote, ttl=10.0):
                 self.send_error(403, "host")
                 return
             path = self.path.split("?", 1)[0]
-            if path != "/api/send":
+            if path not in ("/api/send", "/api/ask"):
                 self.send_error(404)
                 return
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
@@ -633,6 +645,9 @@ def serve(port, bind, no_remote, ttl=10.0):
                 return
             if not self._token_ok():
                 self._json(403, {"ok": False, "err": "token"})
+                return
+            if path == "/api/ask":
+                self._ask()
                 return
             if not handle:
                 self._json(403, {"ok": False, "err": "claim a handle first"})
@@ -684,6 +699,93 @@ def serve(port, bind, no_remote, ttl=10.0):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _ask(self):
+            """The tier ladder, for a caller that has its own ears and mouth.
+
+            The homi app records on-device and speaks with its own engine, so
+            the only thing it needs from this machine is the ANSWER. Without
+            this route it had no way to reach the ladder, and its TALK button
+            therefore sent every spoken turn straight to a frontier agent —
+            a general-knowledge question went to an Opus session at xhigh
+            effort and took forty seconds, where the middle tier answers it
+            from its own knowledge in seven.
+
+            Deliberately NOT part of the device bridge: homi_device runs its
+            verbs over ssh ON the phone, and the router lives here. It is also
+            not a send — nothing leaves for a person, nothing enters anyone's
+            mailbox, so it needs no handle.
+            """
+            try:
+                n = max(0, min(int(self.headers.get("Content-Length") or 0), 8192))
+                req = json.loads(self.rfile.read(n).decode("utf-8"))
+                text = (req.get("text") or "").strip()
+            except (ValueError, UnicodeDecodeError):
+                self._json(400, {"ok": False, "err": "bad json"})
+                return
+            if not text:
+                self._json(400, {"ok": False, "err": "empty question"})
+                return
+            phone = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "phone")
+            argv = [sys.executable, phone, "ask", text]
+            # WHICH phone. The caller says, because the caller IS the phone;
+            # this process has no PHONE_DEVICE and would otherwise send every
+            # question about "my battery" to an agent. Validated against the
+            # fabric's own roster, never taken on trust: the name reaches ssh,
+            # where a leading '-' is a flag and not a hostname.
+            dev = (req.get("device") or os.environ.get("PHONE_DEVICE") or "").strip()
+            if dev:
+                # Shape first, and it is the check that matters: this name
+                # reaches ssh, where a leading '-' is a flag and
+                # `-oProxyCommand=` is arbitrary execution.
+                if not homi_device.valid_device(dev):
+                    self._json(400, {"ok": False, "err": "bad device name"})
+                    return
+                # Then roster membership, but only against a snapshot we
+                # ALREADY hold. Forcing a collection here — which is what
+                # cache.get() does once its 10s TTL lapses — put a fabric-wide
+                # probe in front of every spoken turn: 20 seconds around a 4
+                # second answer. The membership test is defence in depth over
+                # a shape check that already closes the injection; it is not
+                # worth making someone wait for.
+                snap = cache.peek()
+                if snap is not None:
+                    roster = [d.get("device")
+                              for d in (snap.get("devices") or [])]
+                    if not homi_device.known(dev, roster):
+                        self._json(400, {"ok": False, "err": "unknown device"})
+                        return
+                argv[3:3] = ["--device", dev]
+            try:
+                pr = subprocess.run(argv, capture_output=True, text=True,
+                                    timeout=90)
+            except (OSError, subprocess.SubprocessError) as e:
+                self._json(502, {"ok": False, "err": "router did not run: %s" % e})
+                return
+            answer = (pr.stdout or "").strip()
+            tier = ""
+            for line in (pr.stderr or "").splitlines():
+                if line.startswith("tier:"):
+                    tier = line[len("tier:"):].strip()
+            # Exit 4 is the router's own judgement that this needs an agent.
+            # Exit 5 is the router failing to run — a crash must never read as
+            # "escalate", or a broken router silently routes everything to the
+            # expensive tier.
+            if pr.returncode == 4:
+                self._json(200, {"ok": True, "escalate": True,
+                                 "tier": tier or "router said ESCALATE",
+                                 "answer": ""})
+                return
+            if pr.returncode != 0 or not answer:
+                self._json(502, {"ok": False, "escalate": False,
+                                 "err": ((pr.stderr or "").strip().splitlines()
+                                         or ["the router gave no answer"])[-1]})
+                return
+            sys.stderr.write("ask: %s (%d chars) -> %s\n"
+                             % (tier or "?", len(text), answer[:60]))
+            self._json(200, {"ok": True, "escalate": False,
+                             "tier": tier, "answer": answer})
 
         def log_message(self, *a):
             pass

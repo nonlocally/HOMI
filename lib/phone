@@ -3107,23 +3107,61 @@ FAST = [
 ]
 
 
+# A REQUEST TO SEND SOMETHING IS NOT A QUESTION, and the patterns above match
+# nouns without caring which it is. Measured: "open whatsapp and send my mother
+# a message about dinner" hit the notifications pattern on the word "message"
+# and was answered "17 notifications: 5 from youtube, 2 from gms". The person
+# is told about YouTube and their mother never hears from them — the read tier
+# swallowed an instruction and reported success.
+#
+# This is not an intent classifier and must not grow into one. It is a narrow
+# guard over the exact collision: verbs of communication, which are the only
+# ones whose objects ("a message", "a text") are also the nouns the read
+# patterns key on. `tell` and `ask` are here too, but only when they are not
+# directed at the speaker — "tell me the time" is a question, "tell fable to
+# merge" is an errand.
+#
+# Media transport words are deliberately absent: "pause", "skip" and "play"
+# collide with nothing, and blocking them would break the controls the fast
+# tier exists to serve.
+_ACT_REQUEST = re.compile(
+    r"\b(send|text|reply|respond|forward|dm|whats\s?app|email)\b"
+    r"|\b(tell|ask)\b(?!\s+me\b)")
+
+
+def fast_match(text):
+    """Which fast handler should answer this, or None.
+
+    Split out from fast_answer so the DECISION can be tested without a device
+    attached: every handler here shells out to the phone, so asserting on the
+    answer needs hardware, while asserting on the choice needs nothing.
+    """
+    low = " " + text.lower().strip() + " "
+    if _ACT_REQUEST.search(low):
+        return None
+    for pat, fn in FAST:
+        m = pat.search(low)
+        if m:
+            return m, fn
+    return None
+
+
 def fast_answer(text):
     """A spoken answer without waking an agent, or None to fall through."""
-    low = " " + text.lower().strip() + " "
-    for pat, fn in FAST:
-        if pat.search(low):
-            try:
-                return fn(pat.search(low))
-            except Exception as e:
-                # Falling through is right — the shortcut must never break
-                # the slow path — but doing it SILENTLY turned "the handler
-                # failed" into "no pattern matched", and cost an hour of
-                # staring at a regex that was correct all along.
-                sys.stderr.write("phone: fast path declined (%s: %s) — "
-                                 "asking the agent instead\n"
-                                 % (fn.__name__, e))
-                return None
-    return None
+    got = fast_match(text)
+    if not got:
+        return None
+    m, fn = got
+    try:
+        return fn(m)
+    except Exception as e:
+        # Falling through is right — the shortcut must never break the slow
+        # path — but doing it SILENTLY turned "the handler failed" into "no
+        # pattern matched", and cost an hour of staring at a regex that was
+        # correct all along.
+        sys.stderr.write("phone: fast path declined (%s: %s) — "
+                         "asking the agent instead\n" % (fn.__name__, e))
+        return None
 
 
 
@@ -3201,6 +3239,71 @@ def _ask_agent(to, text, sender, timeout):
         return None, ((pr.stderr or "").strip().splitlines() or
                       ["no answer within %ds" % timeout])[-1]
     return out, None
+
+
+def cmd_ask(args):
+    """The ladder, without the microphone.
+
+    `talk` owns a whole spoken turn — wait for the tap, hear it, answer,
+    speak it — which is right when the loop runs on this machine. It is
+    exactly wrong when the CALLER already has the ears and the mouth: the
+    homi app records on-device and speaks with its own warm engine, so all it
+    needs back is the answer.
+
+    Without this, the app had no way to reach the ladder at all, so its TALK
+    button sent every spoken turn straight to a frontier agent. A general
+    knowledge question ("tell me about X") went to an Opus session at xhigh
+    effort and took forty seconds, when the middle tier answers it from its
+    own knowledge in five — which is the whole reason the middle tier exists.
+
+    Prints the answer on stdout and the tier it came from on stderr, so a
+    caller that wants only the answer can take stdout and a person watching
+    can still see what happened. Exit 4 means ESCALATE: no tier here could
+    answer it, and the caller should put it to an agent.
+    """
+    text = " ".join(args.text).strip()
+    if not text:
+        die("nothing to ask", 2)
+    # --device is stripped from argv before argparse ever sees it and lands
+    # in the environment, so there is no args.device to read.
+    device = os.environ.get("PHONE_DEVICE")
+
+    if not args.no_fast:
+        quick = fast_answer(text)
+        if quick:
+            record("ask", {"tier": "fast", "chars": len(text)}, "read")
+            sys.stderr.write("tier: fast\n")
+            print(quick)
+            return 0
+
+    if args.router:
+        t0 = time.time()
+        if args.router == "codex":
+            answer, err = _ask_codex(text, device, args.router_timeout)
+        else:
+            answer, err = _ask_agent(args.router, "[spoken] " + text,
+                                     args.sender or "phone-voice",
+                                     args.router_timeout)
+        took = time.time() - t0
+        if answer and "ESCALATE" not in answer.upper():
+            record("ask", {"tier": "router", "router": args.router,
+                           "ms": int(took * 1000)}, "read")
+            sys.stderr.write("tier: router (%s, %.1fs)\n" % (args.router, took))
+            print(answer)
+            return 0
+        if answer:
+            # The router read the question and said it needs more than it has.
+            # That is a real answer, not a failure — report it as one.
+            record("ask", {"tier": "router", "escalate": True}, "read")
+            sys.stderr.write("tier: router said ESCALATE (%.1fs)\n" % took)
+            return 4
+        sys.stderr.write("router failed: %s\n" % (err or "no answer"))
+        # A router that could not run is NOT an escalation decision. Saying
+        # so separately matters: escalating on a crash would silently send
+        # everything to the expensive tier the moment codex broke.
+        return 5
+
+    return 4
 
 
 def cmd_talk(args):
@@ -3758,6 +3861,18 @@ def build_parser():
     s.add_argument("--kind", choices=["act", "read"])
     s.add_argument("--actor", help="only what this driver did")
     s.add_argument("--json", action="store_true")
+
+    s = add("ask", cmd_ask,
+            "answer a question through the tier ladder (no mic, no speech)")
+    s.add_argument("text", nargs="+", help="the question")
+    s.add_argument("--from", dest="sender", help="who is asking")
+    s.add_argument("--router", default="codex",
+                   help="middle tier: 'codex' (gpt-5.6-luna, fast, low), a "
+                        "fabric agent name, or '' to skip it")
+    s.add_argument("--router-timeout", type=int, default=60,
+                   dest="router_timeout")
+    s.add_argument("--no-fast", action="store_true", dest="no_fast",
+                   help="skip the regex tier and go straight to the router")
 
     s = add("talk", cmd_talk,
             "hear a spoken turn, ask an agent, say the answer")

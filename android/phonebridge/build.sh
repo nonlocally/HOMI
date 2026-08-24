@@ -122,6 +122,14 @@ echo "→ installing (as shell)"
 
 # Also the documented way past Android 13's Restricted-settings wall, which
 # greys out the notification-access toggle for sideloaded apps.
+# The app needs to know WHICH device it is, so a question about "my battery"
+# can be routed back here. It cannot find that out for itself — an Android app
+# has no view of the tailnet — but the installer just ssh'd in, so it knows.
+# Re-planted on every install, which is what keeps it true.
+echo "→ telling the app which device it is"
+ssh "$DEVICE" "mkdir -p /sdcard/Android/data/$PKG/files && \
+               printf '%s' '$DEVICE' > /sdcard/Android/data/$PKG/files/device"
+
 echo "→ granting notification access"
 "$PHONE_BIN" --device "$DEVICE" sh "cmd notification allow_listener $LISTENER" | tail -1
 "$PHONE_BIN" --device "$DEVICE" sh "cmd appops set $PKG ACCESS_RESTRICTED_SETTINGS allow" >/dev/null 2>&1 || true
