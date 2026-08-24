@@ -612,6 +612,35 @@ if [ "$r" = "True True" ]; then
   ok "pinned install passes the version to install.sh; unpinned stays latest"
 else bad "installer pin shape (got: $r)"; fi
 
+echo "== HOMI_SELF: the check asks 'is it CONFIGURED', not 'is it in my shell'"
+r="$(PY "
+base = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h',
+            xdg='', ssh_ip='1.2.3.4', cc_collision=False, own_key=True,
+            fabric_key=True, hub_key_there=True, reverse_ok=True, shim=True,
+            tmux_bin='/x/tmux', claude_bin='/x/claude', kernel_hash='SAME',
+            py3=True)
+loc = dict(kernel_hash='SAME', my_addr='a@m', reverse_candidates=['1.2.3.4'])
+def has_item(f):
+    return any('HOMI_SELF' in c for c in ha.plan(f, loc)[1])
+# the probe runs non-login/non-interactive, so env is empty even when the
+# human HAS configured it — the item must clear on the profile, not the env
+cfg   = has_item(dict(base, homi_self='', homi_self_files=['.bash_profile']))
+envd  = has_item(dict(base, homi_self='aadarshs-pixel-10', homi_self_files=[]))
+none  = has_item(dict(base, homi_self='', homi_self_files=[]))
+# configured in a file THIS shell never reads is not configured
+wrong = has_item(dict(base, homi_self='', homi_self_files=['.zshenv']))
+print(cfg, envd, none, wrong)")"
+if [ "$r" = "False False True True" ]; then
+  ok "profile export clears it; env clears it; nothing set keeps it; wrong-shell file keeps it"
+else bad "homi_self check (got: $r)"; fi
+
+echo "== the probe actually looks in the profiles (not just \$HOMI_SELF)"
+r="$(PY "
+sc = ha.probe_script('a@mini')
+print('HOMI_SELF_FILES=' in sc, '.bash_profile' in sc, '.zshenv' in sc)")"
+if [ "$r" = "True True True" ]; then ok "probe reports which profiles carry the export"
+else bad "probe homi_self files (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
