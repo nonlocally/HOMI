@@ -339,6 +339,73 @@ Under investigation. Nothing here is settled.
 
 ---
 
+## Notifications
+
+### Read every app's notifications at once
+**Route:** state. **Verified:** 2026-08-23, Android 16 (sdk 36). 1.7s, ~1.5 KB.
+
+    phone --device aadarshs-pixel-10 notifs
+    phone --device aadarshs-pixel-10 notifs --app com.google.android.youtube --json
+
+The best state-tier surface on this phone: one call, every app, timestamped,
+with `--json` giving `key`, `group`, `packageName`, `title`, `content`,
+`when`. This is the right way to answer "what has been happening" — never a
+screenshot of the shade.
+
+**Entries with an empty title are not noise or a parse bug.** They are
+Android *group summaries*: `title: ""`, `content: ""`, and a `tag` containing
+`::SUMMARY::`. The real notifications are the siblings sharing that `group`.
+Filter on `"::SUMMARY::" not in tag` if you want one line per actual item;
+`phone notifs` currently prints both, which is why YouTube appears twice per
+video.
+
+### `--app <friendly name>` resolves to the wrong app, silently
+**Verified:** 2026-08-23, Android 16 (sdk 36). **This is the sharpest edge on
+the phone — read it before you use an app name anywhere.**
+
+`pkg_of()` resolves names against `pm list packages -3` — **third-party
+packages only**. Every preinstalled Google app is invisible to it, and the
+alias table that has the right answer is consulted *only if the package is in
+that third-party list*. Two different failures come out of this:
+
+**1. It refuses names it advertises.** The error lists the alias you just
+typed as a valid choice:
+
+    $ phone notifs --app youtube
+    phone: unknown app 'youtube' (use a package name or one of: calendar,
+      chrome, gmail, ..., youtube, youtubemusic, ytmusic)
+
+`youtube`, `ytmusic`, `photos`, `calendar`, `maps`, `messages` all fail this
+way here, because none of those packages is third-party on a Pixel. Loud, at
+least. Use the full package name and it works.
+
+**2. It silently answers about a different app.** This one is quiet, and
+therefore worse. When the alias misses, the code falls through to a substring
+match over the third-party list and takes the single hit:
+
+    "chrome" → com.android.chrome is installed, but is NOT in `pm list
+               packages -3`, so the alias is skipped
+             → substring match over third-party packages finds exactly one
+               thing containing "chrome":
+             → com.google.android.apps.chromecast.app
+
+So **`--app chrome` reports on Google Home/Chromecast**, and prints
+`(no notifications)` — which reads as "Chrome has nothing" and is in fact
+"a different app has nothing". `phone open chrome` would launch Google Home.
+Verified on-device: `pm list packages | grep chrome` returns both packages,
+`pm list packages -3 | grep chrome` returns only the Chromecast one.
+
+**Always pass the full package name.** `phone apps` lists only third-party
+packages too — for the real list use:
+
+    phone sh 'pm list packages 2>&1 | grep <name>'
+
+A name that resolves to the wrong app is the same class of error as tapping a
+coordinate: it produces a confident answer about something you did not ask
+about.
+
+---
+
 ## What the tiers actually cost
 
 **Measured:** 2026-08-23, Android 16 (sdk 36), controller over the forwarded
