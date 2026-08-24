@@ -245,6 +245,57 @@ then
   ok "send body evaluates, and voice tracks the ear (both ways, and absent)"
 else bad "send body is not a computable expression"; fi
 
+echo "== the published ear is live, not a snapshot taken at page load"
+# The test above feeds a MOCKED window.__voice, so it proves the send
+# expression is correct and proves nothing about whether the page ever
+# updates the value it reads. That distinction is not academic: ?v=1 is not
+# the only way the ear turns on -- pressing the mic on an ordinary talk page
+# sets it mid-life, in rec.onend. Publishing `earOn: earOn` copies the
+# boolean once at load, so that path sends voice:false, gets a markdown
+# answer, and reads the asterisks aloud. The exact symptom the flag exists
+# to prevent, surviving in the case it was aimed at.
+#
+# So build the REAL published object and flip the variable the mic path
+# flips. A snapshot fails this; a getter passes it.
+if python3 - "$T/talk-page.html" <<'PYEOF'
+import re, subprocess, sys, json
+page = open(sys.argv[1]).read()
+i = page.find("window.__voice = {")
+if i < 0:
+    print("no __voice export found"); sys.exit(1)
+start = page.index("{", i)
+depth, j = 0, start
+while j < len(page):
+    if page[j] == "{":
+        depth += 1
+    elif page[j] == "}":
+        depth -= 1
+        if depth == 0:
+            break
+    j += 1
+literal = page[start:j + 1]
+js = ("var earOn = false, synthOK = true, gen = 0;"
+      "function chunkText(t){ return [t]; }"
+      "function speakChunks(){}"
+      "var window = { speechSynthesis: { cancel: function(){} } };"
+      "window.__voice = " + literal + ";"
+      "var before = window.__voice.earOn;"
+      "earOn = true;"                       # exactly what rec.onend does
+      "var after = window.__voice.earOn;"
+      "console.log(JSON.stringify({before: before, after: after}));")
+r = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+if r.returncode != 0:
+    print("published voice object does not evaluate:", r.stderr.strip()[:200])
+    sys.exit(1)
+d = json.loads(r.stdout.strip())
+if d.get("before") is not False or d.get("after") is not True:
+    print("stale ear: turning the mic on did not reach the send path", d)
+    sys.exit(1)
+PYEOF
+then
+  ok "turning the ear on mid-life reaches the send path (no stale snapshot)"
+else bad "published ear is a snapshot, not live"; fi
+
 echo "== invalid targets refused"
 c="$(send -H "Content-Type: application/json" -H "X-Homi: 1" -H "X-Homi-Token: $TOKEN" -d '{"to":"../evil","text":"x"}')"
 if [ "$c" = "400" ]; then ok "bad target name refused (400)"; else bad "bad target refused (got $c)"; fi

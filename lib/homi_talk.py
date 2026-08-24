@@ -1103,7 +1103,14 @@ if ("serviceWorker" in navigator) {
     // Publishing it here is the contract between them: a bare `earOn` over
     // there compiles fine and throws ReferenceError the first time anyone
     // speaks, which is the worst possible moment to find out.
-    earOn: earOn,
+    //
+    // A GETTER, not `earOn: earOn`. The ear does not only come from ?v=1 —
+    // pressing the mic on an ordinary talk page turns it on mid-life (see
+    // rec.onend). A plain property copies the boolean once at page load, so
+    // that path would send voice:false, get a markdown answer back, and then
+    // read the asterisks aloud, which is the exact symptom this whole flag
+    // exists to prevent. Reading through a getter cannot go stale.
+    get earOn() { return earOn; },
     speak: function (text) {
       if (!earOn || !synthOK) return;
       gen++;
