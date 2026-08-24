@@ -1348,6 +1348,30 @@ def cmd_notifs(args):
 # ------------------------------------------------------------- device verbs
 
 def cmd_say(args):
+    # The BRIDGE first. termux-tts-speak binds a whole TextToSpeech engine
+    # per sentence behind an ssh fork; the app holds one open. Measured
+    # 11ms to first audio warm, against ~0.5s of transport before the old
+    # path has even queued anything. And the bridge reports when speech
+    # actually FINISHED, which termux-tts-speak never could — so an agent
+    # that says two things in a row no longer talks over itself.
+    text = " ".join(args.text)
+    r = bridge_call("say", device=os.environ.get("PHONE_DEVICE"),
+                    text=text, timeout=max(30, args.timeout))
+    if r is not None and r.get("ok"):
+        record("say", {"chars": len(text),
+                       "first_audio_ms": r.get("first_audio_ms"),
+                       "tier": "bridge"}, "act", "spoken")
+        return 0
+    if r is not None and r.get("err"):
+        # The bridge answered and refused. That is a real answer, not a
+        # reason to try a worse path that will refuse differently.
+        record("say", {"chars": len(text), "tier": "bridge"}, "act",
+               "failed: %s" % r["err"], rc=1)
+        die(r["err"], 4)
+    return _cmd_say_termux(args)
+
+
+def _cmd_say_termux(args):
     text = " ".join(args.text)
     if not text.strip():
         die("nothing to say", 2)
@@ -1357,6 +1381,24 @@ def cmd_say(args):
 
 
 def cmd_listen(args):
+    # On-device recognition through the bridge, before termux-speech-to-text.
+    # The audio never leaves the phone and there is no network leg at all.
+    r = bridge_call("listen", device=os.environ.get("PHONE_DEVICE"),
+                    timeout=max(30, args.timeout + 10),
+                    **{"timeout": args.timeout})
+    if r is not None and r.get("ok") and (r.get("text") or "").strip():
+        record("listen", {"chars": len(r["text"]), "tier": "bridge"}, "read")
+        print(r["text"])
+        return 0
+    if r is not None and r.get("err"):
+        record("listen", {"tier": "bridge"}, "read",
+               "failed: %s" % r["err"], rc=1)
+        sys.stderr.write("phone: %s\n" % r["err"])
+        return 1
+    return _cmd_listen_termux(args)
+
+
+def _cmd_listen_termux(args):
     need_termux()
     rc, out = termux("termux-speech-to-text", timeout=args.timeout)
     text = (out or "").strip()
@@ -1886,6 +1928,112 @@ def cmd_msg(args):
            "act", "sent")
     print("sent to %s" % num)
     return 0
+
+
+
+# ------------------------------------------------------------- the bridge
+# phonebridge is the app half: a NotificationListenerService and an on-device
+# speech engine, reachable on loopback. It exists for the things shell
+# provably cannot do — firing a notification's reply action needs the live
+# PendingIntent, which only a bound listener ever holds — and for the things
+# shell can only do slowly, like binding a TTS engine per sentence.
+#
+# Reached the same way shelld is: an ssh forward. Same idiom, one more port.
+
+BRIDGE_PORT = 8127
+BRIDGE_TOKEN_PATH = ("/sdcard/Android/data/com.aadarwal.phonebridge/files/"
+                     "token")
+
+
+def bridge_token(device=None):
+    """The shared secret, read from where only the device shell can reach it.
+
+    Loopback is not a permission boundary — every app on the phone can open a
+    socket to 127.0.0.1 — so the token is what separates "has shell on this
+    phone" from "is any app on this phone".
+    """
+    rc, out = dev_shell(merged("cat %s" % BRIDGE_TOKEN_PATH), timeout=25)
+    tok = (out or "").strip()
+    if rc != 0 or not re.match(r"\A[0-9a-f]{16,}\Z", tok):
+        return None
+    return tok
+
+
+def ensure_bridge(device):
+    """Forward the bridge port, if it is not already answering."""
+    if not device:
+        return True
+    if _bridge_alive():
+        return True
+    if not _DEV_RE.match(device or ""):
+        die("bad device name %r" % device, 2)
+    subprocess.run(["pkill", "-f",
+                    "L %d:127.0.0.1:%d" % (BRIDGE_PORT, BRIDGE_PORT)],
+                   capture_output=True)
+    rc, _ = run(["ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+                 "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                 "-o", "ServerAliveInterval=20", "-f", "-N",
+                 "-L", "%d:127.0.0.1:%d" % (BRIDGE_PORT, BRIDGE_PORT),
+                 device], timeout=25)
+    if rc != 0:
+        return False
+    for _ in range(10):
+        time.sleep(0.3)
+        if _bridge_alive():
+            return True
+    return False
+
+
+def _bridge_alive():
+    import socket as _s
+    c = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    c.settimeout(1.5)
+    try:
+        c.connect(("127.0.0.1", BRIDGE_PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+
+
+def bridge_call(op, device=None, timeout=90, **kw):
+    """One line of JSON out, one back. None when the bridge is unreachable —
+    which callers treat as "fall back", never as "it said no"."""
+    import socket as _s
+    if not ensure_bridge(device):
+        return None
+    tok = bridge_token(device)
+    if not tok:
+        return None
+    req = dict(kw)
+    req["op"] = op
+    req["token"] = tok
+    c = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    c.settimeout(timeout)
+    try:
+        c.connect(("127.0.0.1", BRIDGE_PORT))
+        c.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError:
+        return None
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+    try:
+        return json.loads(buf.decode("utf-8", "replace").split("\n", 1)[0])
+    except ValueError:
+        return None
 
 
 # ------------------------------------------------------------ capabilities
@@ -2598,6 +2746,52 @@ def _remote_ledger(device):
     return (rows if isinstance(rows, list) else []), None
 
 
+def cmd_notif_reply(args):
+    """Reply to a message without touching the screen.
+
+    Only the bridge can do this. Shell can SEE a notification's reply action
+    through dumpsys and cannot fire it: a PendingIntent is a live Binder
+    token in system_server, and dumpsys prints a description of it. Verified
+    against AOSP — registerListener admits uid 1000/1001/0, and shell is
+    2000.
+    """
+    r = bridge_call("list", device=os.environ.get("PHONE_DEVICE"))
+    if r is None:
+        die("the phonebridge app is not reachable — is it installed, and is "
+            "its listener granted? (cmd notification allow_listener)", 3)
+    if not r.get("ok"):
+        die(r.get("err") or "the bridge refused", 4)
+    rows = r.get("notifications") or []
+    repliable = [n for n in rows if n.get("repliable")]
+    if args.list:
+        if not repliable:
+            print("(nothing on this phone can be replied to right now)")
+            return 1
+        for n in repliable:
+            print("%-46s %-22s %s" % (n["key"][:46], (n.get("package") or "")[:22],
+                                      (n.get("title") or "")[:30]))
+        return 0
+    if not args.key:
+        die("say which notification: --list to see the keys", 2)
+    if not (args.text or "").strip():
+        die("refusing to send an empty message", 2)
+    got = bridge_call("reply", device=os.environ.get("PHONE_DEVICE"),
+                      key=args.key, text=args.text)
+    if got is None:
+        die("the bridge stopped answering mid-reply — nothing was sent", 3)
+    if not got.get("ok"):
+        record("reply", {"key": args.key[:40]}, "act",
+               "failed: %s" % got.get("err"), rc=1)
+        die(got.get("err") or "the reply was refused", 4)
+    # The message text is NOT recorded. The ledger says a reply was sent and
+    # to which notification; keeping a second copy of the user's outgoing
+    # messages on another machine is not accountability, it is a transcript.
+    record("reply", {"key": args.key[:40], "chars": len(args.text)},
+           "act", "sent")
+    print("sent")
+    return 0
+
+
 def cmd_log(args):
     rows = _read_ledger(ledger_path())
     device = os.environ.get("PHONE_DEVICE")
@@ -2980,6 +3174,13 @@ def build_parser():
     s.add_argument("--kind", choices=["act", "read"])
     s.add_argument("--actor", help="only what this driver did")
     s.add_argument("--json", action="store_true")
+
+    s = add("reply", cmd_notif_reply,
+            "reply to a message without the screen (needs phonebridge)")
+    s.add_argument("key", nargs="?", help="notification key, from --list")
+    s.add_argument("text", nargs="?", help="what to say")
+    s.add_argument("--list", action="store_true",
+                   help="show what can be replied to right now")
 
     s = add("capabilities", cmd_capabilities,
             "what this device actually permits, asked live")
