@@ -176,9 +176,21 @@ and dispatching `play` started **Apple Music** — position advanced
 unchanged `updated=` stamp. Watched, not inferred. Paused again after.
 
 The consequence for a caller: **a media dispatch is not addressed to the app
-you were just talking to.** Read `Media button session` before dispatching,
-or you will silently drive a different app than the one you meant. There is
-no shell-side way to point a transport key at a chosen session.
+you were just talking to.** That is Android's design — `dispatch` takes no
+session argument and there is no shell-side way to aim a transport key.
+
+`phone` now surfaces it instead of leaving you to find out. `media` marks the
+session the keys will actually reach:
+
+    $ phone media --current
+    com.apple.android.music  paused  <- keys  Criminal, Akon, ...
+
+and `media --strict` **refuses to dispatch** when the keys would land on a
+different app than the one that looks current, rather than quietly driving
+the wrong one (`e7a1999`). Verified: the `<- keys` marker is present.
+
+At a raw shell the trap is unchanged — read `Media button session` from
+`dumpsys media_session` before dispatching.
 
 ---
 
@@ -188,23 +200,26 @@ Three traps live in the tools themselves, not in Android. Each turns a loud
 failure into a quiet wrong answer, which is the exact thing this file exists
 to prevent.
 
-### `phone sh` throws the device's stderr away
-**Verified:** 2026-08-23, Android 16 (sdk 36).
+### `phone sh` used to throw the device's stderr away — **fixed 2026-08-23**
+**Was true until:** `ad17d7a` *"the device's stderr was being thrown away"*.
+**Re-verified fixed:** 2026-08-23, Android 16 (sdk 36).
 
-`phone sh 'content query --uri content://com.google.android.keep/notes'`
-prints **nothing at all** and exits 0. That looks like "readable and empty".
-It is not. Redirect *on the device* — inside the quotes — and the same
-command says:
+`phone sh` now merges the device's stderr, so a denied provider says so
+without any help:
 
-    $ phone sh 'content query --uri content://com.google.android.keep/notes 2>&1'
+    $ phone sh 'content query --uri content://com.google.android.keep/notes'
     java.lang.SecurityException: Permission Denial: opening provider
-      KeepProviderImpl from (null) (pid=..., uid=2000) that is not exported
-      from UID 10314
+      KeepProviderImpl ... that is not exported from UID 10314
 
-Same for a completely invented authority: silent without the redirect, a
-stack trace with it. **Put `2>&1` inside every `phone sh` you intend to read
-a result from.** A `2>&1` on the outside catches the controller's stderr, not
-the phone's, and does nothing for this.
+Before the fix that same command printed **nothing** and exited 0, which
+reads exactly like "readable and empty". If you are on an older build — the
+main checkout lagged the worktree by hours on 2026-08-23 — put `2>&1`
+*inside* the quotes. An outer `2>&1` catches the controller's stderr, not the
+phone's, and does nothing for this.
+
+The durable lesson, which no fix removes: **silence from a device command is
+not a result.** Check that your transport actually carries errors before you
+read an empty answer as an empty table.
 
 ### `content query` exits 0 no matter what happened
 **Verified:** 2026-08-23, Android 16 (sdk 36).
@@ -235,24 +250,26 @@ Two of those deserve care:
   tier that gets you in. Stop there and write it down.
 
 ### `query-activities` under-reports unless you give it a MIME type
-**Verified:** 2026-08-23, Android 16 (sdk 36).
+**Verified:** 2026-08-23, Android 16 (sdk 36). This is **Android's**
+behaviour, not a tool bug — it is still true at the shell.
 
-The map tells you to ask the device who handles an action. Ask it wrong and
-it lies by omission:
+Intent resolution matches action **and data**. An action that normally
+carries a payload resolves against almost nothing when you omit `-t`:
 
     cmd package query-activities -a android.intent.action.SEND
       → 4 handlers
     cmd package query-activities -a android.intent.action.SEND -t text/plain
       → 17 handlers, including com.google.android.keep
 
-Intent resolution matches action **and data**. An action that normally
-carries data resolves against almost nothing when you omit `-t`, so a handler
-that exists looks absent. Keep really does declare `SEND`/`text/plain`
-(`ShareReceiverActivity`, `exported=true`) — the four-handler answer would
-have had you conclude otherwise.
+The four-handler answer would have had you conclude Keep cannot take shared
+text. It can (`ShareReceiverActivity`, `exported=true`).
 
-`MEDIA_PLAY_FROM_SEARCH` takes no data, so the six-package answer above is
-unaffected. Any action that carries a payload is not.
+`phone`'s own `intent_handlers()` now takes a `mime` argument
+(`0bce460` and neighbours), so the tool asks correctly. **At a raw shell you
+must still remember `-t` yourself.**
+
+`MEDIA_PLAY_FROM_SEARCH` carries no data, so the six-package answer above is
+unaffected. Any action with a payload is not.
 
 ---
 
@@ -359,50 +376,45 @@ Filter on `"::SUMMARY::" not in tag` if you want one line per actual item;
 `phone notifs` currently prints both, which is why YouTube appears twice per
 video.
 
-### `--app <friendly name>` resolves to the wrong app, silently
-**Verified:** 2026-08-23, Android 16 (sdk 36). **This is the sharpest edge on
-the phone — read it before you use an app name anywhere.**
+### App names once resolved to the wrong app — **fixed 2026-08-23**
+**Was true until:** `0bce460` *"an app name now resolves to that app, or to
+nothing"*. **Re-verified fixed:** 2026-08-23, Android 16 (sdk 36).
 
-`pkg_of()` resolves names against `pm list packages -3` — **third-party
-packages only**. Every preinstalled Google app is invisible to it, and the
-alias table that has the right answer is consulted *only if the package is in
-that third-party list*. Two different failures come out of this:
+Worth keeping because it was the sharpest edge on the phone, and because the
+shape of the bug is one to watch for anywhere names get resolved.
 
-**1. It refuses names it advertises.** The error lists the alias you just
-typed as a valid choice:
+`pkg_of()` resolved names against `pm list packages -3` — **third-party
+only** — so every preinstalled Google app was invisible to it. Two failures
+came out of that. It *refused* names its own error message advertised
+(`youtube`, `ytmusic`, `photos`, `calendar`, none of which are third-party on
+a Pixel). And when an alias missed, it fell through to a **substring** match
+over the third-party list and took the single hit:
 
-    $ phone notifs --app youtube
-    phone: unknown app 'youtube' (use a package name or one of: calendar,
-      chrome, gmail, ..., youtube, youtubemusic, ytmusic)
+    "chrome" → com.android.chrome is installed but not third-party, so the
+               alias was skipped
+             → substring match found the one third-party package containing
+               "chrome":
+             → com.google.android.apps.chromecast.app   (Google Home)
 
-`youtube`, `ytmusic`, `photos`, `calendar`, `maps`, `messages` all fail this
-way here, because none of those packages is third-party on a Pixel. Loud, at
-least. Use the full package name and it works.
+So `--app chrome` reported on Google Home and printed `(no notifications)` —
+which reads as a clean negative about Chrome. `open chrome` exited 0 having
+done nothing.
 
-**2. It silently answers about a different app.** This one is quiet, and
-therefore worse. When the alias misses, the code falls through to a substring
-match over the third-party list and takes the single hit:
+Now: resolution runs against the **full** package list and matches whole
+dotted segments, so a substring can never capture a different app; genuine
+ambiguity is *named* rather than silently narrowed. Verified by observation
+rather than by exit code —
 
-    "chrome" → com.android.chrome is installed, but is NOT in `pm list
-               packages -3`, so the alias is skipped
-             → substring match over third-party packages finds exactly one
-               thing containing "chrome":
-             → com.google.android.apps.chromecast.app
+    $ phone open chrome ; phone foreground
+    → com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity
 
-So **`--app chrome` reports on Google Home/Chromecast**, and prints
-`(no notifications)` — which reads as "Chrome has nothing" and is in fact
-"a different app has nothing". `phone open chrome` would launch Google Home.
-Verified on-device: `pm list packages | grep chrome` returns both packages,
-`pm list packages -3 | grep chrome` returns only the Chromecast one.
+**Passing the full package name is still the safer habit** in anything
+scripted. Note `phone apps` still lists third-party packages only; for the
+real list use `phone sh 'pm list packages | grep <name>'`.
 
-**Always pass the full package name.** `phone apps` lists only third-party
-packages too — for the real list use:
-
-    phone sh 'pm list packages 2>&1 | grep <name>'
-
-A name that resolves to the wrong app is the same class of error as tapping a
-coordinate: it produces a confident answer about something you did not ask
-about.
+The durable lesson: a name that resolves to the *wrong* app is the same class
+of error as tapping a coordinate — a confident answer about something you did
+not ask about. `(no notifications)` was indistinguishable from the truth.
 
 ---
 
