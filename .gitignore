@@ -21,3 +21,5 @@ registry/*.md
 # Browser accessibility dumps from the playwright MCP — screen captures of live
 # UI, carrying real agent names. Local debugging artifacts, never repo content.
 /.playwright-mcp/
+android/phonebridge/build/
+android/phonebridge/debug.keystore
