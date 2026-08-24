@@ -101,60 +101,84 @@ the foreground, and starts nothing; `media --current` still reads PAUSED
 afterwards. Declaring an intent is not honouring it. For Apple Music,
 search-and-play still needs the screen.
 
-**YouTube Music honours the SEARCH half and not the PLAY half.** Fired
-`-a MEDIA_PLAY_FROM_SEARCH --es query "criminal ra one" -p
-com.google.android.apps.youtube.music`: it came to the foreground, resolved
-the query *correctly*, and built a real queue —
+**YouTube Music treats it as "open search results", and never plays.** It
+accepts the intent, receives the query correctly, and navigates to its own
+search-results page — and stops there. Confirmed on the raw UI dump:
+
+    resource-id=.../search_edit_text   text="tum hi ho arijit singh"
+
+The query lands in the search box; the results list (Songs / Videos /
+Artists / Albums chips) renders. Nothing is selected, nothing is queued,
+nothing plays. `dumpsys media_session`'s "Audio playback (lastly played comes
+first)" never listed YouTube Music at all, across every attempt.
+
+Works cold and warm. On a cold start `am start` launches the activity; when
+the app is already top-most Android says
+
+    Warning: Activity not started, intent has been delivered to
+    currently running top-most instance
+
+and YouTube Music *does* handle that `onNewIntent` — firing a third query at
+a warm app updated `search_edit_text` to the new words. So the intent is
+reliably delivered and reliably understood. It is just never *played*.
+
+| app | takes intent | receives the query | acts on it | starts playing |
+|---|---|---|---|---|
+| Apple Music | yes | — | no — lands on its own UI | no |
+| YouTube Music | yes | **yes** | opens search results for it | **no** |
+
+So the honest summary is that **no app on this phone plays a named song from
+an intent.** Both declare the action; neither honours the "PLAY" in its name.
+Search-and-play still needs the screen, in both apps.
+
+### The decoy that nearly made this entry wrong
+**Verified:** 2026-08-23, Android 16 (sdk 36). Worth reading before you trust
+any media-session read after an intent.
+
+Firing the intent and then reading the session back *looks* like it worked:
 
     metadata: description=Criminal, Vishal Dadlani, Akon & Shruti Pathak
     queueTitle=Up next, size=25
-    state=PlaybackState {state=PAUSED(2), position=0, speed=1.0}
 
-— and then sat there. `position=0` and the session's `updated=` stamp did not
-move across 10s. `dumpsys media_session`'s "Audio playback (lastly played
-comes first)" listed only Apple Music, so YouTube Music produced no audio at
-all. Fired a second time at an already-warm, already-foreground YouTube
-Music: identical, and `updated=` did not even change, so the second intent
-moved nothing.
+A plausible track, a real queue — and it is **stale state**, not a result.
+YouTube Music restores its previous queue when it starts, so the session
+shows a real song that has nothing to do with what you asked for. The tells:
 
-So the right summary is not "Apple Music ignores it, YouTube Music works".
-Both fall short, differently, and the difference matters to a caller:
+- `state=PAUSED, position=0`, and the `updated=` stamp never moves.
+- It survives a **different** query. Fire `"tum hi ho arijit singh"` and the
+  metadata still reads `Criminal`.
+- It survives `am force-stop` — it is restored on the next cold start.
 
-| app | takes intent | resolves the query | starts playing |
-|---|---|---|---|
-| Apple Music | yes | no — lands on its own UI | no |
-| YouTube Music | yes | **yes** — right track, 25-item queue | **no** |
-
-YouTube Music is still the better target: it gets you a loaded queue with the
-right song at item 1, which is one transport command from playing, whereas
-Apple Music gets you a foreground app and nothing else.
-
-Note `lib/phone`'s own docstring at `intent_handlers()` says "YouTube Music
-implements MEDIA_PLAY_FROM_SEARCH and Apple Music does not". Both halves are
-wrong on this device as of today: Apple Music *does* declare it (see
-`capabilities`), and YouTube Music declares it without playing.
+The control that settles it is **changing the query and checking that the
+observation changes with it**. Reading the session once, after one query that
+happened to match what was already loaded, produces a confident wrong answer.
+That is the same shape as the failure this whole file was written about, one
+tier up: an observation that is real, and simply not evidence of what you
+think it is.
 
 ### Finish what the intent started — you can't, from shell
 **Route:** none. **Verified:** 2026-08-23, Android 16 (sdk 36).
 
-The obvious repair for the above is to compose the tiers: intent to load the
-queue, then `cmd media_session dispatch play` to start it. **This does not
-work, and it is worse than not working — it starts the wrong app.**
+Since the intent gets you a search page, the obvious repair is to compose the
+tiers: intent to get there, then `cmd media_session dispatch play` to start
+something. **This does not work, and it is worse than not working — it starts
+a different app.**
 
 `cmd media_session dispatch` has no way to name a session. It hands the key
 to the *media button session*, and that is the app which last held audio, not
-the app in the foreground. With YouTube Music foregrounded, active, and
-holding a loaded queue, the dump still read:
+the app in the foreground. With YouTube Music foregrounded and active, the
+dump still read:
 
     Media button session is com.apple.android.music/...
 
-and dispatching `play` started **Apple Music** — its position advanced
+and dispatching `play` started **Apple Music** — position advanced
 47193 → 47303 — while YouTube Music stayed at `PAUSED, position=0` with an
 unchanged `updated=` stamp. Watched, not inferred. Paused again after.
 
 The consequence for a caller: **a media dispatch is not addressed to the app
 you were just talking to.** Read `Media button session` before dispatching,
-or you will silently drive a different app than the one you meant.
+or you will silently drive a different app than the one you meant. There is
+no shell-side way to point a transport key at a chosen session.
 
 ---
 
@@ -312,6 +336,69 @@ on this device but exposes list-only; reply is unimplemented upstream (three
 open feature requests).
 
 Under investigation. Nothing here is settled.
+
+---
+
+## What the tiers actually cost
+
+**Measured:** 2026-08-23, Android 16 (sdk 36), controller over the forwarded
+socket. Wall clock from the controller, so it includes `phone`'s own startup
+— which is the number you actually pay.
+
+| call | time | output |
+|---|---|---|
+| `sh 'settings get ...'` | 0.48s | 8 B |
+| `media --current` | 0.58s | 131 B |
+| `foreground` | 0.78s | 64 B |
+| `notifs` | 1.71s | 1.5 KB |
+| `battery` | 2.06s | 28 B |
+| `ui` | 3.69s | 2.5 KB |
+| `look` | 3.87s | 625 B |
+
+The screen tier costs **roughly 5× the wall clock and 20–40× the output** of
+a state read, for an answer that cannot be verified. That ratio is the whole
+argument for climbing down rather than up.
+
+### Batch your device shell calls
+Each `phone sh` pays a fixed ~0.31s of setup. Five `settings get` calls run
+separately took **2.25s**; the same five inside one `phone sh 'for k in ...'`
+took **1.00s**. Solving for it: ~0.31s fixed per invocation, ~0.14s of actual
+work each.
+
+So when you are probing — sweeping providers, reading a dozen settings —
+**put the loop on the device, not in the controller.** It is not a micro
+-optimisation; at eighteen probes it is the difference between seven seconds
+and one.
+
+### The screen tier can fail outright — and does
+**Verified:** 2026-08-23, Android 16 (sdk 36), YouTube Music.
+
+`look` and `ui` parse `uiautomator dump`'s XML, and **YouTube Music's tree is
+not well-formed**:
+
+    phone: could not parse the UI tree
+      (not well-formed (invalid token): line 1, column 49103)
+
+Seen on a 72 KB dump, and again at column 16328 on a different YouTube Music
+screen. Some attribute in the tree carries a byte the XML parser rejects. The
+failure is intermittent between screens of the *same* app, so a passing `look`
+is not evidence the next one will pass.
+
+This matters more than a normal bug, because the screen is the tier you drop
+to when the other two have already failed. **The last resort is not
+guaranteed to be available.**
+
+Two things that still work when it happens:
+
+- `ui` and `look` fail independently — on one screen `ui` rendered fine while
+  `look` did not. Try both before giving up.
+- The raw dump is still there, and `grep` does not care about well-formedness:
+
+      phone sh 'uiautomator dump /sdcard/d.xml >/dev/null 2>&1;
+                grep -o "text=\"[^\"]*\"" /sdcard/d.xml'
+
+  That is how the YouTube Music search box was read after both verbs failed.
+  Cruder than `find`, but it does not need the tree to parse.
 
 ---
 
