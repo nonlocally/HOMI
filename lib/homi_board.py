@@ -644,6 +644,17 @@ def serve(port, bind, no_remote, ttl=10.0):
                 req = json.loads(self.rfile.read(n).decode("utf-8"))
                 target = req.get("to") or ""
                 text = (req.get("text") or "").strip()
+                # A spoken turn is a different question from a typed one: the
+                # person is listening, not reading, and the page will read the
+                # answer back aloud. The agent cannot tell the two apart from
+                # the text — so the page, which is the only thing that knows
+                # the ear is on, says so here.
+                #
+                # Marked in the text itself, not in a side channel, and so the
+                # human's transcript shows exactly what the agent was handed.
+                # A marker the human cannot see is one they cannot check.
+                if req.get("voice") and text:
+                    text = "[spoken] " + text
             except (ValueError, UnicodeDecodeError):
                 self._json(400, {"ok": False, "err": "bad json"})
                 return

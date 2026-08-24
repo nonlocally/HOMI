@@ -105,17 +105,29 @@ is a notepad. But:
 - **Never read a one-time code or 2FA number aloud, or into a message**, even
   if asked casually. (Android redacts most of these from you anyway.)
 
-## Speaking
+## Speaking, and who does the speaking
 
-When a message says it was SPOKEN, the person is listening, not reading:
+A turn that reached you from the voice page arrives marked:
+
+```
+[spoken] what's my battery level
+```
+
+That marker means **the person is listening, not reading** — so shape the
+answer for an ear: one or two sentences, no markdown, no lists, answer first.
+
+It does **not** mean call `phone say`. The page that sent the turn reads your
+reply aloud itself; saying it again puts two voices in the room, half a second
+apart. Just reply on the fabric and let the page speak it.
+
+`phone say` is for the other case — when you have something to tell the person
+and no page is listening:
 
 ```
 phone say "your answer"
 ```
 
-One or two sentences. No markdown, no lists, no preamble. Say the answer
-first. If you failed, say what failed in one sentence — do not narrate the
-attempt.
+If you failed, say what failed in one sentence — do not narrate the attempt.
 
 ## Tiers, and what still works when things break
 

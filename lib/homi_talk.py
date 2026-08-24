@@ -873,7 +873,12 @@ TALK_TEMPLATE = r"""<!doctype html>
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Homi": "1",
                  "X-Homi-Token": token },
-      body: JSON.stringify({ to: target, text: text }),
+      // The ear being on is the ONLY signal that this turn is spoken rather
+      // than typed, and the agent never sees the URL. Pass it along so the
+      // answer comes back shaped for listening: short, no markdown, answer
+      // first. The server, not the page, does the marking.
+      body: JSON.stringify({ to: target, text: text,
+                             voice: !!(window.__voice && window.__voice.earOn) }),
     }).then(function (r) {
         return r.json().then(function (d) { return { ok: r.ok, d: d }; },
                              function () { return { ok: r.ok, d: null }; });
@@ -1094,6 +1099,11 @@ if ("serviceWorker" in navigator) {
   });
 
   window.__voice = {
+    // The send block lives in a DIFFERENT closure and cannot see `earOn`.
+    // Publishing it here is the contract between them: a bare `earOn` over
+    // there compiles fine and throws ReferenceError the first time anyone
+    // speaks, which is the worst possible moment to find out.
+    earOn: earOn,
     speak: function (text) {
       if (!earOn || !synthOK) return;
       gen++;
