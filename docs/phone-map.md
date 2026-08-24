@@ -374,7 +374,22 @@ if one existed remains unproven either way — and untestable here without
 someone sending a message, which the charter forbids arranging.
 
 Note also that a case-sensitive `grep RemoteInput` returns **0** while
-`grep -i` returns 26. The field is `remoteInputHistory`. Getting that wrong in
+`grep -i` returns 26.
+
+**Update, 2026-08-24.** The shell half is unchanged, but the device now
+carries a second notification listener — `com.aadarwal.phonebridge` — and
+`capabilities` reports the honest state rather than a guess:
+
+    notification_replies  ?  shell cannot tell — dumpsys shows 26
+      remoteInputHistory keys, which are NOT reply actions.
+      Ask the phonebridge listener (op "list", field "repliable")
+
+So the route is no longer "none": a bound listener exists that can hold a live
+`Notification.Action`, which is exactly what shell cannot. Whether it replies
+successfully is **untested here and will stay that way** — proving it requires
+sending a message to a person, which the charter forbids. `phone log` does
+show a `reply ... -> sent` line from another actor, so somebody has exercised
+it; that is their observation to write up, not mine to claim. The field is `remoteInputHistory`. Getting that wrong in
 either direction produces a confident number and a wrong story.
 
 ---
