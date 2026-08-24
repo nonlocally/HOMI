@@ -1599,6 +1599,136 @@ def cmd_msg(args):
     return 0
 
 
+# ------------------------------------------------- the structured providers
+# Shell UID is not just a way to press keys on the screen. com.android.shell
+# declares READ_CONTACTS / READ_CALENDAR / READ_SMS / READ_CALL_LOG in its
+# manifest and the platform pre-grants them, so the phone will simply ANSWER
+# questions that the UI tier has to go hunting for. Reading a phone number
+# off the Contacts app costs a launch, a dump, a tap and another dump; here
+# it is one query, works with the screen off, and cannot mis-tap.
+
+
+def parse_content_rows(text, keys):
+    """`content query` output -> dicts, splitting on KEYS not on commas.
+
+    The command prints `Row: 0 k=v, k=v` and quotes nothing. A calendar
+    event called "Lunch with peer, Sara, and Ravi", or a contact filed as
+    "Smith, John", shreds under a naive split on ", ". We chose the
+    projection, so we know exactly which keys can start a field — split on
+    those boundaries and everything between them is the value, commas and
+    all.
+    """
+    rows = []
+    # ", key=" is the only real delimiter, and only for keys we asked for.
+    delim = re.compile(r",\s+(?=(?:%s)=)" % "|".join(re.escape(k) for k in keys))
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("Row:"):
+            continue
+        body = line.split(" ", 2)
+        if len(body) < 3:
+            continue
+        row = {}
+        for field in delim.split(body[2]):
+            k, _, v = field.partition("=")
+            if k.strip() in keys:
+                row[k.strip()] = v
+        if row:
+            rows.append(row)
+    return rows
+
+
+def provider_query(uri, keys, sort=None, timeout=40):
+    cmd = "content query --uri %s --projection %s" % (uri, ":".join(keys))
+    if sort:
+        cmd += " --sort %s" % json.dumps(sort)
+    rc, out = dev_shell(cmd, timeout=timeout)
+    if rc != 0:
+        die("could not read %s from the device" % uri, 4)
+    # An empty table says "No result found." — that is a legitimate answer,
+    # not a failure. A denial raises instead, and lands in `out` as an
+    # exception, which the caller sees rather than silently getting [].
+    if "Exception" in (out or ""):
+        die("provider refused: %s" % (out or "").strip().splitlines()[-1], 4)
+    return parse_content_rows(out or "", keys)
+
+
+CAL_KEYS = ["title", "begin", "end", "eventLocation", "allDay"]
+
+
+def cmd_cal(args):
+    if args.from_:
+        with open(args.from_, "r", encoding="utf-8", errors="replace") as f:
+            rows = parse_content_rows(f.read(), CAL_KEYS)
+    else:
+        need_shell()
+        now = int(time.time() * 1000)
+        end = now + int(args.days) * 86400000
+        rows = provider_query(
+            "content://com.android.calendar/instances/when/%d/%d" % (now, end),
+            CAL_KEYS)
+    events = []
+    for r in rows:
+        try:
+            begin = int(r.get("begin") or 0)
+        except ValueError:
+            begin = 0
+        events.append({
+            "title": r.get("title") or "(untitled)",
+            "begin_ms": begin,
+            "all_day": (r.get("allDay") or "0").strip() == "1",
+            "location": (r.get("eventLocation") or "").strip() or None,
+        })
+    events.sort(key=lambda e: e["begin_ms"])
+    record("cal", {"days": args.days, "n": len(events)}, "read")
+    if args.json:
+        print(json.dumps(events, indent=2))
+        return 0
+    if not events:
+        print("(nothing on the calendar)")
+        return 0
+    for e in events:
+        when = (time.strftime("%a %d %b", time.localtime(e["begin_ms"] / 1000))
+                if e["all_day"] else
+                time.strftime("%a %d %b %H:%M",
+                              time.localtime(e["begin_ms"] / 1000)))
+        print("%-18s %s%s" % (when, e["title"],
+                              ("  @ " + e["location"]) if e["location"] else ""))
+    return 0
+
+
+CONTACT_KEYS = ["display_name", "data1"]
+
+
+def cmd_contacts(args):
+    if args.from_:
+        with open(args.from_, "r", encoding="utf-8", errors="replace") as f:
+            rows = parse_content_rows(f.read(), CONTACT_KEYS)
+    else:
+        need_shell()
+        rows = provider_query("content://com.android.contacts/data/phones",
+                              CONTACT_KEYS)
+    people = [{"name": (r.get("display_name") or "").strip(),
+               "number": (r.get("data1") or "").strip()} for r in rows]
+    q = (args.query or "").strip().lower()
+    if q:
+        people = [p for p in people if q in p["name"].lower()]
+    # The detail is a COUNT, never the rows. A trace that copies the address
+    # book out of the phone is a second copy of the thing it is meant to
+    # protect — and unlike the phone's own store, it is a flat file.
+    record("contacts", {"query": args.query or None, "n": len(people)}, "read")
+    if args.json:
+        print(json.dumps(people, indent=2))
+        return 0 if people or not q else 1
+    if not people:
+        # Never guess. A wrong number is worse than no number.
+        sys.stderr.write("phone: no contact matching %r\n" % (args.query or ""))
+        return 1
+    for p in people:
+        print("%-28s %s" % (p["name"][:28], p["number"]))
+    return 0
+
+
 _STATE_RE = re.compile(r"state=([A-Z_]+)\((\d+)\), position=(-?\d+)")
 
 
@@ -2365,6 +2495,16 @@ def build_parser():
     s.add_argument("--limit", type=int, default=40)
     s.add_argument("--kind", choices=["act", "read"])
     s.add_argument("--actor", help="only what this driver did")
+    s.add_argument("--json", action="store_true")
+
+    s = add("cal", cmd_cal, "what is on the calendar")
+    s.add_argument("--days", type=int, default=7)
+    s.add_argument("--from", dest="from_", help="parse a content-query capture")
+    s.add_argument("--json", action="store_true")
+
+    s = add("contacts", cmd_contacts, "look up a contact's number")
+    s.add_argument("query", nargs="?", help="part of a name")
+    s.add_argument("--from", dest="from_", help="parse a content-query capture")
     s.add_argument("--json", action="store_true")
 
     s = add("media", cmd_media, "what is playing, and transport control")

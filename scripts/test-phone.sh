@@ -855,6 +855,79 @@ if printf '%s' "$out" | grep -q "com.apple.android.music" \
   ok "--current picks the real session, not an errored or inactive one"
 else bad "--current selection (got: $out)"; fi
 
+cat > "$T/cal.txt" <<'CALEOF'
+Row: 0 title=Labor Day, begin=1788739200000, end=1788825600000, eventLocation=, allDay=1
+Row: 1 title=Lunch with peer, Sara, and Ravi, begin=1788750000000, end=1788753600000, eventLocation=Cafe Luna, Cambridge, allDay=0
+Row: 2 title=Standup, begin=1788760000000, end=1788761800000, eventLocation=, allDay=0
+CALEOF
+
+cat > "$T/contacts.txt" <<'CONEOF'
+Row: 0 display_name=Rhea Les Elfes, data1=+41792393783
+Row: 1 display_name=peer peer-user, data1=+16175551234
+Row: 2 display_name=Smith, John, data1=+15551230000
+CONEOF
+
+echo "== content-provider rows survive values that contain commas"
+# `content query` prints "Row: N k=v, k=v" and does not quote or escape.
+# A title of "Lunch with peer, Sara, and Ravi" or a surname-first contact
+# "Smith, John" splits into garbage under a naive split on ", ". The keys
+# are known -- we chose the projection -- so split on the key boundaries,
+# not on commas.
+out="$("$PHONE" cal --from "$T/cal.txt" --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = [e["title"] for e in d]
+assert "Lunch with peer, Sara, and Ravi" in t, t
+loc = [e["location"] for e in d if e["title"].startswith("Lunch")][0]
+assert loc == "Cafe Luna, Cambridge", loc
+day = [e for e in d if e["title"] == "Labor Day"][0]
+assert day["all_day"] is True, day
+assert [e for e in d if e["title"] == "Standup"][0]["location"] is None
+' 2>/dev/null; then
+  ok "calendar rows parse with commas inside titles and locations"
+else bad "calendar row parse (got: $out)"; fi
+
+out="$("$PHONE" contacts --from "$T/contacts.txt" --json 2>&1)"
+if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+by = {c["name"]: c["number"] for c in d}
+assert by["Smith, John"] == "+15551230000", by
+assert by["peer peer-user"] == "+16175551234", by
+' 2>/dev/null; then
+  ok "contact rows parse with a comma inside the name"
+else bad "contact row parse (got: $out)"; fi
+
+echo "== contacts: a name goes in, a number comes out"
+# "message peer" needs a number, and the phone knows it. Reading it off the
+# Contacts app's screen would be three taps and a UI dump.
+out="$("$PHONE" contacts peer --from "$T/contacts.txt" 2>&1)"
+if printf '%s' "$out" | grep -q "+16175551234" \
+   && ! printf '%s' "$out" | grep -q "Rhea"; then
+  ok "contacts search is case-insensitive and filters"
+else bad "contacts search (got: $out)"; fi
+out="$("$PHONE" contacts "nobody by that name" --from "$T/contacts.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then
+  ok "a contact that is not there exits non-zero (never a wrong number)"
+else bad "missing contact must not exit 0 (got: $out)"; fi
+
+echo "== calendar reads are recorded as reads of personal data"
+CL="$T/cal-ledger.jsonl"
+PHONE_LEDGER="$CL" "$PHONE" cal --from "$T/cal.txt" >/dev/null 2>&1
+PHONE_LEDGER="$CL" "$PHONE" contacts peer --from "$T/contacts.txt" >/dev/null 2>&1
+if python3 -c "
+import json
+rows=[json.loads(l) for l in open('$CL') if l.strip()]
+verbs={r['verb']: r for r in rows}
+assert 'cal' in verbs and verbs['cal']['kind']=='read', rows
+assert 'contacts' in verbs and verbs['contacts']['kind']=='read', rows
+# the trace must not become a copy of the address book
+assert '+16175551234' not in json.dumps(rows), 'ledger leaked a phone number'
+" 2>/dev/null; then
+  ok "both are logged as reads, and the ledger does not copy the data out"
+else bad "provider read logging"; fi
+
 echo "== a screenshot has to be able to cross the hop at all"
 # The skill tells the agent: when the tree fails you, take a screenshot and
 # look at the picture. From a controller that never worked. Binary cannot
