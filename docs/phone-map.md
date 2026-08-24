@@ -406,6 +406,82 @@ about.
 
 ---
 
+## Moving between apps
+
+### Bring an app to the foreground
+**Route:** intent. **Verified:** 2026-08-23, Android 16 (sdk 36). ~1.4s.
+
+    phone --device aadarshs-pixel-10 open com.google.android.keep
+    phone --device aadarshs-pixel-10 foreground
+    → com.google.android.keep/.activities.BrowseActivity
+
+**`open` is one of the few verbs that checks its own work.** It resolves the
+launcher component, starts it, then polls `ResumedActivity` until the package
+is actually in front, and fails if it never arrives. Contrast `am start` and
+`input tap`, which exit 0 regardless. Its contract:
+
+| outcome | rc | output |
+|---|---|---|
+| landed | 0 | *silent* |
+| not installed | 4 | `phone: <pkg> is not installed on this device` |
+| started but never came forward | 4 | `phone: <pkg> did not come to the foreground` |
+
+Silence means success here. That is the opposite of `phone sh`, where silence
+means you lost the stderr — do not carry the habit across.
+
+Pass the **full package name**; `open` goes through the same broken
+resolution as `--app` above, so `open chrome` launches Google Home.
+
+`phone key HOME` returns to the launcher and is the cheap way to leave the
+phone as you found it.
+
+---
+
+## Settings you can read
+
+**Route:** state. **Verified:** 2026-08-23, Android 16 (sdk 36).
+
+All three namespaces are readable in full — 260 rows in `global`, 246 in
+`secure`, 52 in `system`. Read many at once; each separate call costs ~0.31s:
+
+    phone sh 'for k in zen_mode airplane_mode_on low_power; do
+                echo "$k=$(settings get global $k 2>&1)"; done'
+
+Useful ones confirmed present on this phone:
+
+| namespace | key | here | meaning |
+|---|---|---|---|
+| global | `zen_mode` | 0 | Do Not Disturb off |
+| global | `airplane_mode_on` | 0 | |
+| global | `wifi_on` / `bluetooth_on` | 1 / 1 | |
+| global | `low_power` | 0 | battery saver off |
+| global | `device_name` | Pixel 10 | |
+| system | `screen_off_timeout` | 1800000 | 30 min |
+| system | `screen_brightness_mode` | 1 | auto |
+| system | `accelerometer_rotation` | 1 | auto-rotate on |
+| secure | `location_mode` | 3 | high accuracy |
+| secure | `default_input_method` | LatinIME | |
+| secure | `lock_screen_show_notifications` | 1 | |
+
+### `settings get system volume_music` is not the volume
+**Verified:** 2026-08-23, Android 16 (sdk 36).
+
+Read back to back, they disagree:
+
+    settings get system volume_music          → 5
+    cmd media_session volume --stream 3 --get → volume is 17 in range [0..25]
+
+17 is the true live value — it is what actually changed when the volume was
+set, and what it was restored to. `volume_music` in `settings` is not the
+live stream index (it does not track the active output device), and a caller
+that reads it gets a plausible number that is simply wrong.
+
+**For the live music volume use `cmd media_session volume --stream 3 --get`.**
+Another instance of the same lesson as the media-session decoy: a real value
+from a real table is not automatically an answer to your question.
+
+---
+
 ## What the tiers actually cost
 
 **Measured:** 2026-08-23, Android 16 (sdk 36), controller over the forwarded
