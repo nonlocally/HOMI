@@ -711,6 +711,21 @@ if [ "$wins" = "1" ]; then ok "8 simultaneous acquires, exactly 1 winner"
 else bad "the lease is racy: $wins winners out of 8"; fi
 "$PHONE" shelld --stop >/dev/null 2>&1
 
+echo "== --device must carry the termux-api verbs too, not just shell ones"
+# The forwarded socket runs commands at SHELL uid. Termux's own binaries live
+# in an app-private prefix that shell uid cannot read, so notifs/say/battery
+# cannot ride that path — they have to run as the app, on the device. A
+# --device that silently only covered half the verbs would be worse than one
+# that covered none, because the failure looks like a broken phone.
+out="$("$PHONE" --device aadarshs-pixel-10 --print-plan notifs --limit 2 2>&1)"
+if printf '%s' "$out" | grep -q "ssh" && printf '%s' "$out" | grep -q "notifs"; then
+  ok "a termux-api verb is planned to run ON the device"
+else bad "termux verb routing (got: $out)"; fi
+out="$("$PHONE" --device aadarshs-pixel-10 --print-plan tap 1 2 2>&1)"
+if printf '%s' "$out" | grep -qi "socket\|forward\|local"; then
+  ok "a shell verb still takes the fast forwarded path"
+else bad "shell verb routing (got: $out)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
