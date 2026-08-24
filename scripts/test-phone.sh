@@ -1070,6 +1070,57 @@ if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "com.foo.notes" \
 else bad "ambiguity silently resolved (rc=$rc out=$out)"; fi
 rm -rf "$NT"
 
+echo "== a large read has to PROVE it arrived intact"
+# Found by ranger, reproduced here, and localised to our own daemon: the
+# persistent shell corrupts large reads. Not truncation — the byte count and
+# line count come back EXACTLY right, with a region substituted by content
+# from earlier in the stream, sometimes from the PREVIOUS command entirely
+# (a run of seq 100001..130000 that opened with '1171'), and once with two
+# numbers welded together ('316316676').
+#
+# Measured over the same 169 KB payload: plain ssh 4/4 clean, shelld 4/4
+# corrupt, on-device and over the forward alike. Rate climbs with size —
+# clean at 4 KB, half at 9 KB, none at 61 KB.
+#
+# Why it is dangerous rather than annoying: rc is 0, the length is right, and
+# a UI dump still opens with <hierarchy and closes with </hierarchy>. Every
+# guard we had passes. XML is merely brittle enough to notice; a corrupted
+# package list or dumpsys has nothing to notice with and would be used as
+# fact. The UI tree was the canary, not the victim.
+IT2="$(mktemp -d)"
+cat > "$IT2/md5sum" <<'MEOF'
+#!/bin/sh
+# Deliberately wrong, every time: the read must never be believed.
+echo "00000000000000000000000000000000  $1"
+MEOF
+chmod +x "$IT2/md5sum"
+cat > "$IT2/adb" <<'AEOF'
+#!/bin/sh
+while [ "$1" = "-s" ]; do shift 2; done
+case "$1" in
+  devices) printf 'List of devices attached\nemulator-5554\tdevice\n'; exit 0 ;;
+  shell|exec-out) shift; sh -c "$*"; exit $? ;;
+  *) exit 0 ;;
+esac
+AEOF
+chmod +x "$IT2/adb"
+
+out="$(PATH="$IT2:$PATH" TMPDIR="$IT2" PHONE_LEDGER="$IT2/l.jsonl" \
+       "$PHONE" sh --checked 'echo hello' 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "corrupt\|did not survive\|integrity"; then
+  ok "a read whose checksum never matches fails loudly instead of returning"
+else bad "bad checksum was accepted (rc=$rc out=$out)"; fi
+
+# And with a REAL md5sum on PATH, the same path must succeed — otherwise the
+# check is just a way to break working reads.
+rm -f "$IT2/md5sum"
+out="$(PATH="$IT2:$PATH" TMPDIR="$IT2" PHONE_LEDGER="$IT2/l2.jsonl" \
+       "$PHONE" sh --checked 'echo hello' 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "hello"; then
+  ok "a read whose checksum matches comes back normally"
+else bad "verified read broke a good read (rc=$rc out=$out)"; fi
+rm -rf "$IT2"
+
 echo "== the device's stderr must not vanish on the way back"
 # Found by ranger, and it is the signature failure of this whole codebase in
 # a new place: a denied `content query` comes back as RC=0 with NO output,
