@@ -1140,7 +1140,17 @@ def get_ui(from_file=None):
         die("could not read the UI tree: the dump failed (screen off, a "
             "secure window, or the screen never went idle). Nothing guessed.",
             4)
-    out = dev_read(remote)
+    # CHECKED, because this read is exactly where the corruption was first
+    # noticed. A UI tree is 20-80 KB, which is squarely in the range where
+    # large reads come back with a region substituted by earlier content —
+    # right length, right rc, and still opening with <hierarchy and closing
+    # with </hierarchy>, so every guard below this line passes a spliced
+    # document. XML being brittle enough to fail parsing was the only reason
+    # anyone noticed at all; that made the screen tier look unreliable when
+    # the transport was at fault.
+    #
+    # Measured before this change: look/ui failed 4 of 8 on a complex screen.
+    _rc, out = dev_shell_checked("cat %s" % remote, timeout=90)
     dev_shell("rm -f %s" % remote, timeout=15)
     if "<hierarchy" not in (out or ""):
         die("could not read the UI tree (the screen may be off or secure)", 4)
@@ -1356,7 +1366,8 @@ def cmd_say(args):
     # that says two things in a row no longer talks over itself.
     text = " ".join(args.text)
     r = bridge_call("say", device=os.environ.get("PHONE_DEVICE"),
-                    text=text, timeout=max(30, args.timeout))
+                    wait=max(30, args.timeout) + 30, text=text,
+                    timeout=args.timeout)
     if r is not None and r.get("ok"):
         record("say", {"chars": len(text),
                        "first_audio_ms": r.get("first_audio_ms"),
@@ -1384,8 +1395,7 @@ def cmd_listen(args):
     # On-device recognition through the bridge, before termux-speech-to-text.
     # The audio never leaves the phone and there is no network leg at all.
     r = bridge_call("listen", device=os.environ.get("PHONE_DEVICE"),
-                    timeout=max(30, args.timeout + 10),
-                    **{"timeout": args.timeout})
+                    wait=args.timeout + 20, timeout=args.timeout)
     if r is not None and r.get("ok") and (r.get("text") or "").strip():
         record("listen", {"chars": len(r["text"]), "tier": "bridge"}, "read")
         print(r["text"])
@@ -2000,7 +2010,7 @@ def _bridge_alive():
             pass
 
 
-def bridge_call(op, device=None, timeout=90, **kw):
+def bridge_call(op, device=None, wait=90, **kw):
     """One line of JSON out, one back. None when the bridge is unreachable —
     which callers treat as "fall back", never as "it said no"."""
     import socket as _s
@@ -2013,7 +2023,11 @@ def bridge_call(op, device=None, timeout=90, **kw):
     req["op"] = op
     req["token"] = tok
     c = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
-    c.settimeout(timeout)
+    # OUR deadline for the socket, deliberately not named `timeout`: several
+    # ops carry their own `timeout` field, and a collision here meant `talk`
+    # died with "got multiple values for keyword argument" the first time it
+    # ran. Different concepts, different names.
+    c.settimeout(wait)
     try:
         c.connect(("127.0.0.1", BRIDGE_PORT))
         c.sendall((json.dumps(req) + "\n").encode("utf-8"))
@@ -2792,6 +2806,101 @@ def cmd_notif_reply(args):
     return 0
 
 
+
+def _ask_agent(to, text, sender, timeout):
+    """Put a spoken turn to an agent and wait for its answer."""
+    argv = ["communicate", "homi", "ask", to, text,
+            "--from", sender, "--timeout", str(timeout)]
+    try:
+        pr = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=timeout + 15)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "could not reach the fabric (%s)" % e
+    out = (pr.stdout or "").strip()
+    if pr.returncode != 0 or not out:
+        return None, ((pr.stderr or "").strip().splitlines() or
+                      ["no answer within %ds" % timeout])[-1]
+    return out, None
+
+
+def cmd_talk(args):
+    """One spoken turn, end to end: hear it, ask an agent, say the answer.
+
+    The loop runs HERE, not on the phone. The phone is ears and mouth — its
+    on-device recogniser and its warm speech engine, both reached over the
+    bridge — while the fabric, the agent and the mailbox all live on this
+    machine. Trying to run it the other way needs a homi daemon and an
+    identity on the phone, neither of which is there, and would buy nothing:
+    the microphone is already reachable from here.
+
+    No button is required, which surprised me. `listen` returns the moment it
+    hears speech, so waiting for a trigger IS the trigger.
+    """
+    device = os.environ.get("PHONE_DEVICE")
+    sender = args.sender or os.environ.get("PHONE_ACTOR") or "phone-voice"
+    wake = (args.wake or "").strip().lower()
+
+    while True:
+        heard = bridge_call("listen", device=device,
+                            wait=args.listen + 20, timeout=args.listen)
+        if heard is None:
+            die("the phonebridge app is not reachable — is it installed and "
+                "is its voice service running? (am start -n "
+                "com.aadarwal.phonebridge/.Boot)", 3)
+        text = (heard.get("text") or "").strip()
+        if not text:
+            if not args.loop:
+                sys.stderr.write("phone: %s\n"
+                                 % (heard.get("err") or "nothing heard"))
+                return 1
+            continue
+
+        if wake:
+            # A wake phrase in SOFTWARE, because the hardware hotword
+            # detector only takes models the vendor signed. Without it the
+            # recogniser answers the room: it transcribed a television
+            # during testing, and an agent acting on overheard speech is a
+            # worse failure than one that misses a request.
+            low = text.lower()
+            if wake not in low:
+                if args.verbose:
+                    sys.stderr.write("phone: ignored (no wake phrase): %s\n"
+                                     % text[:60])
+                if not args.loop:
+                    return 1
+                continue
+            text = text[low.index(wake) + len(wake):].strip(" ,.:;-") or text
+
+        record("talk", {"heard_chars": len(text), "to": args.to}, "read")
+        print("heard: %s" % text)
+
+        # [spoken] so the agent shapes it for an ear rather than a screen —
+        # the same marker the voice page sends.
+        answer, err = _ask_agent(args.to, "[spoken] " + text, sender,
+                                 args.timeout)
+        if err:
+            # Say the failure OUT LOUD. A voice loop that fails silently
+            # leaves someone talking to a phone that has stopped listening,
+            # with nothing to tell them apart.
+            bridge_call("say", device=device,
+                        text="Sorry, I could not reach the agent.")
+            record("talk", {"to": args.to}, "act", "failed: %s" % err, rc=1)
+            sys.stderr.write("phone: %s\n" % err)
+            if not args.loop:
+                return 4
+            continue
+
+        print("answer: %s" % answer)
+        said = bridge_call("say", device=device, text=answer, wait=150)
+        ok = bool(said and said.get("ok"))
+        record("talk", {"to": args.to, "answer_chars": len(answer),
+                        "first_audio_ms": (said or {}).get("first_audio_ms")},
+               "act", "spoke the answer" if ok else
+               "unconfirmed: the answer was not confirmed spoken", rc=0 if ok else 1)
+        if not args.loop:
+            return 0 if ok else 5
+
+
 def cmd_log(args):
     rows = _read_ledger(ledger_path())
     device = os.environ.get("PHONE_DEVICE")
@@ -3174,6 +3283,18 @@ def build_parser():
     s.add_argument("--kind", choices=["act", "read"])
     s.add_argument("--actor", help="only what this driver did")
     s.add_argument("--json", action="store_true")
+
+    s = add("talk", cmd_talk,
+            "hear a spoken turn, ask an agent, say the answer")
+    s.add_argument("--to", default="tongs", help="which agent to ask")
+    s.add_argument("--from", dest="sender", help="who is asking")
+    s.add_argument("--listen", type=int, default=25,
+                   help="seconds to wait for speech")
+    s.add_argument("--timeout", type=int, default=180,
+                   help="seconds to wait for the agent")
+    s.add_argument("--wake", help="only act on speech containing this phrase")
+    s.add_argument("--loop", action="store_true", help="keep listening")
+    s.add_argument("--verbose", action="store_true")
 
     s = add("reply", cmd_notif_reply,
             "reply to a message without the screen (needs phonebridge)")
