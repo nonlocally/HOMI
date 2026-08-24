@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -489,6 +490,41 @@ SENTINEL = "__PHONE_EOC__"
 
 # How long the daemon waits for one command before killing its shell.
 _SHELLD_DEADLINE = float(os.environ.get("PHONE_SHELL_DEADLINE") or 75)
+# How often the daemon looks up from accept() to ask whether it should still
+# be alive, and how long it may sit unused before deciding it should not.
+# IDLE=0 means "run forever", which is what every daemon here used to do.
+_SHELLD_TICK = float(os.environ.get("PHONE_SHELLD_TICK") or 30)
+_SHELLD_IDLE = float(os.environ.get("PHONE_SHELLD_IDLE") or 3600)
+SHELLD_CTL = "\0shelld "        # NUL: a shell command can never begin this way
+
+
+def _wait_gone(pid, seconds):
+    """True once pid is no longer running. Polled, because there is no
+    portable way to wait on a process that is not our child — and a daemon
+    started with start_new_session() never is."""
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    return False
+
+
+def shell_pidfile(path=None):
+    """Where the daemon says who it is.
+
+    Without this there is no way to END a daemon: unlinking the socket only
+    removes the NAME, leaving the process blocked in accept() on a socket
+    nobody can dial, still holding its device shell. That is not theoretical
+    — it left 727 orphans and 5GB of swap on this machine.
+    """
+    return (path or shell_sock()) + ".pid"
 
 
 def shell_sock():
@@ -555,13 +591,51 @@ def cmd_shelld(args):
     import socket as _s
     path = shell_sock()
     if args.stop:
+        # Ask first, signal second, and only then remove the names.
+        #
+        # The old version did the LAST step alone: it unlinked the socket and
+        # printed "stopped" while the daemon ran on untouched. Every such
+        # "stop" produced an immortal process holding a shell, and a later
+        # --start bound a fresh socket over the same path, orphaning any
+        # incumbent the same way.
+        pidf = shell_pidfile(path)
         try:
-            os.unlink(path)
-        except OSError:
-            pass
+            pid = int(open(pidf).read().strip())
+        except (OSError, ValueError):
+            pid = 0
+        asked = shelld_call(SHELLD_CTL + "stop", timeout=5)
+        gone = _wait_gone(pid, 5.0) if pid > 1 else asked is not None
+        if not gone and pid > 1:
+            # It did not answer (wedged in a command, or its socket was
+            # already taken away). The pidfile is what makes this reachable.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(os.getpgid(pid), sig)
+                except OSError:
+                    try:
+                        os.kill(pid, sig)
+                    except OSError:
+                        break
+                if _wait_gone(pid, 3.0):
+                    gone = True
+                    break
+        for p in (path, pidf):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        if pid > 1 and not gone:
+            die("daemon %d would not die" % pid, 4)
         print("stopped")
         return 0
     if args.start:
+        # A live daemon is reused, never bound over. Binding over the top is
+        # how an incumbent becomes unreachable-but-running, which is the
+        # orphan this whole path exists to prevent.
+        live = shelld_call("true", timeout=5)
+        if live is not None and live[0] == 0:
+            print("shelld already listening on %s" % path)
+            return 0
         # Re-exec ourselves detached; the parent returns immediately.
         me = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         me = os.path.realpath(me)
@@ -569,8 +643,10 @@ def cmd_shelld(args):
         subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                          start_new_session=True)
+        # Wait for the pidfile too, not just the socket: a caller that cannot
+        # see the pid cannot stop what it just started.
         for _ in range(40):
-            if os.path.exists(path):
+            if os.path.exists(path) and os.path.exists(shell_pidfile(path)):
                 print("shelld listening on %s" % path)
                 return 0
             time.sleep(0.25)
@@ -588,6 +664,22 @@ def cmd_shelld(args):
     srv.bind(path)
     os.chmod(path, 0o600)           # this socket IS shell-level power
     srv.listen(8)
+    # Remember WHICH socket file is ours. A path is not an identity: unlink
+    # and rebind gives the same name a different inode, and the daemon that
+    # bound the old one can no longer be reached by anyone. Comparing inodes
+    # is how it finds that out about itself.
+    try:
+        me_st = os.stat(path)
+        my_sock = (me_st.st_dev, me_st.st_ino)
+    except OSError:
+        my_sock = None
+    pidf = shell_pidfile(path)
+    with open(pidf, "w") as f:
+        f.write("%d\n" % os.getpid())
+    try:
+        os.chmod(pidf, 0o600)
+    except OSError:
+        pass
 
     # The lease. Held in this process, and guarded by its OWN lock.
     #
@@ -749,9 +841,36 @@ def cmd_shelld(args):
                 return rc, body
             lines.append(line)
 
+    def still_ours():
+        """False once this daemon can no longer be reached.
+
+        Checked on every idle tick because the two ways a daemon is abandoned
+        — its socket unlinked, or a second daemon binding the same path — are
+        both INVISIBLE from inside accept(). Nothing errors; the process just
+        waits forever on a name that no longer routes to it.
+        """
+        if my_sock is None:
+            return True
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False            # unlinked: nothing can dial us again
+        return (st.st_dev, st.st_ino) == my_sock
+
+    last = time.time()
+    srv.settimeout(_SHELLD_TICK)
+    stopping = False
     try:
-        while True:
-            conn, _ = srv.accept()
+        while not stopping:
+            try:
+                conn, _ = srv.accept()
+            except _s.timeout:
+                if not still_ours():
+                    break           # abandoned — do not become an orphan
+                if _SHELLD_IDLE > 0 and time.time() - last > _SHELLD_IDLE:
+                    break           # nobody has used the fast path in an hour
+                continue
+            last = time.time()
             try:
                 conn.settimeout(120)
                 data = b""
@@ -764,7 +883,12 @@ def cmd_shelld(args):
                 cmd = raw.strip()
                 if not cmd:
                     continue
-                if raw.startswith(LEASE_CTL):
+                if raw.startswith(SHELLD_CTL):
+                    # Answer BEFORE exiting, so the stopper learns it worked
+                    # rather than timing out and resorting to signals.
+                    stopping = True
+                    rc, out = 0, "stopping"
+                elif raw.startswith(LEASE_CTL):
                     rc, out = lease_op(raw[len(LEASE_CTL):].strip())
                 else:
                     rc, out = run_one(cmd)
@@ -778,15 +902,27 @@ def cmd_shelld(args):
                 except OSError:
                     pass
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        # Only clean up the names if they are still OURS. A daemon that was
+        # replaced must not delete the live socket on its way out.
+        if still_ours():
+            for p in (path, pidf):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        # Take the shell's whole process GROUP. terminate() on the shell alone
+        # leaves whatever it was running mid-command alive and holding the
+        # same pipes — the same mistake the deadline watchdog above already
+        # had to correct.
         try:
             if box[0]:
-                box[0].terminate()
+                os.killpg(os.getpgid(box[0].pid), signal.SIGKILL)
         except Exception:
-            pass
+            try:
+                if box[0]:
+                    box[0].kill()
+            except Exception:
+                pass
     return 0
 
 
