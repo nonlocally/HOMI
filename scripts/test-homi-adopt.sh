@@ -512,6 +512,106 @@ if [ "$r" = "True True True True" ]; then
   ok "steered -> daemon restarts WITH the runtime dir (any os); real systemd untouched"
 else bad "steered restart env (got: $r)"; fi
 
+echo "== termux is detected as its own device class"
+r="$(PY "
+a = ha.parse_facts('OS=Linux\nUNAME_O=Android\n')['is_termux']
+b = ha.parse_facts('OS=Linux\nPREFIX=/data/data/com.termux/files/usr\n')['is_termux']
+c = ha.parse_facts('OS=Linux\nUNAME_O=GNU/Linux\n')['is_termux']
+print(a, b, c)")"
+if [ "$r" = "True True False" ]; then ok "Android via uname -o or the termux PREFIX; a normal linux is not"
+else bad "is_termux (got: $r)"; fi
+
+echo "== termux: TMPDIR is provisioned (SELinux makes /tmp unwritable at ANY mode)"
+r="$(PY "
+f = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h', xdg='',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=True, reverse_ok=True, shim=True, tmux_bin='/x/tmux',
+         claude_bin='/x/claude', kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m',
+                          reverse_candidates=['1.2.3.4']))
+td = [a for a in acts if a['step']=='tmpdir']
+rt = [a for a in acts if a['step']=='runtime_dir']
+print(bool(td), sorted(td[0]['profiles'])[:2] if td else '-', bool(rt))")"
+if [ "$r" = "True ['~/.bash_profile', '~/.bashrc'] True" ]; then
+  ok "TMPDIR exported into the login profiles; runtime dir steered too"
+else bad "termux tmpdir (got: $r)"; fi
+
+echo "== termux: the amd64 static tmux is NEVER planned (Android is arm64)"
+r="$(PY "
+f = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h', xdg='',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=True, reverse_ok=True, shim=True, tmux_bin='',
+         claude_bin='/x/claude', kernel_hash='SAME', py3=True)
+acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m',
+                                  reverse_candidates=['1.2.3.4']))
+steps = [a['step'] for a in acts]
+print('install_tmux_static' in steps, any('pkg install tmux' in c for c in checklist))")"
+if [ "$r" = "False True" ]; then
+  ok "no amd64 binary pushed to an arm64 phone; the checklist names pkg instead"
+else bad "termux tmux (got: $r)"; fi
+
+echo "== termux: claude is pinned (the native installer ships no android binary)"
+r="$(PY "
+f = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h', xdg='',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=True, reverse_ok=True, shim=True, tmux_bin='/x/tmux',
+         claude_bin='', kernel_hash='SAME', py3=True)
+acts, _ = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m',
+                          reverse_candidates=['1.2.3.4']))
+ic = [a for a in acts if a['step']=='install_claude'][0]
+print(ic.get('pin'))")"
+if [ "$r" = "2.1.72" ]; then ok "install_claude carries the android pin"
+else bad "termux claude pin (got: $r)"; fi
+
+echo "== termux: an unknown fabric identity is a CHECKLIST item, never a guess"
+r="$(PY "
+f = dict(os='Linux', is_termux=True, login_shell='/bin/bash', home='/h', xdg='',
+         ssh_ip='1.2.3.4', cc_collision=False, own_key=True, fabric_key=True,
+         hub_key_there=True, reverse_ok=True, shim=True, tmux_bin='/x/tmux',
+         claude_bin='/x/claude', kernel_hash='SAME', py3=True, homi_self='')
+acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m',
+                                  reverse_candidates=['1.2.3.4']))
+named = dict(f, homi_self='aadarshs-pixel-10')
+_, cl2 = ha.plan(named, dict(kernel_hash='SAME', my_addr='a@m',
+                             reverse_candidates=['1.2.3.4']))
+print(any('HOMI_SELF' in c for c in checklist), any('HOMI_SELF' in c for c in cl2))")"
+if [ "$r" = "True False" ]; then
+  ok "no MagicDNS -> HOMI_SELF asked for, not invented; already-named device is quiet"
+else bad "termux homi_self (got: $r)"; fi
+
+echo "== a normal linux is untouched by any of this"
+r="$(PY "
+f = dict(os='Linux', is_termux=False, login_shell='/bin/bash', home='/h',
+         xdg='/run/user/1000', ssh_ip='1.2.3.4', cc_collision=False,
+         own_key=True, fabric_key=True, hub_key_there=True, reverse_ok=True,
+         shim=True, tmux_bin='', claude_bin='', kernel_hash='SAME', py3=True)
+acts, checklist = ha.plan(f, dict(kernel_hash='SAME', my_addr='a@m',
+                                  reverse_candidates=['1.2.3.4']))
+steps = [a['step'] for a in acts]
+ic = [a for a in acts if a['step']=='install_claude'][0]
+print('install_tmux_static' in steps, 'tmpdir' in steps, ic.get('pin'), len(checklist))")"
+if [ "$r" = "True False None 0" ]; then
+  ok "plain linux still gets the static tmux, no tmpdir, unpinned claude"
+else bad "linux unchanged (got: $r)"; fi
+
+echo "== the pin reaches the installer as its positional arg (it takes [stable|latest|VERSION])"
+r="$(PY "
+seen = []
+def cap(addr, cmd, timeout=60):
+    seen.append(cmd); return (0, '/x/claude')
+ha.execute('u@h', [{'step':'install_claude','pin':'2.1.72'}], dict(os='Linux'),
+           dict(my_addr='a@m', here_dir='/tmp'), ssh=cap, say=lambda s: None)
+pinned = seen[0]
+seen2 = []
+def cap2(addr, cmd, timeout=60):
+    seen2.append(cmd); return (0, '/x/claude')
+ha.execute('u@h', [{'step':'install_claude','pin':None}], dict(os='Linux'),
+           dict(my_addr='a@m', here_dir='/tmp'), ssh=cap2, say=lambda s: None)
+print('bash -s 2.1.72' in pinned, 'bash -s' not in seen2[0])")"
+if [ "$r" = "True True" ]; then
+  ok "pinned install passes the version to install.sh; unpinned stays latest"
+else bad "installer pin shape (got: $r)"; fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -54,6 +54,8 @@ def probe_script(my_addr, hub_key_material=""):
                   for f in KERNEL_FILES)
     return (
         'echo "OS=$(uname -s)"; echo "HOMEDIR=$HOME"; echo "SHELL_=$SHELL"; '
+        'echo "UNAME_O=$(uname -o 2>/dev/null)"; echo "PREFIX=$PREFIX"; '
+        'echo "HOMI_SELF_=$HOMI_SELF"; '
         'echo "XDG=$XDG_RUNTIME_DIR"; '
         'echo "SSHIP=${SSH_CONNECTION%%%% *}"; '
         'o=$(stat -f %%u /tmp/cc-socks 2>/dev/null || '
@@ -104,6 +106,11 @@ def parse_facts(out):
         ip = ""   # an address, or nothing — never shell metacharacters
     return {
         "os": kv.get("OS", ""),
+        # Termux/Android is its own device class, not "a Linux": no systemd
+        # runtime dir, an unwritable /tmp, arm64, no MagicDNS.
+        "is_termux": (kv.get("UNAME_O", "") == "Android"
+                      or "com.termux" in kv.get("PREFIX", "")),
+        "homi_self": kv.get("HOMI_SELF_", ""),
         "home": kv.get("HOMEDIR", ""),
         "login_shell": kv.get("SHELL_", ""),
         "xdg": kv.get("XDG", ""),
@@ -146,6 +153,10 @@ def parse_args(argv):
 
 
 FABRIC_KEY = "~/.ssh/id_homi"
+
+# The newest claude build that ships a runnable Android binary; the native
+# installer's latest does not. Bump only after testing ON a phone.
+ANDROID_CLAUDE_PIN = "2.1.72"
 
 
 def fabric_keygen_cmd():
@@ -247,14 +258,43 @@ def plan(facts, local):
     if not facts.get("shim"):
         acts.append({"step": "shim"})
 
+    termux = bool(facts.get("is_termux"))
+    if termux:
+        # claude falls back to a HARDCODED /tmp when TMPDIR is unset. On
+        # Android /tmp is owned by shell:shell, and an app UID cannot write
+        # there even at 0777 — SELinux domain restriction, not Unix modes
+        # (verified by creating the dir as shell via Shizuku and still
+        # getting EACCES). So TMPDIR must be exported, durably: without it
+        # the on-device agent silently loses the ability to run ANY command
+        # and reports it as a /tmp permission error the human cannot fix
+        # from the shell. Deleting this export is not a cleanup.
+        acts.append({"step": "tmpdir",
+                     "profiles": _profile_files(facts.get("login_shell"))})
+        if not facts.get("homi_self"):
+            # No MagicDNS on Android, so the device cannot learn its own
+            # fabric name. NEVER invent one: a wrong name forks the
+            # identity and its mail goes to a device that does not exist.
+            checklist.append(
+                "this device has no HOMI_SELF and Android has no MagicDNS to "
+                "derive one — export HOMI_SELF=<its fabric name> in its shell "
+                "profile, then re-run adopt")
+
     if not facts.get("tmux_bin"):
         if facts.get("os") == "Darwin":
             checklist.append("tmux missing and no static build for macOS — "
                              "install it (brew install tmux), then re-run")
+        elif termux:
+            # The static build we fetch is linux-amd64; a phone is arm64,
+            # and Termux ships tmux in its own repo anyway.
+            checklist.append("tmux missing — on the device run: "
+                             "pkg install tmux")
         else:
             acts.append({"step": "install_tmux_static"})
     if not facts.get("claude_bin"):
-        acts.append({"step": "install_claude"})
+        # claude.ai/install.sh publishes no linux-arm64-android binary, so
+        # Android is pinned to the last build that runs there.
+        acts.append({"step": "install_claude",
+                     "pin": ANDROID_CLAUDE_PIN if termux else None})
 
     far, mine = facts.get("kernel_hash"), local.get("kernel_hash")
     need_restart = False
@@ -479,6 +519,20 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
             ok = all(r == 0 for r in rcs)
             say("  provision: runtime dir   %s (%s)"
                 % ("~/.local/run" if ok else "FAILED", ", ".join(a["profiles"])))
+        elif step == "tmpdir":
+            payload = ('export TMPDIR="${TMPDIR:-$HOME/tmp}"\n'
+                       '[ -d "$TMPDIR" ] || mkdir -p "$TMPDIR"\n'
+                       ).replace("\n", "\\n")
+            rcs = []
+            for prof in a["profiles"]:
+                rc, _ = ssh(addr, "grep -q TMPDIR %s 2>/dev/null || "
+                            "printf '%s' >> %s" % (prof, payload, prof))
+                rcs.append(rc)
+            rc2, _ = ssh(addr, "mkdir -p ~/tmp")
+            rcs.append(rc2)
+            say("  provision: TMPDIR        %s (%s)"
+                % ("~/tmp" if all(r == 0 for r in rcs) else "FAILED",
+                   ", ".join(a["profiles"])))
         elif step == "shim":
             rc, _ = ssh(addr, "mkdir -p ~/.local/bin; "
                         "printf '#!/bin/sh\\n[ \"$1\" = homi ] && shift\\n"
@@ -497,11 +551,14 @@ def execute(addr, acts, facts, local, ssh=_run_ssh, say=print):
             say("  provision: tmux          %s"
                 % ("static build installed" if rc == 0 else "INSTALL FAILED"))
         elif step == "install_claude":
-            rc, _ = ssh(addr, "curl -fsSL https://claude.ai/install.sh | bash "
-                              ">/dev/null 2>&1; PATH=%s command -v claude"
-                        % _FAR_PATH, timeout=300)
-            say("  provision: claude        %s"
-                % ("installed" if rc == 0 else "INSTALL FAILED"))
+            pin = a.get("pin")
+            cmd = ("curl -fsSL https://claude.ai/install.sh | bash -s %s"
+                   % pin) if pin else "curl -fsSL https://claude.ai/install.sh | bash"
+            rc, _ = ssh(addr, "%s >/dev/null 2>&1; PATH=%s command -v claude"
+                        % (cmd, _FAR_PATH), timeout=300)
+            say("  provision: claude        %s%s"
+                % ("installed" if rc == 0 else "INSTALL FAILED",
+                   (" (pinned %s)" % pin) if pin else ""))
         elif step == "kernel_refresh":
             here_dir = local["here_dir"]
             files = [os.path.join(here_dir, f) for f in KERNEL_FILES
