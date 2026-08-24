@@ -114,6 +114,33 @@ PY
 sleep 0.5
 if [ "$(grep -c 'fixed123' "$AINBOX")" = "1" ]; then ok "msg_id dedup"; else bad "msg_id dedup"; fi
 if "$COMM" homi send alice "via control op" --from opsender >/dev/null 2>&1; then ok "pm send (local)"; else bad "pm send (local)"; fi
+
+echo "== send validates the RETURN ADDRESS it will hand the recipient"
+# Claim both ends here: a missing RECIPIENT makes every send fail, which
+# would let these pass for the wrong reason.
+"$COMM" homi claim rcpt >/dev/null 2>&1
+"$COMM" homi claim realsender >/dev/null 2>&1
+# send accepted any --from, including one send itself would refuse as a
+# destination — the recipient got an attribution nobody could answer.
+if "$COMM" homi send rcpt "bad shape" --from "Not A Name" >/dev/null 2>&1; then
+  bad "send accepted a malformed --from"
+else ok "send refuses a malformed --from (it could never be replied to)"; fi
+if "$COMM" homi send rcpt "reserved" --from self >/dev/null 2>&1; then
+  bad "send accepted a reserved --from"
+else ok "send refuses a reserved --from"; fi
+# a valid but UNCLAIMED name still sends (fire-and-forget is allowed) but
+# must say so, because a reply to that name will fail
+out="$("$COMM" homi send rcpt "unclaimed" --from ghostsender 2>&1)"
+case "$out" in
+  *"not claimed"*|*"claim ghostsender"*) ok "an unclaimed --from warns, naming the fix" ;;
+  *) bad "unclaimed --from was silent (got: $out)" ;;
+esac
+out2="$("$COMM" homi send rcpt "claimed" --from realsender 2>&1)"
+case "$out2" in
+  *"not claimed"*) bad "a claimed --from warned anyway (got: $out2)" ;;
+  *) ok "a claimed --from is quiet" ;;
+esac
+
 sleep 0.3
 if grep -q '"text": "via control op"' "$AINBOX"; then ok "pm send stored"; else bad "pm send stored"; fi
 if [ "$("$COMM" homi inbox alice 2>/dev/null | wc -l | tr -d ' ')" = "3" ]; then ok "homi inbox prints 3"; else bad "homi inbox prints 3"; fi

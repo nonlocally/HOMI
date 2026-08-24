@@ -1316,6 +1316,36 @@ class Homi:
         return {"ok": True}
 
     def _do_send(self, to, text, from_name, msg_id=None):
+        # A `from` is a RETURN ADDRESS: the recipient is shown a name and
+        # will reply to that NAME. send used to validate `to` and ignore
+        # `from` entirely, so it would happily accept an address send itself
+        # would refuse as a destination — the message arrived with an
+        # attribution nobody could answer, and every layer reported success
+        # (reported live by fable-phone: tongs was told to reply to
+        # 'fable-phone' and got "unknown identity"). _reply_addr's drop.sock
+        # fallback does not cover this: it protects a peer replying to the
+        # SOCKET, while an agent replies to the name it was shown.
+        #
+        # A malformed or reserved name can NEVER be replied to, so it is
+        # refused. A well-formed but unclaimed one still sends — anonymous
+        # fire-and-forget is legitimate — but the result says so, because
+        # the alternative is a promise the fabric cannot keep. It is
+        # deliberately NOT auto-claimed the way _do_ask does it: ask blocks
+        # for a reply, so its asker is definitionally present, while send
+        # would mint a permanent identity for every typo and one-shot
+        # script (the registry already carries `asker`, a ghost with a live
+        # socket that nothing drains).
+        unclaimed = False
+        if from_name:
+            if (not self._NAME_RE.match(from_name)
+                    or from_name in self._RESERVED):
+                return {"ok": False,
+                        "err": "invalid --from identity %r (want "
+                               "[a-z0-9][a-z0-9._-]{0,63}, not reserved)"
+                               % from_name}
+            with self.mu:
+                ent = self.identities.get(from_name)
+            unclaimed = not (ent and ent.get("kind") == "local")
         if not text:
             return {"ok": False, "err": "empty message"}
         # A caller-supplied msg_id makes the send idempotent end-to-end (the
@@ -1355,13 +1385,16 @@ class Homi:
             env = {"v": 1, "kind": "m", "to": name, "from": from_name,
                    "msg_id": mid, "text": text, "ts": time.time()}
             self._queue_out(dev, env)
-            return {"ok": True, "routed": "link:%s" % dev}
+            return {"ok": True, "routed": "link:%s" % dev,
+                    "from_unclaimed": unclaimed}
         if kind == "local":
             entry = {"ts": time.time(), "msg_id": mid, "from": "",
                      "from_name": from_name, "text": text}
+        # (see the return-address note at the top of _do_send)
             dup = not self._store(name, entry)   # False => msg_id already seen
             if dup:
-                return {"ok": True, "routed": "dup"}
+                return {"ok": True, "routed": "dup",
+                        "from_unclaimed": unclaimed}
             self._resolve_ask_natural(name, text, from_name)
             try:
                 self._deliver_pending(name)
@@ -1370,7 +1403,8 @@ class Homi:
             with self.mail_mu:
                 routed = ("live" if self._read_cursor(name) >= len(self._inbox_lines(name))
                           else "inbox")
-            return {"ok": True, "routed": routed}
+            return {"ok": True, "routed": routed,
+                    "from_unclaimed": unclaimed}
         return {"ok": False,
                 "err": "unknown identity: %s (claim it here, or address <name>@<device>)" % name}
 
@@ -4824,6 +4858,14 @@ def cli_call(argv):
                    "from": frm})
         if r.get("ok"):
             print("routed: %s" % r.get("routed"))
+            if r.get("from_unclaimed"):
+                # Locally honest, globally false — the write succeeded, but
+                # the return address does not exist, so a reply to it dies.
+                _fn = r.get("from_name") or ""
+                sys.stderr.write(
+                    "warning: --from %r is not claimed on this device, so a "
+                    "reply addressed to that name will fail\n"
+                    "         (communicate homi claim %s)\n" % (_fn, _fn))
             return 0
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
