@@ -376,21 +376,28 @@ someone sending a message, which the charter forbids arranging.
 Note also that a case-sensitive `grep RemoteInput` returns **0** while
 `grep -i` returns 26.
 
-**Update, 2026-08-24.** The shell half is unchanged, but the device now
-carries a second notification listener — `com.aadarwal.phonebridge` — and
-`capabilities` reports the honest state rather than a guess:
+**Update, 2026-08-24 — there is now a route.** `phone reply` exists:
 
-    notification_replies  ?  shell cannot tell — dumpsys shows 26
-      remoteInputHistory keys, which are NOT reply actions.
-      Ask the phonebridge listener (op "list", field "repliable")
+    phone reply --list                 what can be replied to right now
+    phone reply "<key>" "<text>"       reply to one
 
-So the route is no longer "none": a bound listener exists that can hold a live
-`Notification.Action`, which is exactly what shell cannot. Whether it replies
-successfully is **untested here and will stay that way** — proving it requires
-sending a message to a person, which the charter forbids. `phone log` does
-show a `reply ... -> sent` line from another actor, so somebody has exercised
-it; that is their observation to write up, not mine to claim. The field is `remoteInputHistory`. Getting that wrong in
-either direction produces a confident number and a wrong story.
+It works the way this entry said it would have to: not from shell, but
+through a bound `NotificationListenerService` — `com.aadarwal.phonebridge`,
+now listed by `capabilities` under `notification_listeners`. The listener
+holds the live `Notification.Action` that `dumpsys` could only describe.
+
+`--list` is a read and is verified: it returns
+`0|com.termux.api|0|phone-voice|10327 … ember` — the phone's own
+press-to-talk notification, which is a repliable target that is not a person.
+
+**Sending a reply is untested here and stays that way.** Proving it works
+means messaging somebody, which the charter forbids. So: the *route* exists
+and is confirmed present; whether a reply *lands* is somebody else's
+observation to record.
+
+Note the counting trap that produced the original wrong premise is now fixed
+at the source — `capabilities` reports `notification_replies` honestly rather
+than counting `remoteInputHistory` keys.
 
 ---
 
@@ -768,6 +775,29 @@ document still contains `<hierarchy` and still ends `</hierarchy>`, so
 `get_ui`'s guards pass. Only a *parser* notices, and only because XML happens
 to be brittle. **A corrupted `dumpsys` read would have been used as fact.**
 The UI tree is the canary, not the victim.
+
+### Fixed, and re-measured — **2026-08-24**
+
+`get_ui` now goes through `dev_shell_checked` (`lib/phone:1289`), and the
+screen tier is **clean**:
+
+| | `look` | `ui` |
+|---|---|---|
+| before the checked read | 4/8 failed | 6/10 failed |
+| after (2026-08-24) | **0/12 failed** | **0/12 failed** |
+
+Same app (YouTube Music), same kind of screen, comparable tree — 76 061 bytes
+against the 66–80 KB the baseline ran on — and the binary confirmed to carry
+the checked read before measuring. 24 of 24 clean.
+
+So the corruption below was the whole cause of the screen tier's
+unreliability, not a symptom sitting alongside it. **The tier ladder still
+holds** — the screen is still ~5x the wall clock, still 20–40x the output,
+and still the only route that cannot check its own work — but "`look` fails
+outright a fair fraction of the time" is **no longer true on this build**.
+
+The underlying transport hazard is unchanged for anything that does *not* go
+through a checked read; that is what the rest of this section is about.
 
 ### Reading something big, safely
 **Verified:** 2026-08-23.

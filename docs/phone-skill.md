@@ -57,8 +57,14 @@ mis-tap, works with the screen off.
 phone open <package>              launch an app (verifies it came forward)
 phone msg <app> --to ... --text "..."
 phone play "<song>"               tries the intent, says if it fell back
+phone reply --list                what can be replied to right now
+phone reply "<key>" "<text>"      reply to a notification — see the rules below
 phone sh 'am start -a <ACTION> --es <key> <value> -p <pkg>'
 ```
+
+Replying to a notification goes through a bound listener, not the screen — so
+**never tap your way into a chat to answer someone.** `--list` first; if the
+notification is not repliable, say so rather than falling to the screen.
 
 **Declaring an intent is not honouring it.** An app can list an action, accept
 the intent, come to the foreground, and do nothing — `am start` exits 0
@@ -73,10 +79,9 @@ phone sh 'cmd package query-activities -a <ACTION> -t <mime>'
 
 ## Route 3 — screen, the residual route
 
-The only route that cannot check its own work, and the least reliable: dumps
-fail on animating surfaces, secure windows, and a dark screen. **Expect
-`look` to fail outright a fair fraction of the time** — that means "I cannot
-see", never "nothing is there".
+The only route that cannot check its own work. Dumps still fail on animating
+surfaces, secure windows, and a dark screen — when one does, that means **"I
+cannot see", never "nothing is there"**. Say which.
 
 ```
 phone look             the screen, summarised — prefer over `phone ui`
@@ -132,8 +137,8 @@ never gated. Leave the phone as you found it.
 - **Confirm consequential outbound actions first**, in the same turn, saying
   exactly what will be sent and to whom: messages to people, anything
   involving money, anything irreversible.
-- `phone msg` drafts; `--send` actually sends. Prefer letting the human press
-  send when unsure.
+- `phone msg` drafts; `--send` actually sends. `phone reply` sends immediately
+  — there is no draft step. Prefer letting the human press send when unsure.
 - **Never read a one-time code or 2FA number aloud or into a message.**
 - Never touch Developer options, wireless debugging, Shizuku, the screen lock
   or accounts — that severs the control channel, and only a human holding the
