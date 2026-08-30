@@ -194,43 +194,27 @@ holder. Reads are never gated. Leave the phone as you found it.
 If another agent has the phone, you do not have to wait — take a display.
 
 ```
-d=$(phone display create)          # a real, trusted, second screen
+d=$(phone display create)          # a real, trusted, invisible second screen
 phone --display $d open calculator
-phone --display $d look            # its own tree, its own coordinates
-phone --display $d tap --label "7"
-phone --display $d screen --out s.png
+phone --display $d look / tap / screen
 phone display rm $d                # closes what was on it
 ```
 
-`--display` is global, like `--device`: every verb after it addresses that
-screen. `phone display ls` shows what exists and what is on each one.
+`--display` is global, like `--device`. `phone display ls` shows every screen
+and what is on it.
 
-Three rules, and the first two are the whole point:
+Two rules, and **the `screens` skill is the rest of it** — read it before you
+run several agents on this phone:
 
-- **The person's screen is display 0.** Work on a display you created and
-  they see nothing. Anything you launch on 0 is on the phone in their hand.
+- **The person's screen is display 0.** Anything you launch there is on the
+  phone in their hand.
 - **One app, one display.** `open` refuses a package that is already
-  somewhere else, because `am start --display` does not make a second copy —
-  it MOVES the task, and whoever was driving it loses their app mid-turn.
-  There is one process, one account and one notification stream behind an app
-  no matter how many screens point at it.
-- **Release what you create.** A holder process owns the display; `display
-  rm` closes its apps with it. `display rm --all` puts the phone back.
+  elsewhere, because `am start --display` MOVES a task rather than copying
+  it. `phone display move <app> --to <n>` when you mean it.
 
-`phone display move <app> --to <display>` is the sanctioned way to move an
-app between screens — including onto display 0, which is how you show the
-person what you have been doing.
-
-If you want them to watch live, `phone display create --visible` makes a
-display they can see, as a floating window on their screen. It reads and taps
-like any other; it just cannot be screenshotted on its own (Android
-composites it onto the built-in screen, so use `phone screen` for pixels).
-Default to headless — the point is to work without taking their phone away.
-
-Displays multiply screens. They do not multiply the microphone, the speaker,
-the notification shade, or the person — those stay singular, and `say`,
-`listen`, `talk` and `notify` are still one-at-a-time no matter which display
-you pass.
+Displays multiply screens, not apps, and not the microphone, the speaker, the
+notification shade or the person — those stay singular whatever `--display`
+says.
 
 ## Acting as the owner
 

@@ -5,14 +5,14 @@
     "url": "https://github.com/aadarwal"
   },
   "metadata": {
-    "description": "Plugins shipped with communicate \u2014 the fabric that lets agents reach a person's own devices. Currently one family: driving an Android phone, generally and per app.",
-    "version": "0.2.1"
+    "description": "Plugins shipped with communicate — the fabric that lets agents reach a person's own devices. Currently one family: driving an Android phone, generally and per app.",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "phone",
       "source": "./phone",
-      "description": "Drive an Android phone as an agent: read device state through content providers and dumpsys, act through intents and deep links, and use the screen as the residual route with occlusion-safe targeting. Skill phone is the method; doordash is a worked per-app mastery (deep-link straight to a dish's option sheet, set modifiers, build a cart, and stop there); phone-ask answers questions about the device. Skill pay mints a one-time virtual card on the device for a checkout the person approves per purchase \u2014 the agent fills fields by name and never handles the number."
+      "description": "Drive an Android phone as an agent: read device state through content providers and dumpsys, act through intents and deep links, and use the screen as the residual route with occlusion-safe targeting. Skill phone is the method; doordash is a worked per-app mastery (deep-link straight to a dish's option sheet, set modifiers, build a cart, and stop there); phone-ask answers questions about the device. Skill pay mints a one-time virtual card on the device for a checkout the person approves per purchase — the agent fills fields by name and never handles the number. Skill screens is the multi-agent story: an unrooted phone can hold several trusted displays at once, so an agent whose work needs the screen takes one of its own instead of waiting for the lease — one app to one display, and the person's screen left alone."
     }
   ]
 }
