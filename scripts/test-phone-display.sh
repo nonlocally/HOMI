@@ -161,6 +161,27 @@ else
 fi
 "$PHONE" shelld --stop >/dev/null 2>&1
 
+# ------------------------------------------------- move / visible surface
+h="$("$PHONE" display --help 2>&1)"
+echo "$h" | grep -q -- "--visible" && ok "create has a --visible mode" \
+  || bad "no --visible in display --help"
+echo "$h" | grep -q "move" && ok "display can move an app between screens" \
+  || bad "no move action"
+# `;` separates overlay displays and `,` separates one display's flags — a
+# parser that gets this backwards silently merges two screens into one.
+out="$(py <<PY
+$PRELUDE
+m.dev_shell = lambda *a, **k: (0, "1080x2400/420;800x600/240")
+print("|".join(m.overlay_specs()))
+m.dev_shell = lambda *a, **k: (0, "null")
+print("empty" if m.overlay_specs() == [] else "not-empty")
+PY
+)"
+[ "$(echo "$out" | sed -n 1p)" = "1080x2400/420|800x600/240" ] \
+  && ok "overlay specs split on ; not ," || bad "overlay parse: $out"
+[ "$(echo "$out" | sed -n 2p)" = "empty" ] \
+  && ok "an unset overlay setting reads as none" || bad "null parse: $out"
+
 # ------------------------------------------------------------- the lanes
 # A lane is a driver's own shelld. The default lane must stay exactly where
 # it was, or every existing caller moves house.
@@ -271,8 +292,36 @@ else
           && ok "screen captures display $d ($(wc -c < "$T/d.png" | tr -d ' ') bytes)" \
           || bad "display $d produced no PNG (magic '$magic')"
       fi
+      # move is the sanctioned way past the one-app-one-display guard.
+      if [ -n "$app" ]; then
+        "$PHONE" --device "$DEV" display move "$app" --to 0 >/dev/null 2>&1 \
+          && ok "display move brings an app to the built-in screen" \
+          || bad "display move to 0 failed"
+        "$PHONE" --device "$DEV" display move "$app" --to "$d" >/dev/null 2>&1 \
+          && ok "and moves it back off again" || bad "display move back failed"
+      fi
       "$PHONE" --device "$DEV" display rm "$d" >/dev/null 2>&1 \
         && ok "display rm releases it" || bad "display rm failed"
+
+      v="$("$PHONE" --device "$DEV" display create --visible 2>&1 | tail -1)"
+      case "$v" in
+        ''|*[!0-9]*) bad "display create --visible returned '$v'" ;;
+        *) ok "a visible display appears (id $v)"
+           "$PHONE" --device "$DEV" --display "$v" look >/dev/null 2>&1 \
+             && ok "a visible display can still be read" \
+             || bad "look failed on visible display $v"
+           # It has no framebuffer of its own, and saying so is better than
+           # handing back the built-in screen and calling it that display.
+           err="$("$PHONE" --device "$DEV" --display "$v" screen --out "$T/v.png" 2>&1)"
+           case "$err" in
+             *"no framebuffer"*) ok "and says why it cannot be screenshotted" ;;
+             *) bad "visible-display screen said: ${err:0:70}" ;;
+           esac
+           "$PHONE" --device "$DEV" display rm "$v" >/dev/null 2>&1 \
+             && ok "a visible display is released too" || bad "rm visible failed"
+           ;;
+      esac
+      "$PHONE" --device "$DEV" display rm --all >/dev/null 2>&1
       ;;
   esac
 fi

@@ -215,7 +215,17 @@ Three rules, and the first two are the whole point:
   There is one process, one account and one notification stream behind an app
   no matter how many screens point at it.
 - **Release what you create.** A holder process owns the display; `display
-  rm` closes its apps with it.
+  rm` closes its apps with it. `display rm --all` puts the phone back.
+
+`phone display move <app> --to <display>` is the sanctioned way to move an
+app between screens — including onto display 0, which is how you show the
+person what you have been doing.
+
+If you want them to watch live, `phone display create --visible` makes a
+display they can see, as a floating window on their screen. It reads and taps
+like any other; it just cannot be screenshotted on its own (Android
+composites it onto the built-in screen, so use `phone screen` for pixels).
+Default to headless — the point is to work without taking their phone away.
 
 Displays multiply screens. They do not multiply the microphone, the speaker,
 the notification shade, or the person — those stay singular, and `say`,

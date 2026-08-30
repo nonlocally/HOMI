@@ -1076,6 +1076,56 @@ keyed by display *inside* a daemon, so two drivers sharing a lane still
 arbitrate and two drivers in different lanes do not see each other's leases —
 acceptable only because a lane is something you choose.
 
+### Moving an app between displays
+**Route:** intent. **Verified:** 2026-08-30.
+
+    phone display move doordash --to 12
+    -> com.dd.doordash: display 0 -> 12
+
+The same `am start --display` that `open` refuses to do implicitly, named so
+it is a decision rather than an accident. Android offers no "copy": the task
+LEAVES the old display. Moving to display 0 puts it on the person's screen,
+which is how you show them what an agent has been doing.
+
+### A display the person can SEE
+**Route:** state. **Verified:** 2026-08-30, Android 16 (sdk 36).
+
+    phone display create --visible     -> 16
+
+Not a virtual display at all — an OVERLAY display, which Android renders as a
+floating window on the built-in screen. Set through a global setting, and
+**`;` separates displays** while `,` separates one display's flags:
+
+    settings put global overlay_display_devices "1080x2400/420;800x600/240"
+
+DoorDash on one of these showed up on the phone as a freeform window with a
+title bar and minimise/maximise/close, sitting on top of the launcher.
+
+**It is drivable, which was not expected.** The concern going in was that
+`AccessibilityManagerService.isValidDisplay()` rejects `Display.TYPE_OVERLAY`
+and so nothing could read it. On this device it reads and taps fine: four
+taps on a calculator there produced `7789` in the formula field, and
+`--display N look` returns that display's tree alone. Taps use the DISPLAY's
+own coordinate space, not the position of its window on the screen.
+
+**But it has no framebuffer of its own.** `phone --display N screen` cannot
+isolate it — Android composites an overlay onto the built-in screen, so there
+is no separate surface to read. The tree is clean; the pixels are not
+separable. Headless displays do not have this problem: their holder owns the
+Surface, so the PNG is exactly that display and nothing else.
+
+So the two kinds are a real choice, not a preference:
+
+| | headless (`create`) | visible (`create --visible`) |
+|---|---|---|
+| the person sees it | no | yes, a floating window |
+| `look` / `find` / `tap` | yes | yes |
+| `screen` (per-display PNG) | yes | **no** — shoot the built-in screen |
+| survives on its own | a held process | a settings entry |
+
+Headless is the default because the point is agents working without taking
+the phone away from the person. Visible is for showing your work.
+
 ### What a display does NOT give you
 
 The microphone, the speaker, the notification shade and the person are all

@@ -1313,6 +1313,14 @@ def _display_by(which):
 
 def _display_name(display):
     d = _display_by(display)
+    if d["type"] == "OVERLAY":
+        die("display %s is a VISIBLE display, and those have no framebuffer "
+            "of their own — Android composites them onto the built-in screen, "
+            "so there is nothing to grab in isolation. Its TREE reads fine "
+            "(`phone --display %s look`) and taps land in its own coordinate "
+            "space; for pixels, screenshot the built-in screen (`phone "
+            "screen`) and you will see it as the window it is."
+            % (display, display), 4)
     if not d["ours"]:
         die("display %s is not one of ours (%r) — only a holder we started "
             "can be read or released this way" % (display, d["name"]), 2)
@@ -1441,6 +1449,29 @@ def _hierarchy_for_display(text, display):
                                                         "".join(parts))
 
 
+OVERLAY_SETTING = "overlay_display_devices"
+
+
+def overlay_specs():
+    """The overlay displays Android is currently asked to make.
+
+    Separated by `;`, not `,` — verified on the device, because `,` is what
+    separates a display's FLAGS (`1080x2400/420,own_content_only`) and the
+    two are easy to confuse from the docs alone.
+    """
+    rc, out = dev_shell("settings get global %s" % OVERLAY_SETTING, timeout=20)
+    raw = (out or "").strip()
+    if rc != 0 or not raw or raw == "null":
+        return []
+    return [x for x in (p.strip() for p in raw.split(";")) if x]
+
+
+def write_overlay_specs(specs):
+    val = ";".join(specs)
+    return dev_shell("settings put global %s %s"
+                     % (OVERLAY_SETTING, val if val else "null"), timeout=20)
+
+
 def cmd_display(args):
     need_shell()
     if args.action == "ls":
@@ -1454,6 +1485,40 @@ def cmd_display(args):
                      "" if d["trusted"] else "untrusted ",
                      ", ".join(apps[:3]) if apps else "-"))
         return 0
+
+    if args.action == "create" and args.visible:
+        # A display the PERSON can see. Not a virtual display at all — an
+        # OVERLAY display, which Android renders as a floating window on the
+        # built-in screen. That makes it the opposite trade from `create`:
+        # visible and in the way, rather than invisible and out of it.
+        #
+        # It is a real display, not a mirror: it has its own launcher, its
+        # own resumed activity, and `look`/`tap` reach it (measured — four
+        # taps on a calculator there produced 7789). Use it to SHOW work, not
+        # to hide it.
+        phys = [d for d in displays() if d["id"] == 0]
+        m = re.match(r"^(\d+)x(\d+)$", args.size or "")
+        if args.size and not m:
+            die("--size wants WxH, e.g. 1080x2400", 2)
+        w = int(m.group(1)) if m else (phys[0]["w"] if phys else 1080)
+        h = int(m.group(2)) if m else (phys[0]["h"] if phys else 2400)
+        dpi = args.dpi or (phys[0]["dpi"] if phys else 420)
+        before = {d["id"] for d in displays() if d["type"] == "OVERLAY"}
+        specs = overlay_specs()
+        specs.append("%dx%d/%d" % (w, h, dpi))
+        write_overlay_specs(specs)
+        for _ in range(20):
+            time.sleep(0.5)
+            now = [d for d in displays() if d["type"] == "OVERLAY"]
+            fresh = [d for d in now if d["id"] not in before]
+            if fresh:
+                record("display", {"action": "create", "kind": "overlay",
+                                   "size": "%dx%d" % (w, h)}, "act",
+                       "display %d" % fresh[0]["id"])
+                print(fresh[0]["id"])
+                return 0
+        write_overlay_specs(overlay_specs()[:-1])
+        die("the overlay display never appeared", 4)
 
     if args.action == "create":
         rc, out = dev_shell("ls %s 2>/dev/null" % VD_JAR, timeout=20)
@@ -1500,8 +1565,56 @@ def cmd_display(args):
         print(did)
         return 0
 
+    if args.action == "move":
+        if not args.which:
+            die("move what? (an app name or package)", 2)
+        pkg = pkg_of(args.which) or args.which
+        if not package_present(pkg):
+            die("%s is not installed on this device" % args.which, 4)
+        to = args.to if args.to is not None else display_id()
+        ds = {d["id"] for d in displays()}
+        if to not in ds:
+            die("no display %d (have: %s)"
+                % (to, ", ".join(str(x) for x in sorted(ds))), 2)
+        where = package_display(pkg)
+        if where == to:
+            print("%s is already on display %d" % (pkg, to))
+            return 0
+        rc, out = dev_shell(
+            "cmd package resolve-activity --brief -c "
+            "android.intent.category.LAUNCHER %s | tail -1" % pkg, timeout=30)
+        comp = (out or "").strip().splitlines()[-1].strip() if out else ""
+        if rc != 0 or "/" not in comp:
+            die("could not resolve a launcher activity for %s" % pkg, 4)
+        # This is the SAME `am start --display` that `open` refuses to do
+        # implicitly. It is allowed here because moving is what the caller
+        # asked for: the task goes to the new display and leaves the old one,
+        # which is the only behaviour Android offers. Naming it is the
+        # difference between a move and an accident.
+        dev_shell("am start --display %d -n %s" % (to, comp), timeout=30)
+        landed = False
+        for _ in range(10):
+            time.sleep(0.5)
+            if package_display(pkg) == to:
+                landed = True
+                break
+        record("display", {"action": "move", "pkg": pkg, "from": where,
+                           "to": to}, "act",
+               "moved" if landed else "did not move")
+        if not landed:
+            die("%s did not move to display %d (it may refuse a secondary "
+                "display)" % (pkg, to), 4)
+        print("%s: display %s -> %d"
+              % (pkg, "?" if where is None else where, to))
+        return 0
+
     if args.action == "rm":
         if args.all:
+            # Overlays go too: --all means "put the phone back", and an
+            # overlay left behind is a window sitting on the person's screen.
+            if [d for d in displays() if d["type"] == "OVERLAY"]:
+                write_overlay_specs([])
+                print("released every overlay display")
             ds = [d for d in displays() if d["ours"]]
             if not ds:
                 print("no displays of ours to release")
@@ -1515,6 +1628,23 @@ def cmd_display(args):
         if not args.which:
             die("which display? (an id, a name, or --all)", 2)
         d = _display_by(args.which)
+        if d["type"] == "OVERLAY":
+            # An overlay is a line in a settings string, not a process. Its
+            # NAME carries its position — "Overlay #2" is the second entry —
+            # which is the only handle Android gives back.
+            n = re.search(r"#(\d+)", d["name"] or "")
+            specs = overlay_specs()
+            i = int(n.group(1)) - 1 if n else -1
+            if not n or i < 0 or i >= len(specs):
+                die("cannot place %r among the %d overlay entries"
+                    % (d["name"], len(specs)), 4)
+            del specs[i]
+            write_overlay_specs(specs)
+            record("display", {"action": "rm", "kind": "overlay",
+                               "name": d["name"]}, "act",
+                   "released %d" % d["id"])
+            print("released %d (%s)" % (d["id"], d["name"]))
+            return 0
         if not d["ours"]:
             die("display %d is %r, not a holder we started — refusing"
                 % (d["id"], d["name"]), 2)
@@ -5171,14 +5301,19 @@ def build_parser():
     s.add_argument("--ttl", type=int, default=DEFAULT_TTL)
 
     s = add("display", cmd_display, "screens to drive, beyond the built-in one")
-    s.add_argument("action", choices=["ls", "create", "rm"])
+    s.add_argument("action", choices=["ls", "create", "rm", "move"])
     s.add_argument("which", nargs="?",
-                   help="rm: a display id or holder name")
+                   help="rm: a display id or holder name; move: an app")
+    s.add_argument("--to", type=int,
+                   help="move: the display to move it to (default --display)")
     s.add_argument("--size", help="WxH (default: the built-in screen's)")
     s.add_argument("--dpi", type=int,
                    help="density (default: the built-in screen's)")
     s.add_argument("--all", action="store_true",
                    help="rm: release every display we hold")
+    s.add_argument("--visible", action="store_true",
+                   help="create: a display the PERSON can see, as a floating "
+                        "window on the built-in screen")
 
     s = add("sh", cmd_sh, "run a raw device-shell command")
     s.add_argument("--checked", action="store_true",
