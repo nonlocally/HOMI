@@ -99,9 +99,16 @@ knowing the whole number.
 **The approval does not reach the person on its own.** There is no push today.
 `mint` posts a notification on the Pixel and prints the URL — but if the
 person is not looking at the Pixel, *nothing tells them*, and `await` will sit
-there until it times out. **You must deliver the `approval_url` to wherever
-they actually are.** Do not mint and then wait silently; that is the single
-most likely way this hangs.
+there until it times out. Do not mint and then wait silently; that is the
+single most likely way this hangs.
+
+The delivery contract: **whoever mints delivers the URL back through the
+channel the request arrived on.** A terminal session prints it in the terminal
+the person is sitting at. A spoken `talk` turn speaks it and posts the
+notification. A background or scheduled agent, which has no channel back to a
+human, **has no business minting at all** — if you cannot name the surface the
+person will read this on, you are not the one who should be asking for their
+money.
 
 **A card minted before the form is ready burns its clock.** An hour is plenty,
 but the whole round trip — ask, human decides, fill — was measured at 46
@@ -130,29 +137,45 @@ suspect the clock before you suspect the card.
   credentials cost nothing and behave identically.
 - Take the lease before acting: `phone lease acquire --as <you>`.
 
-## How this changes the per-app skills
+## This skill does not override a per-app boundary
 
-The `doordash` skill says *never tap Place Order* and *never touch payment
-methods*. That boundary exists because there was no safe way to pay — not
-because stopping at the cart was the goal.
+**If a per-app skill says stop at the cart, stop at the cart.** Today the
+`doordash` skill does. Having a safe card does not grant you passage; the
+per-app skill wins until it has itself been updated to say otherwise, by
+someone who has actually mapped that app's checkout. Do not read this file as
+permission and do not adjudicate the difference at a live checkout screen.
 
-This skill moves the boundary rather than removing it. With `phone-pay` the
-stopping point is no longer the cart; it is **the approval**. The agent may
-build the cart, reach the checkout, read the real total, and mint for that
-total — and then it stops dead until a human approves. The human still
-decides, on the actual number, before any money moves.
+The reason is that **there are two different risks here and this skill only
+addresses one of them.**
 
-What does **not** change: never touch the person's saved payment methods,
-their stored addresses, tips, subscriptions, or refund flows. Those speak to
-a merchant in their name and have nothing to do with this card.
+*The money risk* — spending without the person's say-so. That one is handled:
+no card exists until they approve a named amount.
+
+*The mis-tap risk* — the screen route cannot check its own work, and on a
+crowded checkout it can act on something you did not mean. This is not
+hypothetical. On DoorDash, measured twice in one session: an option row's
+centre at (540,2211) sits **inside** `addToCart_button`, and a menu row's
+centre sits inside the floating cart bar. Both taps exited 0. The same
+accident on a checkout screen taps Place Order — and an approved card in the
+vault is exactly what makes that tap go through.
+
+So the approval gate does **not** cover the mis-tap risk. A per-app skill's
+stopping point is what covers it, which is why that stopping point outranks
+this file. When one is eventually moved, the work is: map the checkout for
+real, then `find --all` before every tap, never `--raw`, and treat any
+`?under` marker as a full stop.
+
+What never changes under any reconciliation: never touch the person's saved
+payment methods, stored addresses, tips, subscriptions, or refund flows.
+Those speak to a merchant in their name and have nothing to do with this card.
 
 ## If you remember three things
 
-Mint only for a total you have actually read, and put that total honestly in
-the `--context`, because that sentence is the whole protection. Deliver the
-`approval_url` to where the person really is — the phone will not tell them.
-And after every `fill`, read the field back, because "dispatched" is not
-"landed".
+A per-app skill's stopping point outranks this file — a safe card is not
+permission to go further. Mint only for a total you have actually read, and
+put it honestly in the `--context`, because that sentence is the whole
+protection. And deliver the `approval_url` back through the channel the
+request came in on; if you cannot name that channel, do not mint.
 
 Dated specifics — what each app's checkout form calls its fields, which ones
 refuse a slash in the expiry — belong in the per-app `map.md`, not here. This
