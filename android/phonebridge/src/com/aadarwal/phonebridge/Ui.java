@@ -34,7 +34,53 @@ final class Ui {
     static final int WARN      = Color.parseColor("#f0a14e");
     static final int ERR       = Color.parseColor("#f4707a");
 
+    /**
+     * THE TIER COLOURS, and they are data rather than decoration.
+     *
+     * homi's one real difference from every other thing you talk to is that a
+     * question is answered by the CHEAPEST thing that can answer it, and you
+     * are told which. So the accent is not a brand colour — it is the readout.
+     * Whatever ran last owns the screen's colour, which makes cost legible at
+     * a glance instead of buried in a status string:
+     *
+     *   T_FAST    the phone answered itself. No model, no network, ~1s.
+     *   T_ROUTER  a small model thought about it. Seconds, and a few cents.
+     *   T_AGENT   a frontier agent is working. Forty seconds, and real money.
+     *
+     * Cool to warm, cheap to expensive. Someone who never reads the labels
+     * still learns what a violet screen costs them.
+     */
+    static final int T_FAST    = Color.parseColor("#5ad1c4");
+    static final int T_ROUTER  = Color.parseColor("#e3b341");
+    static final int T_AGENT   = Color.parseColor("#b48ef7");
+
     private Ui() {}
+
+    // ------------------------------------------------------------- the type
+    //
+    // No resource files means no bundled fonts, so the pairing has to come out
+    // of what the platform ships. That is a constraint worth using rather than
+    // apologising for: a light grotesque for language, and MONOSPACE for
+    // anything that is a measurement — tier names, elapsed seconds,
+    // milliseconds. This whole project reasons in measured numbers; setting
+    // them in mono says "this is a reading off an instrument", and keeps them
+    // from being mistaken for prose.
+
+    static TextView display(Context c, String s, int size, int color) {
+        TextView t = text(c, s, size, color);
+        t.setTypeface(android.graphics.Typeface.create("sans-serif-light",
+                                                       android.graphics.Typeface.NORMAL));
+        t.setLetterSpacing(-0.02f);
+        return t;
+    }
+
+    /** Instrument type: uppercase, tracked out, monospaced. For readings. */
+    static TextView meter(Context c, String s, int size, int color) {
+        TextView t = text(c, s, size, color);
+        t.setTypeface(android.graphics.Typeface.MONOSPACE);
+        t.setLetterSpacing(0.12f);
+        return t;
+    }
 
     static int dp(Context c, float v) {
         return Math.round(TypedValue.applyDimension(

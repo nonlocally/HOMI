@@ -1,0 +1,26 @@
+{
+  "name": "phone",
+  "version": "0.2.0",
+  "description": "Drive a real Android phone as an agent surface. Read its state (notifications, calendar, contacts, media, battery, location) through structured queries, act through intents, and fall to the screen only when nothing above it will do. Ships the general phone skill, the per-app doordash skill, phone-ask, and pay \u2014 one-time virtual cards minted on-device and approved per purchase by the person.",
+  "author": {
+    "name": "Aadarsh Agarwal",
+    "url": "https://github.com/aadarwal"
+  },
+  "license": "MIT",
+  "keywords": [
+    "android",
+    "phone",
+    "termux",
+    "shizuku",
+    "adb",
+    "uiautomator",
+    "device-control",
+    "doordash",
+    "intents",
+    "deeplinks",
+    "payments",
+    "link",
+    "stripe",
+    "checkout"
+  ]
+}

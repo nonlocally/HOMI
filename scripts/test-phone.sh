@@ -82,6 +82,100 @@ echo "== find: case-insensitive, and misses are honest (not a wrong tap)"
 out="$("$PHONE" find "peer peer-user" --from "$T/ui.xml" 2>&1)"
 if printf '%s' "$out" | grep -q "540"; then ok "find is case-insensitive"
 else bad "find case-insensitivity (got: $out)"; fi
+
+# The two shapes that made a tap buy food. Both are real geometry, copied from
+# DoorDash dumps on 2026-08-30: a menu row whose centre lies inside the
+# floating cart bar, and an option row whose centre lies inside "Add to
+# order". In both the overlay comes LATER in the tree, which is what makes it
+# the thing a finger actually hits.
+cat > "$T/store.xml" <<'XML'
+<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.dd.doordash" clickable="false" enabled="true" bounds="[0,0][1080,2424]">
+    <node index="0" text="" resource-id="com.dd.doordash:id/container_card_view" class="androidx.cardview.widget.CardView" package="com.dd.doordash" content-desc="" clickable="true" enabled="true" bounds="[42,1240][1038,1466]">
+      <node index="0" text="Chinese Bhel" resource-id="com.dd.doordash:id/item_name" class="android.widget.TextView" package="com.dd.doordash" content-desc="" clickable="false" enabled="true" bounds="[84,1291][644,1341]" />
+    </node>
+    <node index="1" text="" resource-id="com.dd.doordash:id/button_orderCart" class="android.view.ViewGroup" package="com.dd.doordash" content-desc="" clickable="true" enabled="true" bounds="[21,1319][1059,1445]" />
+  </node>
+</hierarchy>
+XML
+
+cat > "$T/item.xml" <<'XML'
+<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.dd.doordash" clickable="false" enabled="true" bounds="[0,0][1080,2424]">
+    <node index="0" text="" resource-id="com.dd.doordash:id/cardView" class="androidx.cardview.widget.CardView" package="com.dd.doordash" content-desc="" clickable="true" enabled="true" bounds="[42,1473][893,1747]">
+      <node index="0" text="Last ordered on 7/30/26" resource-id="com.dd.doordash:id/checkBox_storeItemReorder_title" class="android.widget.CheckBox" package="com.dd.doordash" content-desc="" checkable="true" checked="false" clickable="false" enabled="true" bounds="[84,1515][851,1577]" />
+      <node index="1" text="Medium Spicy" resource-id="com.dd.doordash:id/checkBox_storeItemReorder_description" class="android.widget.TextView" package="com.dd.doordash" content-desc="" clickable="false" enabled="true" bounds="[84,1598][851,1641]" />
+    </node>
+    <node index="1" text="Spice Level" resource-id="com.dd.doordash:id/textView_storeItemHeader_title" class="android.widget.TextView" package="com.dd.doordash" content-desc="" clickable="false" enabled="true" bounds="[42,1845][1059,1901]" />
+    <node index="2" text="" resource-id="" class="android.view.ViewGroup" package="com.dd.doordash" content-desc="" clickable="true" enabled="true" bounds="[0,1962][1080,2124]">
+      <node index="0" text="" resource-id="com.dd.doordash:id/radio_button" class="android.widget.RadioButton" package="com.dd.doordash" content-desc="" checkable="true" checked="true" clickable="false" enabled="true" bounds="[42,2001][126,2085]" />
+      <node index="1" text="Mild Spicy" resource-id="com.dd.doordash:id/checkBox_storeItemOption_title" class="android.widget.TextView" package="com.dd.doordash" content-desc="" clickable="false" enabled="true" bounds="[168,2015][954,2071]" />
+    </node>
+    <node index="3" text="" resource-id="" class="android.view.ViewGroup" package="com.dd.doordash" content-desc="" clickable="true" enabled="true" bounds="[0,2130][1080,2292]">
+      <node index="0" text="" resource-id="com.dd.doordash:id/radio_button" class="android.widget.RadioButton" package="com.dd.doordash" content-desc="" checkable="true" checked="false" clickable="false" enabled="true" bounds="[42,2169][126,2253]" />
+      <node index="1" text="Medium Spicy" resource-id="com.dd.doordash:id/checkBox_storeItemOption_title" class="android.widget.TextView" package="com.dd.doordash" content-desc="" clickable="false" enabled="true" bounds="[168,2183][954,2239]" />
+    </node>
+    <node index="4" text="" resource-id="com.dd.doordash:id/addToCart_button" class="android.widget.Button" package="com.dd.doordash" content-desc="" clickable="true" enabled="true" bounds="[42,2171][1038,2297]">
+      <node index="0" text="Add to order" resource-id="com.dd.doordash:id/textView_prism_button_start_text" class="android.widget.TextView" package="com.dd.doordash" content-desc="" clickable="false" enabled="true" bounds="[84,2203][356,2266]" />
+    </node>
+  </node>
+</hierarchy>
+XML
+
+echo "== find must not hand back a point another view is sitting on"
+# The row's own centre is 540,1353 — inside the cart bar. The label's centre
+# (364,1316) clears it by three pixels, and that is the whole difference
+# between opening the item and opening the cart.
+out="$("$PHONE" find "Chinese Bhel" --from "$T/store.xml" 2>&1)"
+if [ "$out" = "364 1316" ]; then
+  ok "a menu row under the cart bar resolves to a point that clears it"
+else bad "cart-bar occlusion (got: $out, wanted 364 1316)"; fi
+
+out="$("$PHONE" find "Medium Spicy" --after "Spice Level" --from "$T/item.xml" 2>&1)"
+if [ "$out" = "540 2136" ]; then
+  ok "an option row under Add-to-order resolves above the button"
+else bad "footer occlusion (got: $out, wanted 540 2136)"; fi
+# ...and the naive answer, the one that would have added the item, is gone.
+if printf '%s' "$out" | grep -q "2211"; then
+  bad "find still returns the point inside addToCart_button"
+else ok "the point inside addToCart_button is never returned"; fi
+
+echo "== find must show the ambiguity rather than picking silently"
+out="$("$PHONE" find "Medium Spicy" --all --from "$T/item.xml" 2>&1)"
+if printf '%s' "$out" | grep -q "cardView" && printf '%s' "$out" | grep -q "2136"; then
+  ok "--all lists the reorder-card decoy AND the real option"
+else bad "find --all candidates (got: $out)"; fi
+# Without --after, the decoy wins on tree order. That is not a bug to hide:
+# it is why --after exists, and the test pins the behaviour so it stays visible.
+out="$("$PHONE" find "Medium Spicy" --from "$T/item.xml" 2>&1)"
+if [ "$out" = "467 1610" ]; then
+  ok "an unqualified match takes the first candidate, decoy and all"
+else bad "unqualified find (got: $out)"; fi
+
+echo "== --after scopes a match to one section"
+out="$("$PHONE" find "Last ordered" --after "Spice Level" --from "$T/item.xml" 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then ok "--after excludes what is above the header"
+else bad "--after did not exclude an earlier match (got: $out)"; fi
+
+echo "== look must show which option is actually selected"
+out="$("$PHONE" look --from "$T/item.xml" 2>&1)"
+if printf '%s' "$out" | grep -q "\[x\] Mild Spicy" \
+   && printf '%s' "$out" | grep -q "\[ \] Medium Spicy"; then
+  ok "look reads checkable state from a sibling node"
+else bad "look option state (got: $out)"; fi
+
+echo "== look must warn where a tap would land somewhere else"
+out="$("$PHONE" look --from "$T/store.xml" --all 2>&1)"
+if printf '%s' "$out" | grep -q "1316"; then
+  ok "look prints the clear point, not the covered centre"
+else bad "look occlusion-safe coordinates (got: $out)"; fi
+
+echo "== --raw is the way back to the old, unguarded behaviour"
+out="$("$PHONE" find "Chinese Bhel" --raw --from "$T/store.xml" 2>&1)"
+if [ "$out" = "540 1353" ]; then ok "--raw returns the geometric centre"
+else bad "--raw (got: $out, wanted 540 1353)"; fi
 out="$("$PHONE" find "Nonexistent Label" --from "$T/ui.xml" 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && ! printf '%s' "$out" | grep -qE "^[0-9]+ [0-9]+$"; then
   ok "a miss exits non-zero and emits NO coordinates (never a blind tap)"
@@ -780,13 +874,15 @@ else bad "look is bigger than ui ($look_lines vs $ui_lines)"; fi
 
 echo "== the skill and the CLI must agree"
 r="$(python3 "$HERE/scripts/check-skill-verbs.py" 2>&1)"
-if [ "$r" = "agree" ]; then
+# Prefix, not equality: the checker also names which skill documents it
+# covered, and that list grows every time an app skill is added.
+if [ "${r%% *}" = "agree" ]; then
   ok "every verb the skill teaches exists in the CLI"
 else bad "$r"; fi
 
 echo "== the skill states the habits that keep an agent honest"
 for must in "look" "lease" "Never guess" "SPOKEN"; do
-  if grep -qi -- "$must" "$HERE/docs/phone-skill.md"; then
+  if grep -qi -- "$must" "$HERE/plugins/phone/skills/phone/SKILL.md"; then
     ok "skill covers: $must"
   else bad "skill missing: $must"; fi
 done

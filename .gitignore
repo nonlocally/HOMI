@@ -22,4 +22,5 @@ registry/*.md
 # UI, carrying real agent names. Local debugging artifacts, never repo content.
 /.playwright-mcp/
 android/phonebridge/build/
+android/vdisplay/build/
 android/phonebridge/debug.keystore

@@ -40,10 +40,17 @@ import java.util.concurrent.Executors;
  * not. A second view is fine. A second source of truth is not.
  *
  * One tap does one thing:
- *   TALK          speak, send, wait for the answer, say it out loud
- *   the target    a chooser, so TALK's destination is never a guess
+ *   TALK          speak, let the ladder answer, say the answer out loud
+ *   the voice     which voice answers — on-device, or one of bulbul's 38
+ *   the target    where a turn escalates TO when the ladder cannot answer
  *   an agent row  opens that conversation's transcript, in this app
  *   a reply       sends into the notification it came from
+ *
+ * The card never lies about what is happening. Every wait is named and
+ * counted — LISTENING, THINKING, SENDING, WAITING, SPEAKING, each with the
+ * thing it is waiting ON and, past two seconds, how long it has been. A
+ * spoken turn that reaches an agent can take forty seconds, and a label that
+ * does not move for forty seconds is indistinguishable from a hang.
  */
 public class Home extends Activity {
 
@@ -60,13 +67,17 @@ public class Home extends Activity {
     // interleave with the first one's answer.
     private final ExecutorService work = Executors.newSingleThreadExecutor();
 
-    private Voice voice;
-    private Speak speak;
+    private Voices voices;
 
     private TextView  talkLabel;
     private TextView  talkSub;
     private View      talkCard;
     private TextView  statusLine;
+    private TextView  heardLine;
+    private TextView  answerLine;
+    private TextView  ladderFast;
+    private TextView  ladderRouter;
+    private TextView  ladderAgent;
     private LinearLayout agentList;
     private LinearLayout notifList;
     private TextView  notifCount;
@@ -79,8 +90,7 @@ public class Home extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        voice = new Voice(this);
-        speak = new Speak(this);
+        voices = Voices.of(this);
         SharedPreferences p = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         target = p.getString(K_TARGET, DEFAULT_TARGET);
         Api.init(this);          // which device this is, for phone questions
@@ -88,6 +98,7 @@ public class Home extends Activity {
         getWindow().setStatusBarColor(Ui.BG);
         getWindow().setNavigationBarColor(Ui.BG);
         setContentView(buildScreen());
+        showLang();
 
         // The mic service belongs to the app, not to this window — opening
         // homi should not be what makes voice work, and closing it should not
@@ -116,27 +127,116 @@ public class Home extends Activity {
         head.addView(headerNote, Ui.lpGrow());
         col.addView(head, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // the talk card ------------------------------------------------------
+        // the voice surface ---------------------------------------------------
+        //
+        // Deliberately the tallest thing on the screen. This is a voice app;
+        // the first thing you see should be the thing you came to do, not a
+        // list of agents you are not currently talking to. Everything else
+        // lives below it.
         LinearLayout talk = Ui.column(this);
         talk.setGravity(Gravity.CENTER);
-        talk.setBackground(Ui.round(Ui.ACCENT, Ui.dp(this, 20)));
-        talk.setPadding(pad, Ui.dp(this, 26), pad, Ui.dp(this, 26));
-        talkLabel = Ui.text(this, "TALK", 30, Color(0xFF0d0f12));
-        talkLabel.setLetterSpacing(0.18f);
+        talk.setBackground(Ui.round(Ui.ACCENT, Ui.dp(this, 28)));
+        talk.setPadding(pad, Ui.dp(this, 46), pad, Ui.dp(this, 46));
+        talkLabel = Ui.meter(this, "TALK", 26, Color(0xFF0d0f12));
+        talkLabel.setLetterSpacing(0.26f);
         talkLabel.setGravity(Gravity.CENTER);
         talk.addView(talkLabel, Ui.lpWrap());
-        talkSub = Ui.text(this, "", 13, Color(0xCC0d0f12));
+        talkSub = Ui.meter(this, "tap and speak", 11, Color(0xB30d0f12));
         talkSub.setGravity(Gravity.CENTER);
+        talkSub.setPadding(0, Ui.dp(this, 8), 0, 0);
         talk.addView(talkSub, Ui.lpWrap());
         talk.setOnClickListener(v -> onTalk());
         talkCard = talk;
         LinearLayout.LayoutParams tp = Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT);
-        tp.setMargins(0, Ui.dp(this, 20), 0, Ui.dp(this, 10));
+        tp.setMargins(0, Ui.dp(this, 18), 0, Ui.dp(this, 12));
         col.addView(talk, tp);
 
-        // who TALK goes to, always visible so it is never a guess -------------
+        // the language of the turn --------------------------------------------
+        //
+        // Buttons, not a menu, and directly under TALK — because this is
+        // decided in the half-second BEFORE you speak, and anything that costs
+        // a dialog in that half-second will simply never be used. You switch
+        // to Hindi by tapping "हिंदी" and then talking.
+        //
+        // It is a LANGUAGE control, not a provider control. Choosing हिंदी
+        // silently moves the ears to saaras because the phone has no Hindi
+        // recogniser installed, and moves bulbul to hi-IN so the answer comes
+        // back in the language it was asked in. Naming the provider here would
+        // be naming our plumbing instead of your intent.
+        LinearLayout langs = Ui.row(this);
+        langEn  = langChip("EN");
+        langHi  = langChip("हिंदी");
+        langMix = langChip("HINGLISH");
+        langEn.setOnClickListener(v -> pickLang(Voices.LANG_EN));
+        langHi.setOnClickListener(v -> pickLang(Voices.LANG_HI));
+        langMix.setOnClickListener(v -> pickLang(Voices.LANG_MIX));
+        langs.addView(langEn, rungLp());
+        langs.addView(langHi, rungLp());
+        langs.addView(langMix, rungLp());
+        LinearLayout.LayoutParams glp = Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT);
+        glp.setMargins(0, 0, 0, Ui.dp(this, 16));
+        col.addView(langs, glp);
+
+        // the ladder ----------------------------------------------------------
+        //
+        // THE ONE THING THIS SCREEN IS FOR. Every other assistant answers and
+        // leaves you guessing what it cost; homi picks the cheapest tier that
+        // can answer and this is where it says which. Three rungs, outlined
+        // while a turn is in flight, and the one that ANSWERED fills in.
+        //
+        // It cannot animate a climb, and it deliberately does not fake one:
+        // /api/ask runs the whole ladder on the board and reports the tier
+        // only when it returns, so until then this honestly shows "somewhere
+        // in here" rather than a rung it has not earned. The agent rung is the
+        // exception — escalation happens HERE, so that one lights the moment
+        // it is true.
+        LinearLayout rungs = Ui.row(this);
+        ladderFast   = rung("fast");
+        ladderRouter = rung("router");
+        ladderAgent  = rung("agent");
+        rungs.addView(ladderFast, rungLp());
+        rungs.addView(ladderRouter, rungLp());
+        rungs.addView(ladderAgent, rungLp());
+        col.addView(rungs, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
+        setLadder(null);
+
+        // what you said, then what came back ----------------------------------
+        heardLine = Ui.meter(this, "", 11, Ui.DIM);
+        heardLine.setPadding(Ui.dp(this, 4), Ui.dp(this, 22), Ui.dp(this, 4), 0);
+        col.addView(heardLine, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // The answer is the content, so it is set like content — large and
+        // light, not a status string in a 13sp label. You may well have missed
+        // it spoken; this is where you read it.
+        answerLine = Ui.display(this, "", 26, Ui.TEXT);
+        answerLine.setLineSpacing(Ui.dp(this, 4), 1f);
+        answerLine.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 4));
+        col.addView(answerLine, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // the voice, first, because this is a voice interface ----------------
+        //
+        // What used to sit here was "TALK goes to <agent>", and it was not
+        // true: the ladder answers most turns itself and the agent is never
+        // reached. A permanent label naming a destination that a typical
+        // turn never visits is a lie the screen tells every time you look at
+        // it. The VOICE is the thing that is always involved, so it goes
+        // here; the agent moved down to where its actual role — escalation —
+        // can be stated honestly.
+        LinearLayout vpick = Ui.row(this);
+        vpick.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6));
+        TextView vLabel = Ui.text(this, "", 13, Ui.TEXT);
+        vpick.addView(vLabel, Ui.lpGrow());
+        TextView vChev = Ui.text(this, "change", 13, Ui.ACCENT);
+        vpick.addView(vChev, Ui.lpWrap());
+        vpick.setOnClickListener(v -> chooseVoice());
+        col.addView(vpick, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
+        voiceLabel = vLabel;
+
+        // (the language buttons live up by TALK, where the choice is made)
+
+        // where it escalates TO, when the ladder cannot answer ----------------
         LinearLayout pick = Ui.row(this);
-        pick.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6));
+        pick.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), Ui.dp(this, 6));
         TextView pickLabel = Ui.text(this, "", 13, Ui.DIM);
         pick.addView(pickLabel, Ui.lpGrow());
         TextView chev = Ui.text(this, "change", 13, Ui.ACCENT);
@@ -177,6 +277,101 @@ public class Home extends Activity {
     }
 
     private TextView pickTargetLabel;
+    private TextView voiceLabel;
+    private TextView langEn, langHi, langMix;
+
+    // ---------------------------------------------------------- the language
+
+    private TextView langChip(String label) {
+        TextView t = Ui.meter(this, label, 11, Ui.DIM);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, Ui.dp(this, 11), 0, Ui.dp(this, 11));
+        return t;
+    }
+
+    private void pickLang(String l) {
+        if (!voices.setTurnLang(l)) {
+            status("Hindi needs a sarvam key on this device", Ui.WARN);
+            return;
+        }
+        showLang();
+        showTarget();
+    }
+
+    /**
+     * Selected language is filled in plain white, deliberately NOT in a tier
+     * colour. The three tier colours already mean "this is what the answer
+     * cost"; reusing one here would make a language look like a price.
+     */
+    private void showLang() {
+        String cur = voices.turnLang();
+        TextView[] cs = {langEn, langHi, langMix};
+        String[] ids = {Voices.LANG_EN, Voices.LANG_HI, Voices.LANG_MIX};
+        int r = Ui.dp(this, 8);
+        for (int i = 0; i < cs.length; i++) {
+            boolean on = ids[i].equals(cur);
+            cs[i].setBackground(on ? Ui.round(Ui.TEXT, r)
+                                   : Ui.round(Ui.CARD, r, Ui.dp(this, 1), Ui.LINE));
+            cs[i].setTextColor(on ? Ui.BG : Ui.DIM);
+        }
+    }
+
+    // ------------------------------------------------------------ the ladder
+
+    private TextView rung(String name) {
+        TextView t = Ui.meter(this, name, 10, Ui.IDLE);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, Ui.dp(this, 9), 0, Ui.dp(this, 9));
+        return t;
+    }
+
+    private LinearLayout.LayoutParams rungLp() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.weight = 1;
+        p.setMargins(Ui.dp(this, 3), 0, Ui.dp(this, 3), 0);
+        return p;
+    }
+
+    /**
+     * Light the rung that answered, and take the screen's colour from it.
+     *
+     * @param tier the board's own tier string ("fast", "router (codex, 4.5s)"),
+     *             "agent" when we escalated here, "" for a turn in flight, or
+     *             null for idle.
+     */
+    private void setLadder(String tier) {
+        int lit = -1;
+        if (tier == null) {
+            lit = -1;                                   // idle: nothing claimed
+        } else if (tier.startsWith("fast")) {
+            lit = 0;
+        } else if (tier.startsWith("router")) {
+            lit = 1;
+        } else if (tier.startsWith("agent")) {
+            lit = 2;
+        } else {
+            lit = -2;                                   // in flight: somewhere
+        }
+        TextView[] rs = {ladderFast, ladderRouter, ladderAgent};
+        int[] cols = {Ui.T_FAST, Ui.T_ROUTER, Ui.T_AGENT};
+        int r = Ui.dp(this, 8);
+        for (int i = 0; i < rs.length; i++) {
+            boolean on = (i == lit);
+            // In flight, the first two rungs are "maybe" — a dim tint with no
+            // fill. The agent rung stays dark, because escalation has not
+            // happened and showing it warm would imply a cost not yet paid.
+            boolean maybe = (lit == -2 && i < 2);
+            rs[i].setBackground(on
+                ? Ui.round(cols[i], r)
+                : Ui.round(Ui.CARD, r, Ui.dp(this, 1), maybe ? cols[i] : Ui.LINE));
+            rs[i].setTextColor(on ? Ui.BG : (maybe ? cols[i] : Ui.IDLE));
+        }
+        talkTint = lit >= 0 ? cols[lit] : Ui.ACCENT;
+    }
+
+    /** The colour the idle TALK surface returns to: whatever answered last. */
+    private int talkTint = Ui.ACCENT;
 
     private static int Color(long argb) {
         return (int) argb;
@@ -186,6 +381,7 @@ public class Home extends Activity {
     protected void onResume() {
         super.onResume();
         visible = true;
+        showLang();
         showTarget();
         refresh();
     }
@@ -293,9 +489,19 @@ public class Home extends Activity {
     // ------------------------------------------------------------ the target
 
     private void showTarget() {
-        pickTargetLabel.setText("TALK goes to " + target);
-        talkSub.setText(busy ? "" : "→ " + target);
+        pickTargetLabel.setText("escalates to " + target);
+        voiceLabel.setText("voice · " + voiceName());
+        if (!busy) talkSub.setText("tap and speak");
     }
+
+    /** What is actually going to answer, in the fewest words that stay true. */
+    private String voiceName() {
+        return Voices.SARVAM.equals(voices.ttsProvider())
+               ? "bulbul · " + voices.speaker()
+               : "on-device";
+    }
+
+
 
     private void setTarget(String name) {
         target = name;
@@ -326,12 +532,54 @@ public class Home extends Activity {
                     return;
                 }
                 new AlertDialog.Builder(this)
-                    .setTitle("talk to")
+                    .setTitle("escalate to")
                     .setItems(names.toArray(new String[0]),
                               (d, which) -> setTarget(plain.get(which)))
                     .show();
             });
         });
+    }
+
+    /**
+     * Pick the voice: the on-device engine, or one of bulbul:v3's speakers.
+     *
+     * One flat list rather than a provider screen and then a voice screen.
+     * "On-device" IS a voice as far as anyone choosing one is concerned, and
+     * making somebody pick an abstraction before they can pick a sound is
+     * the kind of structure that is true to the code and wrong for the
+     * person.
+     */
+    private void chooseVoice() {
+        final List<String> labels = new ArrayList<>();
+        final List<String> providers = new ArrayList<>();
+        final List<String> speakers = new ArrayList<>();
+
+        labels.add("on-device  ·  instant, en-US only");
+        providers.add(Voices.ANDROID);
+        speakers.add(null);
+
+        if (voices.sarvamConfigured()) {
+            String current = voices.speaker();
+            for (String s : Sarvam.SPEAKERS) {
+                labels.add("bulbul  ·  " + s + (s.equals(current) ? "   ✓" : ""));
+                providers.add(Voices.SARVAM);
+                speakers.add(s);
+            }
+        }
+
+        new AlertDialog.Builder(this)
+            .setTitle(voices.sarvamConfigured()
+                      ? "voice" : "voice  (no sarvam key on this device)")
+            .setItems(labels.toArray(new String[0]), (d, which) -> {
+                voices.setTtsProvider(providers.get(which));
+                if (speakers.get(which) != null) voices.setSpeaker(speakers.get(which));
+                showTarget();
+                // Say the new voice IN the new voice. Reading a name off a
+                // list tells you nothing about what it sounds like, and the
+                // whole point of 38 speakers is that they differ.
+                work.execute(() -> voices.say("This is " + voiceName() + ".", 30));
+            })
+            .show();
     }
 
     // -------------------------------------------------------------- the turn
@@ -348,11 +596,17 @@ public class Home extends Activity {
             return;
         }
         busy = true;
+        ui.post(() -> {
+            heardLine.setText("");
+            answerLine.setText("");
+            status("", 0);
+            setLadder("");          // in flight: no rung claimed yet
+        });
         setTalkState("LISTENING", "speak now");
         work.execute(() -> {
             String heard = "";
             try {
-                Map<String, Object> got = voice.listen(20);
+                Map<String, Object> got = voices.listen(20, this::stage);
                 Object t = got.get("text");
                 if (Boolean.TRUE.equals(got.get("ok")) && t != null) {
                     heard = t.toString().trim();
@@ -371,8 +625,8 @@ public class Home extends Activity {
 
             final String said = heard;
             ui.post(() -> {
-                status("you: " + said, Ui.TEXT);
-                setTalkState("THINKING", "asking the router");
+                heardLine.setText("YOU SAID   " + said);
+                stage("THINKING", "the router");
             });
 
             // THE LADDER FIRST, and this is the whole point of the button.
@@ -401,12 +655,19 @@ public class Home extends Activity {
             if (!routed.escalate && !routed.text.isEmpty()) {
                 final String ans = routed.text;
                 final String tier = routed.tier;
+                // The tier moves to the status line rather than the card,
+                // because the card is about to be overwritten with which
+                // VOICE is speaking. Both facts matter and they are answers
+                // to different questions — which tier thought, which voice
+                // spoke — so they get their own places instead of fighting
+                // over one label.
                 ui.post(() -> {
-                    status(ans, Ui.TEXT);
-                    setTalkState("SPEAKING", tier);
+                    setLadder(tier);
+                    answerLine.setText(ans);
+                    status(tier, Ui.DIM);
                 });
                 try {
-                    speak.say(ans, 120);
+                    voices.say(ans, 120, this::stage);
                 } catch (Throwable e) {
                     Log.w(Listener.TAG, "speak failed", e);
                 }
@@ -415,7 +676,10 @@ public class Home extends Activity {
             }
 
             // Only now is this worth an agent's time.
-            ui.post(() -> setTalkState("SENDING", "→ " + target));
+            ui.post(() -> {
+                setLadder("agent");
+                stage("SENDING", "→ " + target);
+            });
             double sentAt = System.currentTimeMillis() / 1000.0;
             try {
                 Api.send(target, said, true);
@@ -425,7 +689,7 @@ public class Home extends Activity {
                 return;
             }
 
-            ui.post(() -> setTalkState("WAITING", target + " is thinking"));
+            ui.post(() -> stage("WAITING", target));
             String answer = awaitAnswer(sentAt);
             if (answer == null) {
                 finish_(target + " has not answered yet — it is in the transcript"
@@ -435,11 +699,11 @@ public class Home extends Activity {
 
             final String ans = answer;
             ui.post(() -> {
-                status(target + ": " + ans, Ui.TEXT);
-                setTalkState("SPEAKING", "");
+                answerLine.setText(ans);
+                status(target, Ui.DIM);
             });
             try {
-                speak.say(ans, 120);
+                voices.say(ans, 120, this::stage);
             } catch (Throwable e) {
                 Log.w(Listener.TAG, "speak failed", e);
             }
@@ -487,18 +751,68 @@ public class Home extends Activity {
             talkLabel.setText(label);
             talkSub.setText(sub);
             boolean idle = "TALK".equals(label);
-            talkCard.setBackground(Ui.round(idle ? Ui.ACCENT : Ui.LIVE,
-                                            Ui.dp(this, 20)));
+            talkCard.setBackground(Ui.round(idle ? talkTint : Ui.LIVE,
+                                            Ui.dp(this, 28)));
         });
+    }
+
+    /**
+     * A {@link Voices.Progress} sink, so the provider can move the screen on
+     * as it goes.
+     *
+     * The sarvam path has waits the on-device path does not — the microphone
+     * closes, and THEN there is an upload and a transcription — and without
+     * this the screen sat on "LISTENING" through both, which reads as a
+     * microphone that never let go.
+     */
+    private void stage(String label, String detail) {
+        setTalkState(label, detail);
+        startTick(detail);
+    }
+
+    // A turn can legitimately take forty seconds when it reaches an agent.
+    // A frozen label for forty seconds is indistinguishable from a hang, and
+    // people tap again — which is the actual failure this prevents. The
+    // elapsed count is the cheapest honest proof that something is still
+    // running.
+    private volatile String tickDetail = "";
+    private long tickFrom = 0;
+    private final Runnable ticker = new Runnable() {
+        @Override public void run() {
+            if (!busy) return;
+            long s = (System.currentTimeMillis() - tickFrom) / 1000;
+            String d = tickDetail;
+            // Silent for the first two seconds: a counter that appears
+            // instantly on every short turn is noise, and most turns are
+            // short. It shows up exactly when a wait becomes one.
+            if (s >= 2) {
+                talkSub.setText(d.isEmpty() ? s + "s" : d + "  ·  " + s + "s");
+            }
+            ui.postDelayed(this, 1000);
+        }
+    };
+
+    private void startTick(String detail) {
+        ui.post(() -> {
+            tickDetail = detail == null ? "" : detail;
+            tickFrom = System.currentTimeMillis();
+            ui.removeCallbacks(ticker);
+            ui.postDelayed(ticker, 1000);
+        });
+    }
+
+    private void stopTick() {
+        ui.post(() -> ui.removeCallbacks(ticker));
     }
 
     private void finish_(String msg, int color) {
         busy = false;
+        stopTick();
         ui.post(() -> {
             if (msg != null) status(msg, color);
             talkLabel.setText("TALK");
-            talkSub.setText("→ " + target);
-            talkCard.setBackground(Ui.round(Ui.ACCENT, Ui.dp(this, 20)));
+            talkSub.setText("tap and speak");
+            talkCard.setBackground(Ui.round(talkTint, Ui.dp(this, 28)));
         });
     }
 

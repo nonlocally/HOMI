@@ -120,15 +120,52 @@ echo "→ installing (as shell)"
 "$PHONE_BIN" --device "$DEVICE" sh \
   "pm install -r -g /data/local/tmp/phonebridge.apk" | tail -2
 
-# Also the documented way past Android 13's Restricted-settings wall, which
-# greys out the notification-access toggle for sideloaded apps.
 # The app needs to know WHICH device it is, so a question about "my battery"
 # can be routed back here. It cannot find that out for itself — an Android app
-# has no view of the tailnet — but the installer just ssh'd in, so it knows.
-# Re-planted on every install, which is what keeps it true.
+# has no view of the tailnet — but the installer knows.
+#
+# AS SHELL, NOT AS THE APP. This ran over ssh until 2026-08-30, and ssh lands
+# as the TERMUX app: under scoped storage one app cannot write another app's
+# /sdcard/Android/data directory, so it failed with
+#
+#   mkdir: cannot create directory '/sdcard/Android/data/<pkg>': Permission denied
+#
+# and, because of `set -e`, took the notification grant and the service start
+# down with it. The visible symptom was not an install error — it was every
+# spoken question escalating to an agent, because Api.init() found no device
+# file and sent no device, so "what is my battery" had no phone to ask.
+# Measured before the file existed: 48 seconds and an escalation, for a
+# question the regex tier answers in about one.
+#
+# Shell CAN write there, and `phone sh` is already the shell identity. Same
+# hop the APK itself takes through /data/local/tmp, for the same reason.
+DATA="/sdcard/Android/data/$PKG/files"
 echo "→ telling the app which device it is"
-ssh "$DEVICE" "mkdir -p /sdcard/Android/data/$PKG/files && \
-               printf '%s' '$DEVICE' > /sdcard/Android/data/$PKG/files/device"
+"$PHONE_BIN" --device "$DEVICE" sh \
+  "mkdir -p $DATA && printf '%s' '$DEVICE' > $DATA/device" >/dev/null
+
+# The Sarvam key, planted the same way and for the same reason: the app reads
+# it from its own external files dir, where the device shell can write it and
+# no other app can read it. NOT compiled into the APK — a key in the build
+# output is a key in every copy of the build output. Optional: with no key the
+# app simply falls back to the on-device voice.
+if [ -z "${SARVAM_API_KEY:-}" ] && [ -f "$HERE/../../../voice/sarvam/.env" ]; then
+  SARVAM_API_KEY="$(sed -n 's/^SARVAM_API_KEY=//p' "$HERE/../../../voice/sarvam/.env" | head -1)"
+fi
+if [ -n "${SARVAM_API_KEY:-}" ]; then
+  echo "→ planting the sarvam key (bulbul:v3 / saaras:v4)"
+  # 660, NOT 600. Shell writes this file, but the APP has to read it, and the
+  # two are different uids — the app is u0_a<n>, the writer is shell. What
+  # makes that work is the shared `ext_data_rw` group on this directory, so
+  # the GROUP bit is the whole permission story. A 600 here plants a key the
+  # app cannot open, and the only symptom is the voice silently staying
+  # on-device with "sarvam is not configured" — a missing key and an
+  # unreadable one look identical from inside the app.
+  "$PHONE_BIN" --device "$DEVICE" sh \
+    "printf '%s' '$SARVAM_API_KEY' > $DATA/sarvam_key && chmod 660 $DATA/sarvam_key" >/dev/null
+else
+  echo "→ no SARVAM_API_KEY — the app will use the on-device voice"
+fi
 
 echo "→ granting notification access"
 "$PHONE_BIN" --device "$DEVICE" sh "cmd notification allow_listener $LISTENER" | tail -1
