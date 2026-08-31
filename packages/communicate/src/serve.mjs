@@ -1,0 +1,33 @@
+// Minimal MCP face over the vendored communicate CLI. No fabric logic here:
+// every tool is one spawn of the CLI. APPEND ONLY — order is the tools/list contract.
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const vendorCli = path.join(fileURLToPath(new URL("..", import.meta.url)), "vendor", "bin", "communicate");
+const run = (args) => execFileSync(vendorCli, args, { encoding: "utf8", timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
+const text = (s) => ({ content: [{ type: "text", text: s || "(no output)" }] });
+const fail = (e) => ({ content: [{ type: "text", text: String(e.stdout || e.stderr || e.message || e) }], isError: true });
+
+const TOOLS = [
+  { name: "agents_list", desc: "Routing table: every reachable agent (local Claude sessions, bridged remotes, Codex peers) with status and socket.", schema: {}, argv: () => ["agents"] },
+  { name: "whereis", desc: "Resolve an agent name to type/via/socket.", schema: { name: z.string() }, argv: (a) => ["whereis", a.name] },
+  { name: "route", desc: "Send a message to any agent by name (Claude or Codex, local or bridged). The reply returns to the caller's messaging socket when one exists.", schema: { name: z.string(), message: z.string() }, argv: (a) => ["route", a.name, a.message] },
+  { name: "send", desc: "Raw-inject one message into a peer socket or named peer, with optional from-name attribution.", schema: { target: z.string(), message: z.string(), as: z.string().optional() }, argv: (a) => a.as ? ["send", a.target, "--as", a.as, "--", a.message] : ["send", a.target, "--", a.message] },
+  { name: "codex_queue", desc: "Enqueue a turn into an EXISTING Codex session by native name/UUID (async; the reply stays in that session). Codex CLI >= 0.151.", schema: { device: z.string(), session: z.string(), message: z.string() }, argv: (a) => ["codex", "queue", a.device, a.session, "--", a.message] },
+  { name: "codex_ask", desc: "Ask a headless Codex agent synchronously (codex exec with remembered thread continuity; read-only sandbox unless auto).", schema: { device: z.string(), message: z.string(), dir: z.string().optional(), thread: z.string().optional(), fresh: z.boolean().optional(), auto: z.boolean().optional() }, argv: (a) => ["codex", "ask", a.device, ...(a.dir ? ["--dir", a.dir] : []), ...(a.thread ? ["--thread", a.thread] : []), ...(a.fresh ? ["--new"] : []), ...(a.auto ? ["--auto"] : []), "--", a.message] },
+  { name: "status", desc: "Active bridges, codex peers, and wakes started by communicate on this machine.", schema: {}, argv: () => ["status"] },
+];
+
+export async function runServe() {
+  const server = new McpServer({ name: "communicate", version: "0.1.0" });
+  for (const t of TOOLS) {
+    server.registerTool(t.name, { description: t.desc, inputSchema: t.schema }, async (args) => {
+      try { return text(run(t.argv(args ?? {}))); } catch (e) { return fail(e); }
+    });
+  }
+  await server.connect(new StdioServerTransport());
+}
