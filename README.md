@@ -61,12 +61,18 @@ skills, the `/agents` command, `communicate` on PATH, and the MCP tools.
 `npx -y @aadarwal/communicate doctor` verifies; `setup --uninstall` reverses.
 The package ships the communicate layer only (no homi plane).
 
-**From source (full CLI including homi):**
+**From source (repo-havers — full CLI including homi):**
 
 ```sh
 git clone git@github.com:aadarwal/communicate.git
 export PATH="$PWD/communicate/bin:$PATH"   # or symlink bin/communicate onto your PATH
+communicate setup-repo                      # register THIS checkout as the Claude+Codex plugin
 ```
+
+`setup-repo` needs no npm and makes no copies: it points both ecosystems at the
+checkout itself, so `git pull` IS the upgrade. Reverse with
+`communicate setup-repo --uninstall`. (The MCP face rides the published npm
+package; until it is published, use the npx-mode setup for MCP.)
 
 ## Try it in 5 minutes
 
