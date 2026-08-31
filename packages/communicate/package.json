@@ -1,0 +1,21 @@
+{
+  "name": "@aadarwal/communicate",
+  "version": "0.1.0",
+  "description": "An agent router: message any Claude or Codex agent by name, locally or across devices. Installs the CLI, skills, and MCP face for Claude Code and Codex.",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/aadarwal/communicate.git", "directory": "packages/communicate" },
+  "bin": { "communicate": "src/cli.mjs" },
+  "files": ["src", "vendor", "README.md"],
+  "engines": { "node": ">=20" },
+  "os": ["darwin", "linux"],
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "prepack": "node scripts/vendor.mjs",
+    "test": "node test/mcp-smoke.mjs && node test/setup-smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  }
+}

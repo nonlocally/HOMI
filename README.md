@@ -48,6 +48,21 @@ backs it with `codex exec`.
 
 ## Install
 
+**npx (Claude Code + Codex plugin, CLI, MCP):**
+
+```sh
+npx -y @aadarwal/communicate setup     # both ecosystems; --claude / --codex to narrow
+```
+
+Stabilizes the payload to `~/.local/share/communicate/`, adds two keys to
+`~/.claude/settings.json` (backup written first), and registers the Codex
+plugin via the `codex` CLI. New Claude sessions and Codex threads then have the
+skills, the `/agents` command, `communicate` on PATH, and the MCP tools.
+`npx -y @aadarwal/communicate doctor` verifies; `setup --uninstall` reverses.
+The package ships the communicate layer only (no homi plane).
+
+**From source (full CLI including homi):**
+
 ```sh
 git clone git@github.com:aadarwal/communicate.git
 export PATH="$PWD/communicate/bin:$PATH"   # or symlink bin/communicate onto your PATH
@@ -116,6 +131,7 @@ communicate down                             tear everything down
 communicate claude bridge   <device> [name|pid|newest]   # remote Claude -> native peer
 communicate claude unbridge <device|all>
 
+communicate codex  queue <device> <session-name|uuid> <message>  # persistent async enqueue
 communicate codex  ask   <device> [--dir D] [--thread N] [--new] [--auto] <message>
 communicate codex  peer  <device> [name]     # remote Codex -> native Claude peer
 communicate codex  unpeer <device|all>
@@ -142,10 +158,22 @@ cloud bridge cannot do.
 ### Talk to a Codex agent anywhere
 
 ```sh
+# Enqueue a turn for an existing Codex session. Its reply stays there.
+communicate codex queue local say-hi-to-me "Say hello and report your status"
+
+# Run a synchronous headless request/response agent, with remembered continuity.
 communicate codex ask aadarshs-mac-studio "summarize the failing test in ./api"
 communicate codex peer aadarshs-mac-studio codex-studio   # present it as a peer
 # ...now `codex-studio` is in ListAgents; SendMessage runs codex exec over there.
 ```
+
+`codex queue` is the lane for an existing Codex session (Codex CLI ≥ 0.151). It
+uses Codex's own persistent cross-process local queue and addresses the native
+session UUID or exact session name; it never creates a lookalike session when
+the target is missing. A successful command means **enqueued**, not answered:
+a live session consumes it immediately, a dormant one on resume. The reply
+stays in that session's UI/history. `codex ask` remains the synchronous lane
+and owns its own stored `codex exec` threads.
 
 ## homi — durable identity + store-and-forward (v0.3)
 

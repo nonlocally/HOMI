@@ -71,6 +71,19 @@ echo '{"type":"user","message":{"role":"user","content":"hello"}}' \
   | socat - UNIX-CONNECT:/tmp/cc-socks/<pid>.sock
 ```
 
+`socat` is **not** a safe assumption — it is absent on plenty of hosts, and a
+runbook that requires it strands whoever follows it literally. Python is always
+present where `communicate` runs, so prefer:
+
+```sh
+python3 -c 'import socket,json,sys
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1])
+s.sendall((json.dumps({"type":"user","message":{"role":"user","content":sys.argv[2]},
+  "from":"uds:"+sys.argv[3]})+"\n").encode())' <target.sock> "hello" <your-reply.sock>
+```
+
+or `lib/cc_peer.py send --to <sock> --from <sock> --text "hello"`.
+
 Key rules the receiver enforces:
 
 - `message.content` **must be a nonempty plain string** (content-block arrays are
