@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# communicate — plugin shim. Prefers the stabilized install, falls back to the
+# repo checkout this plugin dir lives in (dev mode).
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do src="$(readlink "$src")"; done
+here="$(cd "$(dirname "$src")" && pwd)"
+for c in \
+  "${COMMUNICATE_HOME:-}/bin/communicate" \
+  "$HOME/.local/share/communicate/current/vendor/bin/communicate" \
+  "$here/../../../bin/communicate"; do
+  [ -n "$c" ] && [ -x "$c" ] && [ "$c" != "${src}" ] && exec "$c" "$@"
+done
+echo "communicate: no backing install found (run: npx -y @aadarwal/communicate setup)" >&2
+exit 127

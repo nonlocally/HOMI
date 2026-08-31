@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "communicate": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@aadarwal/communicate", "serve"]
+    }
+  }
+}
