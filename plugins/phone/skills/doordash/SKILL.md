@@ -1,6 +1,6 @@
 ---
 name: doordash
-description: Order food on DoorDash from the phone — find a restaurant, find a dish, set its options, put it in the cart. Use when a task names DoorDash, a restaurant, a dish, or a food order on the phone.
+description: Order food on DoorDash from the phone — find a restaurant, find a dish, set its options, build the cart, and go through checkout with a card the person approves. Use when a task names DoorDash, a restaurant, a dish, or a food order on the phone.
 ---
 
 # Driving DoorDash
@@ -140,14 +140,81 @@ a confident wrong answer here reaches their plate. Typing into the disabled
 field looks like it works at every level; `phone type` refuses on your behalf,
 but the judgement is yours.
 
+## Going through checkout
+
+Checkout is mapped (`map.md`, "Checkout, structurally"). Read that before your
+first one. The short version, and the two things that will hurt you:
+
+```
+phone tap --id button_orderCart_continue        cart  -> delivery
+phone look --grep "Next"                        READ THE LABEL
+phone tap --id button_place_order               delivery -> review
+phone look                                      tip, total, payment method
+```
+
+**`button_place_order` is the id of the footer button on *every* checkout
+screen.** It reads `Next` on the delivery screen and advances; it reads
+`Place order` on the last screen and spends money. The id cannot tell you
+which one you are looking at. `textView_prism_button_title` can. Read it
+before every tap and decide on that string.
+
+**Every confirm button in the flow sits at 540,2224** — `Continue`, `Next`,
+`Place order`, `Add card`. A coordinate carried over from the previous screen
+taps whatever confirm is under it now. Resolve the label every time.
+
+## Paying
+
+Ordering goes through the `pay` skill's one-time card. That is the only
+sanctioned route: **read the real total, mint for exactly it, let the person
+approve, fill, then order.**
+
+```
+phone look --grep Total                    total_line_item_final_total
+phone-pay mint --amount <cents> --merchant "DoorDash — <store>" \
+                --context "<what they are buying and why, 100+ chars>"
+# hand the approval_url to the person, on the surface they are actually on
+phone-pay await                            blocks until they decide
+```
+
+Then set the payment method to that card — Payment → `Credit/Debit Card` —
+and fill it. `PaymentsActivity` has **no resource-ids**; match on labels.
+
+```
+phone tap 540 646 ; phone-pay fill number   then phone look to READ IT BACK
+phone tap 208 935 ; phone-pay fill exp
+phone tap 540 935 ; phone-pay fill cvc
+phone tap 871 935 ; phone-pay fill zip
+```
+
+**Uncheck `Default for DashPass subscription` before adding.** It is checked
+by default, and leaving it on points a recurring subscription at a credential
+that expires in an hour.
+
+`fill` reports *dispatched*, not *filled*. Read every field back with `look`
+and check the last4 against `phone-pay status` before you go on. Shred with
+`phone-pay done` when you are finished, success or not.
+
+Settle the **tip first**. It is part of the total, so changing it after a mint
+strands an approved card at the wrong amount.
+
 ## The boundary
 
-- **Never tap Place Order, Continue to checkout, or anything past the cart.**
-  Build the cart, report exactly what is in it and what it costs, and let the
-  person press the button. If they ask you to order outright, confirm the
-  full contents and total in the same turn first.
-- Never touch payment methods, addresses, tips, DashPass, or the
-  `/orders/help` refund flows — those speak to a merchant in their name.
+- **The stopping point is the approval, not the cart** — but only for a card
+  the person approved for *this* total, in this session. Build the cart, reach
+  checkout, read the real total, mint for it, and stop dead until they decide.
+- **A safe card is not permission to tap a confirm button.** The approval
+  covers the money; it does nothing about tapping the wrong thing. This app
+  has stolen two taps already (see the occlusion entries in `map.md`), and its
+  confirm buttons all share one coordinate and one resource-id. `find --all`
+  before any tap on a checkout screen, never `--raw`, and treat a `?under`
+  marker as a full stop.
+- **The default payment method here is Google Pay, not your minted card.**
+  Tapping `Place order` without switching the method first does not fail
+  safely — it attempts Google Pay. "There is no saved card" is true and is not
+  the same as "this cannot be charged".
+- Never touch the person's **saved** payment methods, stored addresses,
+  DashPass, or the `/orders/help` refund flows — those speak to a merchant in
+  their name. Adding a one-time card for one order is not that.
 - Leave the cart as you found it if you were only exploring, and say what you
   changed.
 - Take the lease before acting: `phone lease acquire --as <you>`.
@@ -155,8 +222,10 @@ but the judgement is yours.
 ## If you remember three things
 
 Deep-link as far in as you can. Disambiguate with `--after` and check with
-`find --all`, because this app is full of text that matches what you meant.
-Verify in the cart, never on the sheet — and stop at the cart.
+`find --all`, because this app is full of text that matches what you meant —
+and at checkout, one id and one coordinate mean four different buttons. Verify
+in the cart and in the field you just typed into, never in the exit code.
 
-Dated specifics — ids, resource-ids, which store refuses what — live in
-`map.md` beside this file. This file is the method; that one is the territory.
+Dated specifics — ids, resource-ids, which store refuses what, and the whole
+checkout map — live in `map.md` beside this file. This file is the method;
+that one is the territory.

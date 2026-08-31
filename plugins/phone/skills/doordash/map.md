@@ -345,13 +345,159 @@ wrong one. What pays is **fewer dumps**: deep links that skip screens, one
 
 ---
 
+## Checkout, structurally
+**Route:** screen. **Verified:** 2026-08-30, mapped end to end **without
+placing an order**. Read this before going past the cart; the rest of this
+file was written from the cart backwards.
+
+The flow is three screens and one footer button:
+
+| screen | activity | footer id | footer **label** |
+|---|---|---|---|
+| cart | `OrderCartActivity` | `button_orderCart_continue` | `Continue` |
+| delivery details | `OrderActivity` | **`button_place_order`** | **`Next`** |
+| review / tip / pay | `OrderActivity` | **`button_place_order`** | **`Place order`** |
+
+### The id lies. Only the label is true.
+**This is the most important thing on this page.**
+
+DoorDash uses **one footer component with the id `button_place_order` at every
+step**. On the delivery screen it reads `Next` and it advances. On the last
+screen it reads `Place order` and it spends money. Measured, in that order, on
+the same id.
+
+So:
+
+- An agent that refuses to touch `button_place_order` cannot get through
+  checkout at all.
+- An agent that treats `button_place_order` as "the thing that orders" stops
+  two screens early and reports the wrong reason.
+- An agent that taps it because last time it said `Next` **places the order.**
+
+**Read `textView_prism_button_title` inside the footer before every tap, and
+decide on that string.** Nothing else on this screen distinguishes the two.
+
+### Every confirm button in the flow is at the same coordinate
+
+`Continue`, `Next`, `Place order` and the card form's `Add card` all resolve to
+**540,2224** on this 1080×2424 screen. A coordinate cached from one screen taps
+whichever confirm happens to be under it on the next. The general rule in the
+phone map — never reuse a coordinate — is not a style note here; it is the
+difference between advancing and buying.
+
+### The receipt reads cleanly, which is what makes a mint possible
+
+| resource-id | value seen |
+|---|---|
+| `line_label` / `line_cost_final` | Subtotal $28.97, Bag Fee $0.10, Delivery Fee $1.99, Service Fee $4.35, Estimated Tax $2.03 |
+| `tip_amount` + `tip_tab_layout` | $5.75, chosen from $5.25 / $5.75 / $6.25 / Other |
+| **`total_line_item_final_total`** | **$43.19** |
+| `payment_label` / `payment_preview` | `Payment` → **`Google Pay`** |
+| `always_open_store_text_view` | "19 min left to order from this store" |
+
+`total_line_item_final_total` is the number to mint for. Read it **after** the
+tip is settled — the tip is part of the total and changing it changes the
+number, which would strand an already-approved card at the wrong amount.
+
+### What is actually on this account
+**Verified:** 2026-08-30, read off `PaymentsActivity`.
+
+    Saved Payment Methods
+      Google Pay
+    Backup payments        Disabled
+    DoorDash Credits       $0.00 USD
+
+**No card is saved — and that is not the same as "cannot be charged".** Google
+Pay is a saved method and it is what `payment_preview` shows at checkout, so a
+stray `Place order` tap attempts Google Pay, not nothing. Google Wallet is
+installed (`com.google.android.apps.walletnfcrel`). Whether it holds a funding
+instrument is inside Wallet and was **not** opened. Treat `Place order` as
+live.
+
+`PaymentsActivity` is **pure Compose: it has no resource-ids at all** beyond
+`action_bar_root`/`content`. Everything is a bare text node, so `--label` is
+the only handle on this screen, and `find --all` is worth the dump.
+
+### The add-card form
+**Verified:** 2026-08-30. Payment → `Credit/Debit Card`.
+
+Four `EditText`s on two rows, and the number field is a **VGS PCI widget**
+(`com.verygoodsecurity.vgscollect.view.internal.CardInputField`), not a plain
+input — it accepts `input text` normally:
+
+| field | centre | note |
+|---|---|---|
+| Card Number | 540,646 | VGS `CardInputField` |
+| Exp. Date | 208,935 | `MM/YY` |
+| CVV | 540,935 | |
+| Zip Code | 871,935 | |
+| `Add card` | 540,1361 → **540,2224 once the keyboard closes** | |
+
+**`Default for DashPass subscription` is CHECKED by default.** Adding a
+one-time card with that left on points a recurring subscription at a
+credential that dies in an hour. **Uncheck it before adding a minted card.**
+`Default for business orders` is unchecked and should stay that way.
+
+---
+
+## Paying with a minted card
+**Verified:** 2026-08-30, **fill proven end to end; acceptance not.**
+
+The `pay` skill mints a one-time card the person approves per purchase. What
+was tested here is the half that touches this app.
+
+### `phone-pay fill` works on DoorDash's PCI field
+
+Focus the field, fill by name, read it back:
+
+    phone tap 540 646
+    phone-pay fill number        -> {"chars_typed": 16, "dispatched": true}
+    phone look                   -> 4000 0099 9000 1984
+
+All four filled and verified by reading the tree back: `4000 0099 9000 1984`,
+`12/30`, `123`, `94103`. `chars_typed` matched, and the last4 matched the
+`last4` the mint reported. The agent never held the digits at any point.
+
+`fill` reports **dispatched, not filled** — `input text` exits 0 into a field
+that ignored it. Read every field back before continuing; that is what proved
+the above rather than assumed it.
+
+### A `--test` card cannot be added to DoorDash
+**This is the limit of what can be verified without spending money.**
+
+The testmode number minted here, `4000009990001984`, is **not Luhn-valid**
+(checksum 57, mod 10 = 7), and DoorDash's client-side validator rejects it
+with **"Invalid card number"** under the field. The digits arrived perfectly;
+the card is simply not one this form will take.
+
+So `--test` proves the **mechanism** — focus, fill, read back, shred — and
+proves nothing about **acceptance**. A real end-to-end DoorDash payment needs
+a live mint, which spends real money and was therefore not done. Anyone
+completing that path is doing the first real one; say so.
+
+---
+
 ## Not tested, on purpose
 
-**No order was ever placed.** Everything here stops at the cart. Checkout,
-payment, tipping, scheduling and address changes were not touched, and an
-agent should not touch them without the owner saying so in the same turn, with
-the total named. Items were added and then deleted; the cart was left exactly
-as it was found (1 × Chinese Bhel, 2 × Single Vada Pav at Chutney's).
+**No order has ever been placed from this file.** Checkout is now mapped all
+the way to the `Place order` button and the card form was filled with a
+testmode card, but nothing was submitted: `Place order` was never tapped and
+`Add card` was never tapped. Verified afterwards by observation, not by
+intent — order history still ends at Aug 24, Saved Payment Methods still reads
+`Google Pay` alone, and the cart was left exactly as it was found (1 × Chinese
+Bhel, 2 × Single Vada Pav at Chutney's).
+
+Still not done, and each for a reason:
+
+- **A live (non-test) mint.** That is real money; it is the one step that
+  cannot be rehearsed, and it needs the owner asking for it in the moment.
+- **Tapping `Place order`.** See above — and note it would go to Google Pay,
+  not to a minted card, unless the payment method was changed first.
+- **Opening Google Wallet** to see whether it holds a funding instrument.
+  That is the owner's payment data and reading it is not needed for any task
+  here; the safe assumption is that it does.
+- **Scheduling, addresses, and the tip beyond reading it.** Changing the tip
+  changes the total, which invalidates an approved mint.
 
 Also untouched: group orders, DashPass management, and anything under
 `/orders/help` — the refund and "never delivered" flows make claims to a
