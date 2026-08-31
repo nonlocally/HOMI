@@ -102,19 +102,22 @@ digits went nowhere and you were told success. **Read the field back with
 precisely so you can check the field shows the right card without ever
 knowing the whole number.
 
-**The approval does not reach the person on its own.** There is no push today.
-`mint` posts a notification on the Pixel and prints the URL — but if the
-person is not looking at the Pixel, *nothing tells them*, and `await` will sit
-there until it times out. Do not mint and then wait silently; that is the
-single most likely way this hangs.
+**The push is real, but do not treat it as guaranteed.** The Link app pushes
+the approval to the person's phone, and that is the primary channel — it is
+how these actually get approved, in about 46 seconds start to finish. But one
+push in testing did not arrive, and `await` simply sits there when that
+happens. So still surface the `approval_url` through whatever channel the
+request came in on: a terminal session prints it in the terminal, a spoken
+`talk` turn speaks it. Belt and braces, because the failure mode is a silent
+hang and the fix costs one line of output.
 
-The delivery contract: **whoever mints delivers the URL back through the
-channel the request arrived on.** A terminal session prints it in the terminal
-the person is sitting at. A spoken `talk` turn speaks it and posts the
-notification. A background or scheduled agent, which has no channel back to a
-human, **has no business minting at all** — if you cannot name the surface the
-person will read this on, you are not the one who should be asking for their
-money.
+**When the push IS the only channel, `--context` carries the entire weight.**
+An unattended or scheduled agent may mint — the person really will be told.
+But they will then be approving from a notification with no conversation
+around it, no screen to glance at, and no way to ask you what this is. Every
+scrap of what they need to judge it has to already be in that sentence. If you
+would not be comfortable with them deciding on the context line alone, you are
+not ready to mint.
 
 **A card minted before the form is ready burns its clock.** An hour is plenty,
 but the whole round trip — ask, human decides, fill — was measured at 46
@@ -215,8 +218,9 @@ Those speak to a merchant in their name and have nothing to do with this card.
 A per-app skill's stopping point outranks this file — a safe card is not
 permission to go further. Mint only for a total you have actually read, and
 put it honestly in the `--context`, because that sentence is the whole
-protection. And deliver the `approval_url` back through the channel the
-request came in on; if you cannot name that channel, do not mint.
+protection and it may be the only thing they ever see. And surface the
+`approval_url` in your own channel too: the push is the primary route and it
+works, but it is not guaranteed, and a missed one is a silent hang.
 
 Dated specifics — what each app's checkout form calls its fields, which ones
 refuse a slash in the expiry — belong in the per-app `map.md`, not here. This
