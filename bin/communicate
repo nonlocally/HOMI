@@ -56,8 +56,9 @@ source "$COMM_HOME/lib/peer.sh"
 source "$COMM_HOME/lib/router.sh"
 # shellcheck source=lib/wake.sh
 source "$COMM_HOME/lib/wake.sh"
+# homi plane is optional: packaged installs (@aadarwal/communicate) ship without it.
 # shellcheck source=lib/homi.sh
-source "$COMM_HOME/lib/homi.sh"
+[ -f "$COMM_HOME/lib/homi.sh" ] && . "$COMM_HOME/lib/homi.sh"
 
 # Print the whole leading comment header (stops at the first non-comment line),
 # so the usage text can grow without a hardcoded line range going stale.
@@ -159,7 +160,9 @@ main() {
     whereis) router_whereis "$@" && echo;;
     route)   router_route "$@";;
     wake)    wake_cmd "$@";;
-    homi)    homi_cmd "$@";;
+    homi)    type homi_cmd >/dev/null 2>&1 || \
+                 die "homi plane not bundled in this install — clone github.com/aadarwal/communicate for the full CLI"
+             homi_cmd "$@";;
     # internal entrypoints (not for humans)
     __supervise-claude) _claude_supervise "$@";;
     __codex-peer-serve) _codex_peer_serve "$@";;
