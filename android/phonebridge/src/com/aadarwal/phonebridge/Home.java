@@ -496,9 +496,10 @@ public class Home extends Activity {
 
     /** What is actually going to answer, in the fewest words that stay true. */
     private String voiceName() {
-        return Voices.SARVAM.equals(voices.ttsProvider())
-               ? "bulbul · " + voices.speaker()
-               : "on-device";
+        String p = voices.ttsProvider();
+        if (Voices.SARVAM.equals(p)) return "bulbul · " + voices.speaker();
+        if (Voices.XAI.equals(p)) return "grok · " + voices.speaker();
+        return "on-device";
     }
 
 
@@ -554,22 +555,32 @@ public class Home extends Activity {
         final List<String> providers = new ArrayList<>();
         final List<String> speakers = new ArrayList<>();
 
-        labels.add("on-device  ·  instant, en-US only");
+        String current = voices.speaker();
+
+        labels.add("on-device  ·  11ms, free, en-US only");
         providers.add(Voices.ANDROID);
         speakers.add(null);
 
+        // grok first among the cloud voices, because it is the fast one:
+        // measured 0.77s to Bulbul\u0027s 2.16s for the same sentence. The
+        // ordering is the recommendation.
+        if (voices.xaiConfigured()) {
+            for (String s : Xai.VOICES) {
+                labels.add("grok  ·  " + s + (s.equals(current) ? "   \u2713" : ""));
+                providers.add(Voices.XAI);
+                speakers.add(s);
+            }
+        }
         if (voices.sarvamConfigured()) {
-            String current = voices.speaker();
             for (String s : Sarvam.SPEAKERS) {
-                labels.add("bulbul  ·  " + s + (s.equals(current) ? "   ✓" : ""));
+                labels.add("bulbul  ·  " + s + (s.equals(current) ? "   \u2713" : ""));
                 providers.add(Voices.SARVAM);
                 speakers.add(s);
             }
         }
 
         new AlertDialog.Builder(this)
-            .setTitle(voices.sarvamConfigured()
-                      ? "voice" : "voice  (no sarvam key on this device)")
+            .setTitle("voice")
             .setItems(labels.toArray(new String[0]), (d, which) -> {
                 voices.setTtsProvider(providers.get(which));
                 if (speakers.get(which) != null) voices.setSpeaker(speakers.get(which));

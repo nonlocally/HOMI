@@ -99,24 +99,46 @@ class Bridge implements Runnable {
                 Socket s = server.accept();
                 handle(s);
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Same reasoning as handle(): the accept loop is the app's only
+            // way in, and it should not be endable by one bad request.
             Log.e(Listener.TAG, "bridge stopped", e);
         } finally {
             try { if (server != null) server.close(); } catch (Exception ignored) {}
         }
     }
 
+    /**
+     * THROWABLE, not Exception, and it is not paranoia — it is a post-mortem.
+     *
+     * A bug in the WAV parser threw OutOfMemoryError on the first grok
+     * utterance. OOM is an Error, this caught only Exception, so it escaped,
+     * killed the bridge thread, and took the whole app down with it: the
+     * notification listener, the mic service and every unrelated verb, because
+     * of one malformed chunk header in one provider.
+     *
+     * A request that fails should fail as a REQUEST. And it must still answer
+     * — a dropped connection reaches the caller as a null, which reads as "the
+     * phone is unreachable" and sends you hunting the link instead of the bug.
+     */
     private void handle(Socket s) {
         try {
             s.setSoTimeout(15000);
             BufferedReader in = new BufferedReader(
                 new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
             String line = in.readLine();
-            JSONObject reply = dispatch(line);
+            JSONObject reply;
+            try {
+                reply = dispatch(line);
+            } catch (Throwable t) {
+                Log.e(Listener.TAG, "handler threw", t);
+                reply = err(new JSONObject(), t.getClass().getSimpleName()
+                            + ": " + String.valueOf(t.getMessage()));
+            }
             OutputStream out = s.getOutputStream();
             out.write((reply.toString() + "\n").getBytes(StandardCharsets.UTF_8));
             out.flush();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             Log.w(Listener.TAG, "request failed", e);
         } finally {
             try { s.close(); } catch (Exception ignored) {}
@@ -186,7 +208,8 @@ class Bridge implements Runnable {
                                       + "key on this device: " + tts);
                     }
                     if (q.has("speaker") && !voices.setSpeaker(q.optString("speaker"))) {
-                        return err(r, "not a bulbul:v3 speaker: " + q.optString("speaker"));
+                        return err(r, "not a known voice — bulbul:v3 or grok: "
+                                      + q.optString("speaker"));
                     }
                     if (q.has("lang") && !voices.setTurnLang(q.optString("lang"))) {
                         return err(r, "lang must be en, hi or mix (and hi/mix "
@@ -199,7 +222,7 @@ class Bridge implements Runnable {
                 case "voice_speaker": {
                     String s = q.optString("speaker", "");
                     if (!voices.setSpeaker(s)) {
-                        return err(r, "not a bulbul:v3 speaker: " + s);
+                        return err(r, "not a known voice — bulbul:v3 or grok: " + s);
                     }
                     r.put("ok", true);
                     r.put("speaker", voices.speaker());
