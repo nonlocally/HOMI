@@ -1,0 +1,12 @@
+{
+  "name": "communicate",
+  "interface": { "displayName": "Communicate" },
+  "plugins": [
+    {
+      "name": "communicate",
+      "source": { "source": "local", "path": "./plugins/communicate" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}
