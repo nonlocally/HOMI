@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Plugins shipped with communicate \u2014 the fabric that lets agents reach a person's own devices. Currently one family: driving an Android phone, generally and per app.",
-    "version": "0.3.3"
+    "version": "0.5.2"
   },
   "plugins": [
     {
