@@ -37,17 +37,17 @@ class Bridge implements Runnable {
 
     private final Context ctx;
     private final String token;
-    private final Voice voice;
-    private final Speak speak;
+    private final Voices voices;
     private Thread thread;
 
     Bridge(Context ctx) {
         this.ctx = ctx;
         this.token = loadOrMintToken(ctx);
-        this.voice = new Voice(ctx);
         // Built at construction, not on first use: the whole point is that
-        // the engine is already bound when someone asks it to talk.
-        this.speak = new Speak(ctx);
+        // the engine is already bound when someone asks it to talk. Voices
+        // is a process singleton, so this warms the SAME engine the home
+        // screen speaks through rather than a second copy of it.
+        this.voices = Voices.of(ctx);
     }
 
     void start() {
@@ -142,6 +142,8 @@ class Bridge implements Runnable {
             boolean needsListener = !("ping".equals(op)
                     || "voice_status".equals(op)
                     || "voice_download".equals(op)
+                    || "voice_provider".equals(op)
+                    || "voice_speaker".equals(op)
                     || "listen".equals(op)
                     || "say".equals(op)
                     || "say_status".equals(op)
@@ -159,19 +161,48 @@ class Bridge implements Runnable {
                     r.put("bound", true);
                     return r;
                 case "voice_status":
-                    for (Map.Entry<String, Object> e : voice.status().entrySet()) {
-                        Object v = e.getValue();
-                        r.put(e.getKey(), v instanceof List
-                              ? new JSONArray((List<?>) v)
-                              : (v == null ? JSONObject.NULL : v));
-                    }
+                    put(r, voices.status());
                     r.put("ok", true);
                     return r;
                 case "voice_download": {
+                    // Reaches past the abstraction on purpose: downloadable
+                    // language packs are a property of the ANDROID engine,
+                    // not of "a voice provider". Sarvam has no such concept.
                     for (Map.Entry<String, Object> e :
-                            voice.download(q.optInt("wait", 60)).entrySet()) {
+                            voices.androidVoice().download(q.optInt("wait", 60)).entrySet()) {
                         r.put(e.getKey(), e.getValue());
                     }
+                    return r;
+                }
+                case "voice_provider": {
+                    // The VOICE is a free choice; the EARS are not — they
+                    // follow the turn's language, because "on-device" simply
+                    // cannot hear Hindi on this phone. So there is a tts
+                    // provider to set and a language to set, and no stt
+                    // provider: it is derived.
+                    String tts = q.optString("tts", q.optString("provider", ""));
+                    if (!tts.isEmpty() && !voices.setTtsProvider(tts)) {
+                        return err(r, "unknown tts provider, or sarvam has no "
+                                      + "key on this device: " + tts);
+                    }
+                    if (q.has("speaker") && !voices.setSpeaker(q.optString("speaker"))) {
+                        return err(r, "not a bulbul:v3 speaker: " + q.optString("speaker"));
+                    }
+                    if (q.has("lang") && !voices.setTurnLang(q.optString("lang"))) {
+                        return err(r, "lang must be en, hi or mix (and hi/mix "
+                                      + "need a sarvam key): " + q.optString("lang"));
+                    }
+                    put(r, voices.status());
+                    r.put("ok", true);
+                    return r;
+                }
+                case "voice_speaker": {
+                    String s = q.optString("speaker", "");
+                    if (!voices.setSpeaker(s)) {
+                        return err(r, "not a bulbul:v3 speaker: " + s);
+                    }
+                    r.put("ok", true);
+                    r.put("speaker", voices.speaker());
                     return r;
                 }
                 case "await_turn": {
@@ -192,32 +223,21 @@ class Bridge implements Runnable {
                     return r;
                 }
                 case "listen": {
-                    for (Map.Entry<String, Object> e :
-                            voice.listen(q.optInt("timeout", 20)).entrySet()) {
-                        Object v = e.getValue();
-                        r.put(e.getKey(), v instanceof List
-                              ? new JSONArray((List<?>) v)
-                              : (v == null ? JSONObject.NULL : v));
-                    }
+                    put(r, voices.listen(q.optInt("timeout", 20)));
                     return r;
                 }
                 case "say": {
-                    for (Map.Entry<String, Object> e :
-                            speak.say(q.optString("text", ""),
-                                      q.optInt("timeout", 60)).entrySet()) {
-                        r.put(e.getKey(), e.getValue());
-                    }
+                    put(r, voices.say(q.optString("text", ""),
+                                      q.optInt("timeout", 60)));
                     return r;
                 }
                 case "say_status": {
-                    for (Map.Entry<String, Object> e : speak.status().entrySet()) {
-                        r.put(e.getKey(), e.getValue());
-                    }
+                    put(r, voices.status());
                     r.put("ok", true);
                     return r;
                 }
                 case "shut_up":
-                    speak.stop();
+                    voices.stop();
                     r.put("ok", true);
                     return r;
                 case "list": {
@@ -277,6 +297,39 @@ class Bridge implements Runnable {
             r.put("err", msg);
         } catch (Exception ignored) {}
         return r;
+    }
+
+    /**
+     * Copy a provider's result map onto the reply.
+     *
+     * Lists and nested maps have to be converted, not handed to JSONObject
+     * raw — org.json wraps an unknown object as its toString(), so a nested
+     * status map would have gone out over the wire as
+     * "{provider=sarvam, ...}", a Java debug string that no JSON parser on
+     * the other end can read.
+     */
+    private static void put(JSONObject r, Map<String, Object> m) throws Exception {
+        for (Map.Entry<String, Object> e : m.entrySet()) {
+            r.put(e.getKey(), wrap(e.getValue()));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object wrap(Object v) {
+        if (v == null) return JSONObject.NULL;
+        if (v instanceof Map) {
+            JSONObject o = new JSONObject();
+            for (Map.Entry<String, Object> e : ((Map<String, Object>) v).entrySet()) {
+                try { o.put(e.getKey(), wrap(e.getValue())); } catch (Exception ignored) {}
+            }
+            return o;
+        }
+        if (v instanceof List) {
+            JSONArray a = new JSONArray();
+            for (Object x : (List<?>) v) a.put(wrap(x));
+            return a;
+        }
+        return v;
     }
 
     /** Length-independent compare, so a wrong token cannot be found byte by

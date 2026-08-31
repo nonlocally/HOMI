@@ -86,9 +86,12 @@ cannot see", never "nothing is there"**. Say which.
 ```
 phone look             the screen, summarised — prefer over `phone ui`
 phone find "<label>"   a label -> "x y", non-zero if not found
-phone tap X Y
+phone tap X Y          or: phone tap --label "<label>"
 phone type "text"
 phone key BACK|HOME|ENTER
+phone scroll down      a screenful; also up/left/right, --n N
+phone swipe X1 Y1 X2 Y2
+phone scan "<label>"   scroll until it appears — the loop runs ON THE DEVICE
 phone screen --out f.png          a picture, when the tree fails you
 ```
 
@@ -98,6 +101,60 @@ exactly like one that worked — until you look.
 
 If `find` fails it exits non-zero. **Do not guess coordinates.** A wrong tap
 can send, delete, or buy something. Say you could not find it.
+
+### Spend turns, not bytes
+
+A dump costs ~3.1s and it runs **on the phone**; shipping the 25-60 KB tree
+back costs ~0.5s. So filtering the XML on the device to send less saves almost
+nothing, and the only thing worth optimising is **how many dumps you take** —
+which usually means how many times you stop to think.
+
+```
+phone tap --label "Add to order" --look     act and verify, one turn
+phone scan "Special instructions"           3 screens, one turn, 10.9s
+```
+
+`tap --label` resolves and taps in one call, so a coordinate never has to
+travel out to you and back. `scan` puts the whole scroll-and-look loop on the
+device and returns a tap point; it stops early when the list stops moving, so
+"not found" means the list ended, not that the budget did.
+
+### A coordinate is not a promise
+
+Apps float bars over their own content, and the centre of the row you named
+can be **inside** the thing on top of it. Measured on DoorDash: the centre of a
+menu row sat inside the floating cart bar, and tapping it opened the cart; the
+centre of an option row sat inside "Add to order", and tapping it would have
+bought the dish. Every exit code was 0.
+
+`find`, `look` and `tap` now choose a point that a tap should actually reach,
+and print `?under <thing>` when they could not find a clear one. That marker
+is **advice, not a refusal** — on Compose screens the tree order does not
+always match what is drawn on top, so a veto would strand you on real buttons.
+When you see it, scroll the target into open space and look again.
+
+### Ask which one you meant
+
+`find` matches substrings, and screens are full of text that matches what you
+meant without being it — a search box holding your own query, a saved-order
+card quoting an option name.
+
+```
+phone find "<label>" --all              every candidate, with what it is
+phone find "<label>" --after "<header>" only below that header
+phone find "<label>" --exact
+```
+
+Reach for `--all` the moment a screen has more than one plausible target. It
+costs the same dump you were taking anyway.
+
+### Typing goes nowhere quietly
+
+`input text` exits 0 with no field focused, so `type` used to report
+delivering characters it had thrown away. It now checks what is accepting text
+first and refuses with a reason. It catches a screen with nothing focused; it
+can miss a field whose window just closed, because the input-method state goes
+stale. **After typing something that matters, read it back.**
 
 ## Verify by observation
 
@@ -129,8 +186,35 @@ phone lease acquire --as <your-name>
 phone lease release --as <your-name>
 ```
 
-One driver at a time; mutating verbs refuse and name the holder. Reads are
-never gated. Leave the phone as you found it.
+One driver at a time **per display**; mutating verbs refuse and name the
+holder. Reads are never gated. Leave the phone as you found it.
+
+## Work on your own screen
+
+If another agent has the phone, you do not have to wait — take a display.
+
+```
+d=$(phone display create)          # a real, trusted, invisible second screen
+phone --display $d open calculator
+phone --display $d look / tap / screen
+phone display rm $d                # closes what was on it
+```
+
+`--display` is global, like `--device`. `phone display ls` shows every screen
+and what is on it.
+
+Two rules, and **the `screens` skill is the rest of it** — read it before you
+run several agents on this phone:
+
+- **The person's screen is display 0.** Anything you launch there is on the
+  phone in their hand.
+- **One app, one display.** `open` refuses a package that is already
+  elsewhere, because `am start --display` MOVES a task rather than copying
+  it. `phone display move <app> --to <n>` when you mean it.
+
+Displays multiply screens, not apps, and not the microphone, the speaker, the
+notification shade or the person — those stay singular whatever `--display`
+says.
 
 ## Acting as the owner
 
@@ -163,5 +247,9 @@ Ask the device, do not assume. Highest route that could work. Verify by
 reading state back, never by an exit code. Never guess a coordinate.
 
 Dated specifics — which app honours which intent, what is readable today —
-live in `docs/phone-map.md`, established by trying them. This file is the
-method; that one is the territory.
+live in `map.md` beside this file, established by trying them. This file is the method; that one is the
+territory.
+
+For one app there is already a per-app skill: **`doordash`**, which is what
+mastering an app looks like — its deep links, its screen grammar, the two
+overlays that steal taps, and where it refuses to do what was asked.

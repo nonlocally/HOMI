@@ -527,9 +527,42 @@ def shell_pidfile(path=None):
     return (path or shell_sock()) + ".pid"
 
 
+_LANE_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,30}\Z")
+
+
+def lane():
+    """This driver's own shell, if it asked for one.
+
+    shelld is TWO things wearing one name: a fast shell, and the arbiter that
+    holds the lease. The arbiter has to be shared — that is the entire point
+    of a lease — but the shell does not, and while they were the same socket
+    every driver's commands queued behind every other driver's. The accept
+    loop is single-threaded and feeds ONE persistent sh, so a 3-second
+    `uiautomator dump` is three seconds nobody else's `settings get` can run.
+    
+    A lane is a driver saying "give me my own shell". Empty by default, and
+    then every path in this file is byte-identical to what it was. The lease
+    stays keyed by DISPLAY inside whichever daemon holds it, so two lanes on
+    the same display still arbitrate — see the note in cmd_shelld.
+    """
+    v = (os.environ.get("PHONE_LANE") or "").strip()
+    if v and not _LANE_RE.match(v):
+        die("PHONE_LANE wants a short lowercase name, got %r" % v, 2)
+    return v
+
+
+def _laned(path):
+    """`.../phone-shell.sock` -> `.../phone-shell-<lane>.sock`."""
+    ln = lane()
+    if not ln:
+        return path
+    base, _, ext = path.rpartition(".")
+    return "%s-%s.%s" % (base, ln, ext) if base else "%s-%s" % (path, ln)
+
+
 def shell_sock():
-    return os.environ.get("PHONE_SHELL_SOCK") or os.path.join(
-        os.environ.get("PREFIX", "/tmp"), "tmp", "phone-shell.sock")
+    return os.environ.get("PHONE_SHELL_SOCK") or _laned(os.path.join(
+        os.environ.get("PREFIX", "/tmp"), "tmp", "phone-shell.sock"))
 
 
 def _shell_argv():
@@ -588,6 +621,15 @@ def shelld_call(cmd, timeout=90):
 
 
 def cmd_shelld(args):
+    # ONE DAEMON PER LANE. $PHONE_LANE picks the socket (see lane()), so
+    # `PHONE_LANE=a phone shelld --start` and `PHONE_LANE=b ...` are two
+    # independent shells that do not queue behind each other.
+    #
+    # The lease is keyed by display INSIDE a daemon, which means two drivers
+    # sharing a lane arbitrate correctly and two drivers in different lanes
+    # do not see each other's leases at all. That is the right trade only
+    # because a lane is something a driver opts into: the default lane is
+    # shared, so the default behaviour is still one arbiter for the phone.
     import socket as _s
     path = shell_sock()
     if args.stop:
@@ -694,7 +736,19 @@ def cmd_shelld(args):
     # The lock costs nothing while this stays single-threaded, and it keeps
     # the correctness local to the thing being protected.
     import threading as _th
-    lease = {"holder": None, "until": 0.0}
+    # ONE LEASE PER DISPLAY, not one per phone.
+    #
+    # A driver takes a screen, and since `phone display` this phone can have
+    # more than one. A single global holder would make a second display
+    # pointless: the first driver would still lock out the second, which is
+    # the exact contention the display was created to remove.
+    #
+    # The key rides at the END of the line, not the front. An older daemon
+    # parses `acquire <who> <ttl>` positionally and ignores what follows, so a
+    # new CLI against an old daemon degrades to the single global lease it
+    # already had — rather than reading a display id as a TTL, throwing
+    # ValueError inside the accept loop, and wedging the daemon for everyone.
+    leases = {}
     lease_lock = _th.Lock()
 
     def lease_op(line):
@@ -705,27 +759,30 @@ def cmd_shelld(args):
         parts = line.split()
         op = parts[0] if parts else "status"
         now = time.time()
-        expired = lease["holder"] and now >= lease["until"]
-        if expired:
-            lease["holder"] = None          # a dead holder must not brick it
+        for dead in [k for k, v in leases.items() if now >= v[1]]:
+            del leases[dead]                # a dead holder must not brick it
         if op == "status":
-            if not lease["holder"]:
+            key = parts[1] if len(parts) > 1 else "0"
+            held = leases.get(key)
+            if not held:
                 return 0, "-"
-            return 0, "%s %d" % (lease["holder"],
-                                 max(0, int(lease["until"] - now)))
+            return 0, "%s %d" % (held[0], max(0, int(held[1] - now)))
         if op == "acquire":
             who = parts[1] if len(parts) > 1 else "anon"
             ttl = float(parts[2]) if len(parts) > 2 else DEFAULT_TTL
-            if lease["holder"] and lease["holder"] != who:
-                return 1, lease["holder"]
-            lease["holder"] = who
-            lease["until"] = now + ttl      # re-acquire renews
+            key = parts[3] if len(parts) > 3 else "0"
+            held = leases.get(key)
+            if held and held[0] != who:
+                return 1, held[0]
+            leases[key] = (who, now + ttl)  # re-acquire renews
             return 0, who
         if op == "release":
             who = parts[1] if len(parts) > 1 else "anon"
-            if lease["holder"] and lease["holder"] != who:
-                return 1, lease["holder"]
-            lease["holder"] = None
+            key = parts[2] if len(parts) > 2 else "0"
+            held = leases.get(key)
+            if held and held[0] != who:
+                return 1, held[0]
+            leases.pop(key, None)
             return 0, "-"
         return 2, "unknown lease op"
 
@@ -975,7 +1032,10 @@ def actor():
 # Verbs that CHANGE the world need the wheel. Reads never do: watching must
 # not require taking control, or a second pair of eyes becomes an outage.
 MUTATING = {"tap", "type", "key", "open", "play", "media", "msg", "say",
-            "photo", "torch", "notify", "ptt", "clip"}
+            "photo", "torch", "notify", "ptt", "clip", "swipe", "scroll"}
+# `scan` is deliberately NOT here. It scrolls, which moves the screen, but it
+# does not commit anything, and a second pair of eyes must be able to look
+# around without taking the wheel out of the driver's hands.
 
 
 def lease_call(args, timeout=15):
@@ -989,21 +1049,23 @@ def lease_check(verb):
         return
     if os.environ.get("PHONE_NO_LEASE"):
         return
-    r = lease_call("status")
+    r = lease_call("status %d" % display_id())
     if r is None:
         return                    # no daemon: nothing to arbitrate, act
     _rc, out = r
     holder, _, _rest = (out or "").strip().partition(" ")
     me = actor()
     if holder and holder != "-" and holder != me:
-        die("%s is held by %r — this phone has one driver at a time. "
-            "Wait, or take it with `phone lease acquire --as %s`."
-            % (verb, holder, me), 5)
+        die("%s is held on display %d by %r — one driver per screen. "
+            "Wait, take it with `phone %slease acquire --as %s`, or work on "
+            "a display of your own (`phone display create`)."
+            % (verb, display_id(), holder,
+               "--display %d " % display_id() if display_id() else "", me), 5)
 
 
 def cmd_lease(args):
     if args.action == "status":
-        r = lease_call("status")
+        r = lease_call("status %d" % display_id())
         if r is None:
             print("(no daemon; nothing holds the phone)")
             return 0
@@ -1013,16 +1075,17 @@ def cmd_lease(args):
         return 0
     who = args.holder or actor()
     if args.action == "acquire":
-        r = lease_call("acquire %s %d" % (who, args.ttl))
+        r = lease_call("acquire %s %d %d" % (who, args.ttl, display_id()))
         if r is None:
             die("no daemon to hold a lease (start `phone shelld --start`)", 3)
         rc, out = r
         if rc != 0:
             die("held by %s" % (out or "").strip(), 5)
-        record("lease", {"holder": who, "ttl": args.ttl}, "act", "acquired")
-        print("acquired by %s" % who)
+        record("lease", {"holder": who, "ttl": args.ttl,
+                         "display": display_id()}, "act", "acquired")
+        print("acquired by %s (display %d)" % (who, display_id()))
         return 0
-    r = lease_call("release %s" % who)
+    r = lease_call("release %s %d" % (who, display_id()))
     if r is None:
         die("no daemon", 3)
     rc, out = r
@@ -1032,6 +1095,570 @@ def cmd_lease(args):
     print("released")
     return 0
 
+
+
+# ----------------------------------------------------------- the displays
+# A phone has one screen, which is why `phone` has a lease: two drivers on one
+# screen is one agent typing into another agent's chat. A VIRTUAL DISPLAY is
+# the way out of that — not a bigger screen, a SECOND one, with its own
+# resumed activity, its own focus, and its own input stream.
+#
+# It costs a process. A VirtualDisplay is owned by whoever created it and is
+# released when that process exits, so android/vdisplay is a HOLDER: it makes
+# the display, prints its id, and idles until told to stop.
+#
+# The display has to be TRUSTED or it is not worth making — an untrusted one
+# gets no IME, no own focus and no system decorations, all stripped silently
+# by DisplayManagerService. TRUSTED needs ADD_TRUSTED_DISPLAY, which is
+# signature|role and so ungrantable: `pm grant` refuses it outright. But
+# com.android.shell HOLDS it (packages/Shell/AndroidManifest.xml, and it has
+# since Android 13), and `phone sh` is already uid 2000 through Shizuku — so
+# the holder runs under app_process at exactly the uid that has the
+# permission, and the whole question disappears. Same mechanism scrcpy uses
+# for --new-display. Verified on this phone 2026-08-30, Android 16 (sdk 36).
+#
+# WHAT IS NOT VIRTUALISED: the apps. One WhatsApp process, one logged-in
+# account, one notification stream, however many displays point at it. The
+# same app on two displays is two agents in one conversation — the failure
+# the lease exists to prevent, reached by another road. See guard_one_display.
+
+VD_JAR = "/data/local/tmp/vdisplay.jar"
+VD_MAIN = "com.aadarwal.vdisplay.Main"
+VD_CLIENT = "com.aadarwal.vdisplay.Client"
+VD_PREFIX = "phone-vd-"
+
+# The display every screen-tier verb addresses, set once from --display in
+# main(). A module global rather than a parameter because the value has to
+# reach the handful of places that BUILD a device command, and threading it
+# there by hand would touch every signature in between that only ever passes
+# a tree around.
+_DISPLAY = [0]
+
+
+def display_id():
+    return _DISPLAY[0]
+
+
+def _dflag():
+    """The `input` display selector, or nothing on the built-in screen.
+
+    `-d`, not `--display`: that is the flag `input` has taken since Android
+    10, and it rejects the long form. Empty rather than an explicit `-d 0` so
+    that every command this file issued before displays existed is still
+    byte-identical when nobody asks for a second screen.
+    """
+    d = display_id()
+    return " -d %d" % d if d else ""
+
+
+def _amflag():
+    """The `am start` display selector. Here it IS the long form."""
+    d = display_id()
+    return " --display %d" % d if d else ""
+
+
+def _wmflag():
+    d = display_id()
+    return " -d %d" % d if d else ""
+
+
+def vd_run(cls, rest, timeout=60):
+    """Run a class out of the holder jar, at shell uid."""
+    return dev_shell("CLASSPATH=%s app_process / %s %s" % (VD_JAR, cls, rest),
+                     timeout=timeout)
+
+
+def vd_client(sock, cmd, timeout=60):
+    """Ask a running holder something.
+
+    Through app_process rather than over ssh, because of a uid boundary: the
+    holder's socket is in the abstract namespace and owned by shell, and
+    SELinux refuses a connection from the Termux app (measured: EACCES). The
+    ssh path that serves every other termux verb is on the wrong side of it.
+    """
+    import shlex as _sh
+    return vd_run(VD_CLIENT, "%s %s" % (_sh.quote(sock), _sh.quote(cmd)),
+                  timeout=timeout)
+
+
+_DISP_HEAD = re.compile(r"Display id (\d+):")
+_ACT_REC = re.compile(r"ActivityRecord\{\S+ u\d+ ([A-Za-z0-9_.]+)/")
+
+
+def displays():
+    """Every display this phone has, asked of the phone.
+
+    No registry file, deliberately. Which displays exist is a fact about the
+    device, and a file that disagrees is the stale map this codebase already
+    decided not to keep (the phone map: ask, do not assume). The holders
+    are named, so their names are the only bookkeeping there is.
+    """
+    rc, out = dev_shell("cmd display get-displays", timeout=30)
+    if rc != 0 or not out:
+        return []
+    marks = list(_DISP_HEAD.finditer(out))
+    res = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(out)
+        seg = out[m.start():end]
+        name = re.search(r'DisplayInfo\{"([^"]*)"', seg)
+        size = re.search(r"real (\d+) x (\d+)", seg)
+        dens = re.search(r"density (\d+)", seg)
+        kind = re.search(r"\btype ([A-Z_]+)", seg)
+        res.append({
+            "id": int(m.group(1)),
+            "name": name.group(1) if name else "",
+            "w": int(size.group(1)) if size else 0,
+            "h": int(size.group(2)) if size else 0,
+            "dpi": int(dens.group(1)) if dens else 0,
+            "type": kind.group(1) if kind else "?",
+            "trusted": "FLAG_TRUSTED" in seg,
+            "ours": (name.group(1) if name else "").startswith(VD_PREFIX),
+        })
+    return res
+
+
+def display_packages():
+    """display id -> packages with a task there, topmost first.
+
+    Reduced ON THE DEVICE. `dumpsys activity activities` runs to ~100 KB on
+    this phone and exactly two line shapes in it matter; shipping the rest
+    back is the large read this file already keeps a checksum for, paid for
+    nothing.
+    """
+    rc, out = dev_shell(
+        "dumpsys activity activities 2>/dev/null | "
+        "grep -E '^Display #|ActivityRecord'", timeout=45)
+    if rc != 0 or not out:
+        return {}
+    res, cur = {}, None
+    for line in out.splitlines():
+        m = re.match(r"Display #(\d+)", line.strip())
+        if m:
+            cur = int(m.group(1))
+            res.setdefault(cur, [])
+            continue
+        if cur is None:
+            continue
+        a = _ACT_REC.search(line)
+        if a and a.group(1) not in res[cur]:
+            res[cur].append(a.group(1))
+    return res
+
+
+def package_display(pkg, tasks=None):
+    """Which display already hosts a package, or None."""
+    tasks = display_packages() if tasks is None else tasks
+    for d, pkgs in tasks.items():
+        if pkg in pkgs:
+            return d
+    return None
+
+
+def guard_one_display(pkg, target=None):
+    """Refuse to put an app on a second display. THE invariant here.
+
+    A virtual display multiplies screens; it does not multiply apps. There is
+    one process, one logged-in account and one notification stream behind a
+    package no matter how many displays are pointed at it — so the same app
+    on two displays is two drivers in one conversation, which is precisely
+    what the lease exists to prevent, arrived at from a direction the lease
+    cannot see. Cheaper to make it impossible than to detect it afterwards.
+
+    PHONE_NO_DISPLAY_GUARD exists for the same reason PHONE_NO_LEASE does:
+    a deliberate override is better than a workaround somebody invents.
+    """
+    if os.environ.get("PHONE_NO_DISPLAY_GUARD"):
+        return
+    target = display_id() if target is None else target
+    where = package_display(pkg)
+    if where is not None and where != target:
+        die("%s is already open on display %d — one app, one display. "
+            "Either drive it there (`phone --display %d ...`), or close it "
+            "first (`phone --display %d key back`)."
+            % (pkg, where, where, where), 5)
+
+
+def resumed_probe():
+    """The device command that says what is in front — ON OUR DISPLAY.
+
+    `dumpsys activity activities | grep -m1 ResumedActivity` was exactly
+    right while a phone had one display: the first match in the dump was the
+    only one there was. With several, dumpsys prints a section per display
+    and the first match is whichever section it printed first — so a launch
+    on display 4 gets verified against display 0, and an app sitting there
+    perfectly is reported as "did not open". Which is worse than it sounds:
+    cmd_msg gates SENDING on this check.
+    """
+    # Display 0 is scoped too, and that is not symmetry for its own sake:
+    # dumpsys prints VIRTUAL displays before the built-in one, so the bare
+    # `grep -m1` stopped meaning "display 0" the moment a virtual display
+    # existed. Measured: with a clock on display 5, `phone foreground`
+    # reported the clock as the phone's foreground app while the person was
+    # looking at their launcher.
+    return ("dumpsys activity activities | "
+            "awk '/^Display #%d /{on=1;next} /^Display #/{on=0} on' | "
+            "grep -m1 ResumedActivity" % display_id())
+
+
+def _display_by(which):
+    """Find a display by id or by holder name."""
+    ds = displays()
+    for d in ds:
+        if str(d["id"]) == str(which) or d["name"] == which:
+            return d
+    die("no display %r (have: %s)"
+        % (which, ", ".join("%d:%s" % (d["id"], d["name"]) for d in ds)), 2)
+
+
+def _display_name(display):
+    d = _display_by(display)
+    if d["type"] == "OVERLAY":
+        die("display %s is a VISIBLE display, and those have no framebuffer "
+            "of their own — Android composites them onto the built-in screen, "
+            "so there is nothing to grab in isolation. Its TREE reads fine "
+            "(`phone --display %s look`) and taps land in its own coordinate "
+            "space; for pixels, screenshot the built-in screen (`phone "
+            "screen`) and you will see it as the window it is."
+            % (display, display), 4)
+    if not d["ours"]:
+        die("display %s is not one of ours (%r) — only a holder we started "
+            "can be read or released this way" % (display, d["name"]), 2)
+    return d["name"]
+
+
+def _vd_capture(display):
+    """A PNG of a virtual display, from the holder that owns it.
+
+    `screencap -d` cannot do this, and that is not a bug in this function.
+    screencap addresses SurfaceFlinger's PHYSICAL display ids — a different
+    namespace from the WM ids that `am start --display` and `input -d` speak
+    — and a virtual display has no physical id at all, so the flag quietly
+    hands back the built-in screen or nothing. The holder owns the Surface;
+    it is the only process that can read those pixels back.
+    """
+    name = _display_name(display)
+    # /sdcard, NOT /data/local/tmp, and that is about who can read it back.
+    # A PNG cannot come home through shelld: its protocol is text with a
+    # sentinel, which is the whole reason `screen` is a BINARY_VERB. /sdcard
+    # is the one place the device shell can write and the Termux app can
+    # read, so the bytes ride an ssh `cat` — the same hop the APK takes in
+    # android/phonebridge/build.sh, for the same reason.
+    remote = "/sdcard/.phone/vdshot-%d-%d.png" % (os.getpid(),
+                                                  int(time.time() * 1000))
+    rc, out = vd_client(name, "cap %s" % remote)
+    if rc != 0:
+        die("display %s produced no frame (%s). A virtual display renders "
+            "only when its content changes, so a display nothing has been "
+            "launched on has never drawn."
+            % (display, (out or "").strip() or "no reply"), 4)
+    dev_shell("chmod 644 %s" % remote, timeout=15)
+    device = os.environ.get("PHONE_DEVICE")
+    if device:
+        if not _DEV_RE.match(device):
+            die("bad device name %r" % device, 2)
+        pr = subprocess.run(["ssh", "-o", "BatchMode=yes",
+                             "-o", "ConnectTimeout=8", device,
+                             "cat %s" % remote],
+                            capture_output=True, timeout=120)
+        data = pr.stdout if pr.returncode == 0 else b""
+    else:
+        data = dev_read(remote, want_bytes=True)
+    dev_shell("rm -f %s" % remote, timeout=15)
+    if data and not data.startswith(PNG_MAGIC):
+        die("display %s returned %d bytes that are not a PNG — the read did "
+            "not survive the trip" % (display, len(data)), 4)
+    return data
+
+
+def display_filter(remote, d):
+    """Cut ONE display's section out of a --windows dump, on the device.
+
+    Not a nicety — a correctness fix. A --windows dump of this phone with two
+    extra displays measured 121 KB, and the checked read failed four attempts
+    running: the large-read corruption documented in docs/phone-map.md, which
+    starts around 8 KB and does not improve with size. Shipping only the
+    section that was asked for is both a smaller read AND the only one whose
+    size does not grow with how many OTHER displays happen to exist.
+
+    sed, not awk: the dump is a single line, so this is substring surgery
+    rather than line work, and sed's leftmost-longest rule does exactly the
+    right thing at both ends — a greedy `.*` before the open tag consumes
+    everything up to it, and `</display>.*` matches from the FIRST close tag
+    to the end of the line.
+    """
+    return ("{ printf '<displays>'; "
+            "sed -e 's|.*<display id=\"%d\">|<display id=\"%d\">|' "
+            "-e 's|</display>.*|</display>|' %s; "
+            "printf '</displays>'; }" % (d, d, remote))
+
+
+def _hierarchy_for_display(text, display):
+    """One display's windows, merged into a single <hierarchy>.
+
+    `uiautomator dump --windows` answers with <displays><display id=N><window>
+    and a <hierarchy> per window — and it lists windows TOP-FIRST: the status
+    bar (layer 1) arrives before the application window (layer 0). Every
+    reader below this line assumes the opposite, because inside a view
+    hierarchy a LATER sibling is drawn on top, and that is what
+    topmost_clickable_at resolves occlusion with. Merging in document order
+    would therefore tell the tap resolver that the status bar is UNDERNEATH
+    the app, and the first thing to break would be a tap near the top of the
+    screen silently landing on the wrong thing.
+
+    So the windows go out bottom-first: by layer ascending where every window
+    declares one, and reversed document order where they do not.
+    """
+    if "<displays" not in (text or "")[:200]:
+        return text                     # a plain single-display dump
+    root = ET.fromstring(text)
+    if root.tag != "displays":
+        return text
+    want = str(display)
+    target = None
+    for d in root.findall("display"):
+        if (d.get("id") or "") == want:
+            target = d
+            break
+    if target is None:
+        die("display %s is not in the dump — it may have been released while "
+            "this was running" % want, 4)
+    wins = target.findall("window")
+
+    def layer(w):
+        try:
+            return int(w.get("layer"))
+        except (TypeError, ValueError):
+            return None
+
+    if wins and all(layer(w) is not None for w in wins):
+        wins = sorted(wins, key=layer)
+    else:
+        wins = list(reversed(wins))
+    parts, rotation = [], "0"
+    for w in wins:
+        h = w.find("hierarchy")
+        if h is None:
+            continue
+        rotation = h.get("rotation") or rotation
+        for child in list(h):
+            parts.append(ET.tostring(child, encoding="unicode"))
+    if not parts:
+        die("display %s has no windows to read" % want, 4)
+    return '<hierarchy rotation="%s">%s</hierarchy>' % (rotation,
+                                                        "".join(parts))
+
+
+OVERLAY_SETTING = "overlay_display_devices"
+
+
+def overlay_specs():
+    """The overlay displays Android is currently asked to make.
+
+    Separated by `;`, not `,` — verified on the device, because `,` is what
+    separates a display's FLAGS (`1080x2400/420,own_content_only`) and the
+    two are easy to confuse from the docs alone.
+    """
+    rc, out = dev_shell("settings get global %s" % OVERLAY_SETTING, timeout=20)
+    raw = (out or "").strip()
+    if rc != 0 or not raw or raw == "null":
+        return []
+    return [x for x in (p.strip() for p in raw.split(";")) if x]
+
+
+def write_overlay_specs(specs):
+    val = ";".join(specs)
+    return dev_shell("settings put global %s %s"
+                     % (OVERLAY_SETTING, val if val else "null"), timeout=20)
+
+
+def cmd_display(args):
+    need_shell()
+    if args.action == "ls":
+        tasks = display_packages()
+        for d in displays():
+            apps = [p for p in tasks.get(d["id"], [])
+                    if p != "com.android.systemui"]
+            print("%-3d %-12s %5dx%-5d dpi %-4s %-9s %s%s"
+                  % (d["id"], d["name"][:12] or "-", d["w"], d["h"],
+                     d["dpi"] or "?", d["type"].lower(),
+                     "" if d["trusted"] else "untrusted ",
+                     ", ".join(apps[:3]) if apps else "-"))
+        return 0
+
+    if args.action == "create" and args.visible:
+        # A display the PERSON can see. Not a virtual display at all — an
+        # OVERLAY display, which Android renders as a floating window on the
+        # built-in screen. That makes it the opposite trade from `create`:
+        # visible and in the way, rather than invisible and out of it.
+        #
+        # It is a real display, not a mirror: it has its own launcher, its
+        # own resumed activity, and `look`/`tap` reach it (measured — four
+        # taps on a calculator there produced 7789). Use it to SHOW work, not
+        # to hide it.
+        phys = [d for d in displays() if d["id"] == 0]
+        m = re.match(r"^(\d+)x(\d+)$", args.size or "")
+        if args.size and not m:
+            die("--size wants WxH, e.g. 1080x2400", 2)
+        w = int(m.group(1)) if m else (phys[0]["w"] if phys else 1080)
+        h = int(m.group(2)) if m else (phys[0]["h"] if phys else 2400)
+        dpi = args.dpi or (phys[0]["dpi"] if phys else 420)
+        before = {d["id"] for d in displays() if d["type"] == "OVERLAY"}
+        specs = overlay_specs()
+        specs.append("%dx%d/%d" % (w, h, dpi))
+        write_overlay_specs(specs)
+        for _ in range(20):
+            time.sleep(0.5)
+            now = [d for d in displays() if d["type"] == "OVERLAY"]
+            fresh = [d for d in now if d["id"] not in before]
+            if fresh:
+                record("display", {"action": "create", "kind": "overlay",
+                                   "size": "%dx%d" % (w, h)}, "act",
+                       "display %d" % fresh[0]["id"])
+                print(fresh[0]["id"])
+                return 0
+        write_overlay_specs(overlay_specs()[:-1])
+        die("the overlay display never appeared", 4)
+
+    if args.action == "create":
+        rc, out = dev_shell("ls %s 2>/dev/null" % VD_JAR, timeout=20)
+        if rc != 0 or not (out or "").strip():
+            die("no display holder on this phone. Build and stage it: "
+                "android/vdisplay/build.sh install", 3)
+        m = re.match(r"^(\d+)x(\d+)$", args.size or "")
+        if args.size and not m:
+            die("--size wants WxH, e.g. 1080x2400", 2)
+        base = displays()
+        phys = [d for d in base if d["id"] == 0]
+        w = int(m.group(1)) if m else (phys[0]["w"] if phys else 1080)
+        h = int(m.group(2)) if m else (phys[0]["h"] if phys else 2400)
+        dpi = args.dpi or (phys[0]["dpi"] if phys else 420)
+        taken = {d["name"] for d in base}
+        n = 1
+        while "%s%d" % (VD_PREFIX, n) in taken:
+            n += 1
+        name = "%s%d" % (VD_PREFIX, n)
+        log = "/data/local/tmp/%s.log" % name
+        # setsid, and it is load-bearing. shelld kills its shell's whole
+        # PROCESS GROUP on a deadline and on shutdown, and a holder started
+        # with a bare `&` is in that group — so the display would vanish the
+        # next time any unrelated command timed out. A new session puts it
+        # out of reach of that kill.
+        script = (
+            "rm -f {log}; "
+            "CLASSPATH={jar} setsid app_process / {main} "
+            "--size {w}x{h} --dpi {dpi} --name {name} --socket {name} "
+            "> {log} 2>&1 < /dev/null & "
+            "i=0; while [ $i -lt 80 ]; do [ -s {log} ] && break; "
+            "sleep 0.25; i=$((i+1)); done; cat {log}"
+        ).format(log=log, jar=VD_JAR, main=VD_MAIN, w=w, h=h, dpi=dpi,
+                 name=name)
+        rc, out = dev_shell(script, timeout=90)
+        got = re.search(r"^display (\d+)$", out or "", re.M)
+        if not got:
+            die("the holder did not come up:\n%s"
+                % ((out or "").strip() or "(nothing on stdout or stderr)"), 4)
+        did = int(got.group(1))
+        record("display", {"action": "create", "name": name, "size":
+                           "%dx%d" % (w, h), "dpi": dpi}, "act",
+               "display %d" % did)
+        print(did)
+        return 0
+
+    if args.action == "move":
+        if not args.which:
+            die("move what? (an app name or package)", 2)
+        pkg = pkg_of(args.which) or args.which
+        if not package_present(pkg):
+            die("%s is not installed on this device" % args.which, 4)
+        to = args.to if args.to is not None else display_id()
+        ds = {d["id"] for d in displays()}
+        if to not in ds:
+            die("no display %d (have: %s)"
+                % (to, ", ".join(str(x) for x in sorted(ds))), 2)
+        where = package_display(pkg)
+        if where == to:
+            print("%s is already on display %d" % (pkg, to))
+            return 0
+        rc, out = dev_shell(
+            "cmd package resolve-activity --brief -c "
+            "android.intent.category.LAUNCHER %s | tail -1" % pkg, timeout=30)
+        comp = (out or "").strip().splitlines()[-1].strip() if out else ""
+        if rc != 0 or "/" not in comp:
+            die("could not resolve a launcher activity for %s" % pkg, 4)
+        # This is the SAME `am start --display` that `open` refuses to do
+        # implicitly. It is allowed here because moving is what the caller
+        # asked for: the task goes to the new display and leaves the old one,
+        # which is the only behaviour Android offers. Naming it is the
+        # difference between a move and an accident.
+        dev_shell("am start --display %d -n %s" % (to, comp), timeout=30)
+        landed = False
+        for _ in range(10):
+            time.sleep(0.5)
+            if package_display(pkg) == to:
+                landed = True
+                break
+        record("display", {"action": "move", "pkg": pkg, "from": where,
+                           "to": to}, "act",
+               "moved" if landed else "did not move")
+        if not landed:
+            die("%s did not move to display %d (it may refuse a secondary "
+                "display)" % (pkg, to), 4)
+        print("%s: display %s -> %d"
+              % (pkg, "?" if where is None else where, to))
+        return 0
+
+    if args.action == "rm":
+        if args.all:
+            # Overlays go too: --all means "put the phone back", and an
+            # overlay left behind is a window sitting on the person's screen.
+            if [d for d in displays() if d["type"] == "OVERLAY"]:
+                write_overlay_specs([])
+                print("released every overlay display")
+            ds = [d for d in displays() if d["ours"]]
+            if not ds:
+                print("no displays of ours to release")
+                return 0
+            for d in ds:
+                vd_client(d["name"], "bye")
+                record("display", {"action": "rm", "name": d["name"]}, "act",
+                       "released %d" % d["id"])
+                print("released %d (%s)" % (d["id"], d["name"]))
+            return 0
+        if not args.which:
+            die("which display? (an id, a name, or --all)", 2)
+        d = _display_by(args.which)
+        if d["type"] == "OVERLAY":
+            # An overlay is a line in a settings string, not a process. Its
+            # NAME carries its position — "Overlay #2" is the second entry —
+            # which is the only handle Android gives back.
+            n = re.search(r"#(\d+)", d["name"] or "")
+            specs = overlay_specs()
+            i = int(n.group(1)) - 1 if n else -1
+            if not n or i < 0 or i >= len(specs):
+                die("cannot place %r among the %d overlay entries"
+                    % (d["name"], len(specs)), 4)
+            del specs[i]
+            write_overlay_specs(specs)
+            record("display", {"action": "rm", "kind": "overlay",
+                               "name": d["name"]}, "act",
+                   "released %d" % d["id"])
+            print("released %d (%s)" % (d["id"], d["name"]))
+            return 0
+        if not d["ours"]:
+            die("display %d is %r, not a holder we started — refusing"
+                % (d["id"], d["name"]), 2)
+        rc, out = vd_client(d["name"], "bye")
+        if rc != 0:
+            die("the holder for display %d did not answer (%s). It may have "
+                "died already; check `phone display ls`."
+                % (d["id"], (out or "").strip()), 4)
+        record("display", {"action": "rm", "name": d["name"]}, "act",
+               "released %d" % d["id"])
+        print("released %d (%s)" % (d["id"], d["name"]))
+        return 0
+
+    die("unknown display action %r" % args.action, 2)
 
 
 # ------------------------------------------------------- driving from afar
@@ -1094,7 +1721,14 @@ def remote_exec(device, argv_rest):
     #
     # Only when one is actually set. A bare PHONE_ACTOR= would override
     # whatever the device would otherwise have said with an empty string.
-    remote = " ".join(_sh.quote(w) for w in (["phone"] + argv_rest))
+    # The display travels WITH the verb. main() strips --display before the
+    # subparser sees it, so a remote hop that did not put it back would run
+    # `screen` or `say` against display 0 while the caller believed it was
+    # addressing their own.
+    head = ["phone"]
+    if display_id():
+        head += ["--display", str(display_id())]
+    remote = " ".join(_sh.quote(w) for w in (head + argv_rest))
     # A remote hop is the LAST hop. If the device's own environment names a
     # device — a two-phone fleet, a stray export in a profile — the far
     # `phone` would hop onward, and every row it returned would still be
@@ -1137,15 +1771,22 @@ def link_argv(device, local_sock):
         "-o", "ServerAliveInterval=20",
         "-o", "StreamLocalBindUnlink=yes",
         "-f", "-N",
-        "-L", "%s:%s" % (local_sock, REMOTE_SOCK),
+        "-L", "%s:%s" % (local_sock, _laned(REMOTE_SOCK)),
         device,
     ]
 
 
 def local_sock_for(device):
-    return os.path.join(
+    """Where a device's shell appears on THIS machine.
+
+    Laned as well as per-device. It was per-device only, and ensure_link
+    unlinks this path when its probe fails — so a second driver bringing up
+    its own forward would delete the first driver's live socket and the first
+    driver would simply stop being able to reach the phone.
+    """
+    return _laned(os.path.join(
         os.environ.get("TMPDIR", "/tmp").rstrip("/"),
-        "phone-%s.sock" % re.sub(r"[^a-z0-9]+", "-", device.lower()))
+        "phone-%s.sock" % re.sub(r"[^a-z0-9]+", "-", device.lower())))
 
 
 def ensure_link(device):
@@ -1160,15 +1801,43 @@ def ensure_link(device):
         os.unlink(sock)
     except OSError:
         pass
-    rc, _out = run(link_argv(device, sock), timeout=30)
-    if rc != 0:
-        die("could not reach %s (is it on the network, and is "
-            "`phone shelld` running there?)" % device, 3)
-    for _ in range(20):
-        probe = shelld_call("true", timeout=6)
-        if probe is not None and probe[0] == 0:
+    def forward_and_probe():
+        rc, _out = run(link_argv(device, sock), timeout=30)
+        if rc != 0:
+            return False
+        for _ in range(20):
+            p = shelld_call("true", timeout=6)
+            if p is not None and p[0] == 0:
+                return True
+            time.sleep(0.4)
+        return False
+
+    if forward_and_probe():
+        return sock
+    if lane():
+        # A lane's daemon is nobody's job to have started, and the failure
+        # arrives LATE: `ssh -L` binds the local socket whether or not the
+        # remote one exists, so rc is 0 and only the probe finds out. Hence
+        # the retry hangs off the probe, not off the exit status.
+        #
+        # The default lane is deliberately left alone — auto-starting THAT
+        # would change what every existing caller does — but a driver that
+        # asked for its own shell has, by asking, said it wants one.
+        import shlex as _sh
+        run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", device,
+             "PHONE_LANE=%s %s shelld --start"
+             % (_sh.quote(lane()),
+                _sh.quote(os.environ.get("PHONE_REMOTE_BIN") or "phone"))],
+            timeout=40)
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+        if forward_and_probe():
             return sock
-        time.sleep(0.4)
+        die("lane %r has no shell on %s. The `phone` there must be new "
+            "enough to know PHONE_LANE — check `ssh %s phone --help`."
+            % (lane(), device, device), 3)
     die("forwarded %s but its shell never answered" % device, 3)
 
 
@@ -1176,7 +1845,8 @@ def ensure_link(device):
 
 class El(object):
     __slots__ = ("text", "desc", "rid", "cls", "clickable", "enabled",
-                 "bounds", "parent")
+                 "bounds", "parent", "order", "checkable", "checked",
+                 "scrollable")
 
     def __init__(self):
         self.text = ""
@@ -1187,6 +1857,25 @@ class El(object):
         self.enabled = True
         self.bounds = (0, 0, 0, 0)
         self.parent = None
+        # Position in a pre-order walk. Siblings are dumped in draw order, so
+        # a HIGHER order generally means DRAWN LATER — i.e. on top. That is
+        # what makes the occlusion check below possible.
+        self.order = 0
+        self.checkable = False
+        self.checked = False
+        self.scrollable = False
+
+    def contains(self, x, y):
+        x1, y1, x2, y2 = self.bounds
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def has_ancestor(self, other):
+        cur = self
+        while cur is not None:
+            if cur is other:
+                return True
+            cur = cur.parent
+        return False
 
     @property
     def center(self):
@@ -1230,6 +1919,11 @@ def parse_ui(xml_text):
             el.cls = a.get("class") or ""
             el.clickable = (a.get("clickable") == "true")
             el.enabled = (a.get("enabled") != "false")
+            el.checkable = (a.get("checkable") == "true")
+            el.checked = (a.get("checked") == "true"
+                          or a.get("selected") == "true")
+            el.scrollable = (a.get("scrollable") == "true")
+            el.order = len(out)
             m = _BOUNDS.match(a.get("bounds") or "")
             if m:
                 el.bounds = tuple(int(g) for g in m.groups())
@@ -1253,10 +1947,106 @@ def clickable_target(el):
     return None
 
 
-def get_ui(from_file=None):
+def topmost_clickable_at(els, x, y):
+    """Which element will actually RECEIVE a tap at (x, y).
+
+    Android delivers a touch to the topmost view under the finger. uiautomator
+    dumps siblings in draw order, so among the clickable elements whose bounds
+    contain the point, the one with the highest `order` is the one drawn last
+    and therefore on top.
+
+    This is a heuristic, not a law — `elevation` can reorder drawing without
+    reordering the tree. It is here because the alternative was measured on a
+    real screen and was worse: on a DoorDash store page the floating cart bar
+    (`button_orderCart`) sits over the menu list, and the centre of the menu
+    row for "Chinese Bhel" is INSIDE it. Tapping that centre opened the cart.
+    On an item page the "Add to order" footer covers the third option row, so
+    tapping the option would have ADDED THE ITEM instead of selecting it.
+    Both were watched, not inferred.
+    """
+    best = None
+    for el in els:
+        if not (el.clickable and el.enabled):
+            continue
+        if not el.contains(x, y):
+            continue
+        if best is None or el.order > best.order:
+            best = el
+    return best
+
+
+def safe_point(target, els, prefer=None):
+    """A point inside `target` that a tap will actually reach.
+
+    Returns (x, y, contested). There is ALWAYS a point — the centre, if
+    nothing better exists — because refusing to act is its own failure. A
+    non-None `contested` means every candidate point had a later clickable
+    element over it, so the tap may land there instead: a warning, not a veto.
+
+    It is a warning and not a veto because the "later means on top" rule is
+    only mostly true. Measured on DoorDash's Compose home screen: the bottom
+    navigation bar appears at tree index 16 and a promo card at index 159,
+    with the card's bounds swallowing the nav — yet the nav is what is drawn
+    on top and what a finger hits. Compose emits semantics nodes in traversal
+    order, not draw order, so on those surfaces the rule simply does not hold.
+    Vetoing there would make a perfectly tappable button unreachable, which is
+    a worse failure than the one this function exists to prevent.
+
+    Candidates, in order: the target's own centre — which is what `find` has
+    always returned and what callers and tests expect — then the centre of the
+    element whose label matched, then a vertical sweep through the target's
+    box. Order matters: the centre stays the answer on an ordinary screen, and
+    the other two only come into play when the centre is covered. The sweep is
+    what rescues a row that is half-hidden by a footer, because there is
+    usually a clear band above the occluder and the label lives in it.
+    """
+    cands = [target.center]
+    if prefer is not None and prefer.bounds != (0, 0, 0, 0):
+        cx, cy = prefer.center
+        if target.contains(cx, cy):
+            cands.append((cx, cy))
+    x1, y1, x2, y2 = target.bounds
+    mx = (x1 + x2) // 2
+    if y2 > y1:
+        # Sweep top-down: the readable part of a partly covered row is
+        # almost always its top, because footers rise from the bottom.
+        step = max(8, (y2 - y1) // 12)
+        yy = y1 + max(4, (y2 - y1) // 24)
+        while yy < y2:
+            cands.append((mx, yy))
+            yy += step
+    seen = set()
+    blocker = None
+    for (cx, cy) in cands:
+        if (cx, cy) in seen:
+            continue
+        seen.add((cx, cy))
+        top = topmost_clickable_at(els, cx, cy)
+        if top is None or top is target or top.has_ancestor(target):
+            return cx, cy, None
+        if blocker is None:
+            blocker = top
+    cx, cy = target.center
+    return cx, cy, blocker
+
+
+def el_handle(el):
+    """A short name for an element, for messages a human has to act on."""
+    if el is None:
+        return "?"
+    if el.rid:
+        return el.rid.split("/")[-1]
+    lab = (el.text or el.desc or "").strip()
+    if lab:
+        return "%r" % lab[:30]
+    return el.cls.split(".")[-1] or "?"
+
+
+def get_ui(from_file=None, display=None):
+    d = display_id() if display is None else display
     if from_file:
         with open(from_file, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+            return _hierarchy_for_display(f.read(), d) if d else f.read()
     need_shell()
     # uiautomator writes to a file on the device; /dev/tty streams it back.
     # A UNIQUE path per call, so a stale tree is structurally impossible.
@@ -1269,9 +2059,15 @@ def get_ui(from_file=None):
     # it saw it.
     remote = "/sdcard/.phone/ui-%d-%d.xml" % (os.getpid(),
                                               int(time.time() * 1000))
+    # --windows ONLY off the built-in screen. It is the sole way to reach a
+    # second display's tree — plain `uiautomator dump` has no display
+    # selector and always answers for display 0 — but it also returns a
+    # different document (every window, not the focused one), so using it
+    # everywhere would quietly change what the existing screen tier sees.
+    # Display 0 keeps the dump it has always had.
     rc, marker = dev_shell(
-        "mkdir -p /sdcard/.phone && uiautomator dump %s && echo __DUMP_OK__"
-        % remote, timeout=60)
+        "mkdir -p /sdcard/.phone && uiautomator dump %s %s && echo __DUMP_OK__"
+        % ("--windows" if d else "", remote), timeout=60)
     if rc != 0 or "__DUMP_OK__" not in (marker or ""):
         die("could not read the UI tree: the dump failed (screen off, a "
             "secure window, or the screen never went idle). Nothing guessed.",
@@ -1286,17 +2082,25 @@ def get_ui(from_file=None):
     # the transport was at fault.
     #
     # Measured before this change: look/ui failed 4 of 8 on a complex screen.
-    _rc, out = dev_shell_checked("cat %s" % remote, timeout=90)
+    _rc, out = dev_shell_checked(
+        display_filter(remote, d) if d else "cat %s" % remote, timeout=90)
     dev_shell("rm -f %s" % remote, timeout=15)
     if "<hierarchy" not in (out or ""):
         die("could not read the UI tree (the screen may be off or secure)", 4)
+    if d:
+        return _hierarchy_for_display(out, d)
     i = out.index("<hierarchy")
     j = out.rfind("</hierarchy>")
     return out[i:j + len("</hierarchy>")] if j > 0 else out[i:]
 
 
 def cmd_ui(args):
-    els = parse_ui(get_ui(args.from_file))
+    xml = get_ui(args.from_file)
+    if getattr(args, "save", None):
+        with open(args.save, "w", encoding="utf-8") as f:
+            f.write(xml)
+        sys.stderr.write("wrote %d bytes to %s\n" % (len(xml), args.save))
+    els = parse_ui(xml)
     lines = []
     for el in els:
         lab = el.label
@@ -1354,6 +2158,8 @@ def cmd_look(args):
         key = tgt.center if tgt else ("nolabel", lab)
         if key in seen:
             continue
+        if args.grep and args.grep.lower() not in lab.lower():
+            continue
         if el.text:
             seen.add(key)
         else:
@@ -1364,11 +2170,44 @@ def cmd_look(args):
                    for e in els):
                 continue
             seen.add(key)
+        # Checkable state, because a settings row or an option group is
+        # unreadable without it: "Mild Spicy" and "Mild Spicy, selected" are
+        # different facts and cost the same to print.
+        box = ""
+        cur = el
+        for _ in range(4):
+            if cur is None:
+                break
+            if cur.checkable:
+                box = "[x] " if cur.checked else "[ ] "
+                break
+            cur = cur.parent
+        if not box and tgt is not None:
+            # The checkable node is usually a SIBLING of the label, not an
+            # ancestor: a DoorDash option row is a RadioButton next to a
+            # TextView inside one container. Walking up alone finds nothing
+            # and silently drops the one bit that matters — which option is
+            # currently selected.
+            if tgt.checkable:
+                box = "[x] " if tgt.checked else "[ ] "
+            else:
+                for other in els:
+                    if other.checkable and other.has_ancestor(tgt):
+                        box = "[x] " if other.checked else "[ ] "
+                        break
+        tail = ""
+        if getattr(args, "ids", False) and tgt is not None and tgt.rid:
+            tail = "   #%s" % tgt.rid.split("/")[-1]
         if tgt is None:
-            lines.append("           %s" % lab)
+            lines.append("           %s%s" % (box, lab))
         else:
             x, y = tgt.center
-            lines.append("%-11s %s" % ("%d,%d" % (x, y), lab))
+            # Warn where a tap would NOT land on what is being named. This is
+            # the difference between a coordinate and a usable coordinate.
+            sx, sy, occ = safe_point(tgt, els, prefer=el)
+            lines.append("%-11s %s%s%s%s"
+                         % ("%d,%d" % (sx, sy), box, lab, tail,
+                            ("  ?under %s" % el_handle(occ)) if occ else ""))
         if args.limit and len(lines) >= args.limit:
             lines.append("           … more (use `ui` for everything)")
             break
@@ -1380,47 +2219,114 @@ def cmd_look(args):
     return 0
 
 
+def match_els(els, query=None, rid=None, exact=False, after=None):
+    """Every element matching a query, best matches first.
+
+    Ranked: exact text/desc, then resource-id suffix, then substring. Ranking
+    matters more than it looks. `find "Medium Spicy"` on a DoorDash item page
+    matched a *reorder card* whose description happened to read "Medium
+    Spicy", not the Spice Level option a person meant — because the card came
+    first in the tree. Substring matching makes near-misses look like hits, so
+    the caller needs to be able to see the whole candidate set (`--all`) and
+    to cut it down (`--after`) rather than trust position.
+    """
+    start = 0
+    if after:
+        a = after.lower()
+        for el in els:
+            if a in (el.text or "").lower() or a in (el.desc or "").lower():
+                start = el.order
+                break
+        else:
+            return []
+    pool = [el for el in els if el.order >= start]
+    if rid:
+        hits = [el for el in pool if el.rid == rid or
+                el.rid.split("/")[-1] == rid]
+        return [(el, clickable_target(el)) for el in hits]
+    if not query:
+        return []
+    q = query.lower()
+    exact_hits, rid_hits, part_hits = [], [], []
+    for el in pool:
+        t, d = (el.text or "").lower(), (el.desc or "").lower()
+        if t == q or d == q:
+            exact_hits.append(el)
+        elif el.rid and el.rid.split("/")[-1].lower() == q:
+            rid_hits.append(el)
+        elif not exact and (q in t or q in d):
+            part_hits.append(el)
+    out = []
+    for el in exact_hits + rid_hits + part_hits:
+        out.append((el, clickable_target(el)))
+    return out
+
+
+def resolve_tap(els, query=None, rid=None, exact=False, after=None,
+                raw=False):
+    """One matching element -> the point to tap. (x, y, matched, target, why).
+
+    On failure x is None and `why` says which of the three different failures
+    it was: nothing matched, it matched nothing tappable, or it matched
+    something tappable that another view is sitting on top of. Those need
+    three different responses from the caller and used to be one message.
+    """
+    cands = match_els(els, query, rid, exact, after)
+    if not cands:
+        return None, None, None, None, "nothing on screen matches"
+    contested = None
+    for matched, target in cands:
+        if target is None:
+            continue
+        if raw:
+            x, y = target.center
+            return x, y, matched, target, None
+        x, y, occ = safe_point(target, els, prefer=matched)
+        if occ is None:
+            return x, y, matched, target, None
+        # Keep looking: another candidate may be in the clear. Remember the
+        # first contested one so there is still an answer if none are.
+        if contested is None:
+            contested = (x, y, matched, target, occ)
+    if contested is not None:
+        x, y, matched, target, occ = contested
+        return (x, y, matched, target,
+                "!contested: %s may be under %s — check what moved, or "
+                "scroll it clear" % (el_handle(target), el_handle(occ)))
+    return None, None, cands[0][0], None, "matched, but nothing tappable"
+
+
 def cmd_find(args):
     els = parse_ui(get_ui(args.from_file))
-    if args.rid:
-        # A resource-id is the stable handle: labels get translated and
-        # reworded between app releases, ids rarely move.
-        for el in els:
-            if el.rid == args.rid:
-                tgt = clickable_target(el)
-                if tgt is not None:
-                    x, y = tgt.center
-                    print("%d %d" % (x, y))
-                    return 0
-        sys.stderr.write("phone: no enabled, tappable element with id %r\n"
-                         % args.rid)
-        return 1
-    if not args.query:
-        die("give a label to find, or --id <resource-id>", 2)
-    q = args.query.lower()
-    exact, partial = [], []
-    for el in els:
-        for hay in (el.text, el.desc):
-            if not hay:
+    if args.all:
+        cands = match_els(els, args.query, args.rid, args.exact, args.after)
+        if not cands:
+            sys.stderr.write("phone: nothing matches\n")
+            return 1
+        for matched, target in cands[:args.limit or 20]:
+            if target is None:
+                print("%-11s %-26s %s" % ("-", "(not tappable)",
+                                          matched.label[:44]))
                 continue
-            h = hay.lower()
-            if h == q:
-                exact.append(el)
-            elif q in h:
-                partial.append(el)
-            break
-    for pool in (exact, partial):
-        for el in pool:
-            tgt = clickable_target(el)
-            if tgt is not None:
-                x, y = tgt.center
-                print("%d %d" % (x, y))
-                return 0
-    # An honest miss. Never print coordinates we are not sure about: a wrong
-    # tap on someone's phone is worse than no tap.
-    sys.stderr.write("phone: no enabled, tappable element matching %r\n"
-                     % args.query)
-    return 1
+            x, y, occ = safe_point(target, els, prefer=matched)
+            print("%-11s %-26s %s%s"
+                  % ("%d,%d" % (x, y), el_handle(target),
+                     matched.label[:44],
+                     ("   ?under %s" % el_handle(occ)) if occ else ""))
+        return 0
+    if not args.query and not args.rid:
+        die("give a label to find, or --id <resource-id>", 2)
+    x, y, _m, _t, why = resolve_tap(els, args.query, args.rid, args.exact,
+                                    args.after, args.raw)
+    if x is None:
+        # An honest miss. Never print coordinates we are not sure about: a
+        # wrong tap on someone's phone is worse than no tap.
+        sys.stderr.write("phone: %s (%r)\n" % (why, args.query or args.rid))
+        return 1
+    if why:
+        sys.stderr.write("phone: %s\n" % why.lstrip("!"))
+    print("%d %d" % (x, y))
+    return 0
 
 
 # ------------------------------------------------------- notification inbox
@@ -1565,14 +2471,316 @@ def cmd_notify(args):
     return 0 if rc == 0 else 1
 
 
+_SCREEN = {}
+
+
+def screen_size(display=None):
+    """(w, h) in pixels for a display, read once per display per process.
+
+    KEYED, because the cache predates displays. One global (w, h) was right
+    while there was one screen and silently wrong the moment a second one had
+    different dimensions: scroll_plan would compute a swipe from the physical
+    screen's height and send it to a display of another size, landing the
+    gesture somewhere nobody asked for.
+    """
+    d = display_id() if display is None else display
+    if d not in _SCREEN:
+        rc, out = dev_shell("wm size%s" % (" -d %d" % d if d else ""),
+                            timeout=20)
+        m = re.search(r"(\d+)x(\d+)", out or "")
+        _SCREEN[d] = (int(m.group(1)), int(m.group(2))) if m else (1080, 2400)
+    return _SCREEN[d]
+
+
 def cmd_tap(args):
     need_shell()
-    rc, _ = dev_shell("input tap %d %d" % (args.x, args.y))
-    # `input tap` exits 0 whether or not anything handled the event, so the
-    # record says what we actually know: it was dispatched.
-    record("tap", "%d,%d" % (args.x, args.y), "act",
-           "dispatched" if rc == 0 else "failed")
+    if args.label or args.rid:
+        # Resolve and tap in ONE call. Two calls (`find` then `tap`) is not
+        # just twice the wall clock — the coordinates have to travel out to
+        # the caller's reasoning and back, which on a model is the expensive
+        # half. It also closes the window in which the screen can move
+        # between reading a coordinate and using it.
+        els = parse_ui(get_ui())
+        x, y, matched, target, why = resolve_tap(
+            els, args.label, args.rid, args.exact, args.after, args.raw)
+        if x is None:
+            record("tap", args.label or args.rid, "act", "not found: %s" % why)
+            sys.stderr.write("phone: %s (%r)\n"
+                             % (why, args.label or args.rid))
+            return 1
+        if why:
+            sys.stderr.write("phone: %s\n" % why.lstrip("!"))
+        rc, _ = dev_shell("input%s tap %d %d" % (_dflag(), x, y))
+        record("tap", "%s -> %d,%d" % (args.label or args.rid, x, y), "act",
+               "dispatched" if rc == 0 else "failed")
+        sys.stderr.write("tapped %s at %d,%d (%s)\n"
+                         % (el_handle(target), x, y, matched.label[:40]))
+    else:
+        if args.x is None or args.y is None:
+            die("give x and y, or --label/--id", 2)
+        x, y = args.x, args.y
+        rc, _ = dev_shell("input%s tap %d %d" % (_dflag(), x, y))
+        # `input tap` exits 0 whether or not anything handled the event, so
+        # the record says what we actually know: it was dispatched.
+        record("tap", "%d,%d" % (x, y), "act",
+               "dispatched" if rc == 0 else "failed")
+    if rc == 0 and args.look:
+        time.sleep(args.settle)
+        return cmd_look(argparse.Namespace(
+            limit=args.limit, all=False, from_file=None, grep=None,
+            ids=False))
     return 0 if rc == 0 else 1
+
+
+def cmd_swipe(args):
+    need_shell()
+    rc, _ = dev_shell("input%s swipe %d %d %d %d %d"
+                      % (_dflag(), args.x1, args.y1, args.x2, args.y2,
+                         args.ms))
+    record("swipe", "%d,%d->%d,%d" % (args.x1, args.y1, args.x2, args.y2),
+           "act", "dispatched" if rc == 0 else "failed")
+    return 0 if rc == 0 else 1
+
+
+def scroll_plan(direction, w, h, frac):
+    """The gesture for one screenful, kept inside a band that is safe to
+    touch. The outer ~12% top and bottom belong to the status bar, the
+    gesture-navigation strip, and whatever the app floats over its own
+    content — starting or ending a drag there gets the swipe eaten by the
+    system instead of scrolling the list."""
+    top, bot = int(h * 0.30), int(h * 0.80)
+    mid_x = w // 2
+    span = int((bot - top) * frac)
+    if direction in ("down", "up"):
+        # "down" means SEE WHAT IS FURTHER DOWN, which is a finger swipe UP.
+        if direction == "down":
+            return (mid_x, top + span, mid_x, top)
+        return (mid_x, top, mid_x, top + span)
+    left, right = int(w * 0.15), int(w * 0.85)
+    y = h // 2
+    if direction == "right":
+        return (right, y, left, y)
+    return (left, y, right, y)
+
+
+def cmd_scroll(args):
+    need_shell()
+    w, h = screen_size()
+    x1, y1, x2, y2 = scroll_plan(args.direction, w, h, args.frac)
+    for _ in range(max(1, args.n)):
+        rc, _ = dev_shell("input%s swipe %d %d %d %d %d"
+                          % (_dflag(), x1, y1, x2, y2, args.ms))
+        if rc != 0:
+            record("scroll", args.direction, "act", "failed")
+            return 1
+        time.sleep(args.pause)
+    record("scroll", "%s x%d" % (args.direction, max(1, args.n)), "act",
+           "dispatched")
+    if args.look:
+        return cmd_look(argparse.Namespace(
+            limit=args.limit, all=False, from_file=None, grep=None,
+            ids=False))
+    return 0
+
+
+_SCAN_SH = r"""
+p=%(path)s
+mkdir -p /sdcard/.phone
+i=0
+prev=
+while [ $i -lt %(max)d ]; do
+  rm -f "$p"
+  uiautomator dump %(win)s "$p" >/dev/null 2>&1
+  if [ ! -s "$p" ]; then echo "__SCANDUMPFAIL__ $i"; break; fi
+  if tr '<' '
+' < "$p" %(only)s| grep -qi -- %(needle)s; then
+    echo "__SCANFOUND__ $i"
+    %(emit)s
+    break
+  fi
+  # A list that has stopped moving is the bottom of the list. Without this a
+  # scan spends the rest of its budget re-dumping the same final screen at
+  # ~3.1s each, then reports "not found" as if it had searched that far.
+  sig=$(tr '<' '
+' < "$p" %(only)s| wc -c)
+  if [ "$sig" = "$prev" ]; then echo "__SCANBOTTOM__ $i"; break; fi
+  prev="$sig"
+  input%(d)s swipe %(sx1)d %(sy1)d %(sx2)d %(sy2)d %(ms)d
+  i=$((i+1))
+  sleep %(pause)s
+done
+# NO `exit` anywhere above. dev_shell_checked wraps this in `{ ...; } > file`
+# and then prints the md5 of that file; `exit` leaves the shell before the
+# checksum is ever computed, and every scan comes back as "the read did not
+# survive the trip". The loop has to fall off its own end.
+[ $i -ge %(max)d ] && echo "__SCANEXHAUSTED__ %(max)d"
+rm -f "$p"
+"""
+
+
+def cmd_scan(args):
+    """Scroll until a label is on screen — with the LOOP ON THE DEVICE.
+
+    A dump costs ~3.1s and it is all on-device work; shipping the 25-60 KB of
+    XML back costs ~0.5s (measured 2026-08-30). So a controller-side
+    scroll-look-decide loop pays a full round trip and a full model turn per
+    screenful to learn one bit: is it here yet. Ten screens of a restaurant
+    menu is a minute of wall clock and ten turns of reasoning.
+
+    Putting the loop on the phone pays the dumps once, ships ONE tree back —
+    the one that matched — and returns a tap point from it. The caller spends
+    one turn regardless of how far it had to scroll.
+    """
+    need_shell()
+    import shlex
+    w, h = screen_size()
+    x1, y1, x2, y2 = scroll_plan(args.direction, w, h, args.frac)
+    d = display_id()
+    # A UNIQUE path, interpolated HERE. It was `scan-$$.xml`, and `$$` expands
+    # in the DEVICE shell — which under shelld is the one persistent shell, so
+    # every caller got the same pid and therefore the same filename. Two scans
+    # at once wrote and `rm -f`ed each other's dump. Every other temp path in
+    # this file already interpolates the controller's pid in Python; this one
+    # was written when a scan meant a fresh shell.
+    path = "/sdcard/.phone/scan-%d-%d.xml" % (os.getpid(),
+                                              int(time.time() * 1000))
+    # Off the built-in screen the dump has to carry every display, so both the
+    # needle test and the "has the list stopped moving" signature have to be
+    # narrowed to ours first — otherwise a match on ANOTHER display ends the
+    # scan, and another display's clock ticking looks like our list scrolling.
+    only = ("| awk -v d='display id=\"%d\"' "
+            "'index($0,d)==1{on=1;next} "
+            "on&&index($0,\"/display\")==1{on=0} on' " % d) if d else ""
+    script = _SCAN_SH % {
+        "max": max(1, args.max), "needle": shlex.quote(args.query),
+        "sx1": x1, "sy1": y1, "sx2": x2, "sy2": y2, "ms": args.ms,
+        "pause": args.pause, "path": path, "d": _dflag(),
+        "win": "--windows" if d else "", "only": only,
+        "emit": display_filter('"$p"', d) if d else 'cat "$p"',
+    }
+    # .strip() is load-bearing. dev_shell_checked wraps its argument as
+    # `{ <cmd> ; } > file`, so a command ending in a newline becomes a line
+    # that begins with a bare `;` — a syntax error that kills the shell, and
+    # the failure surfaces as "the read did not survive the trip", which
+    # points at the transport instead of at the quoting.
+    rc, out = dev_shell_checked(script.strip(),
+                                timeout=30 + 8 * max(1, args.max))
+    out = out or ""
+    if "__SCANDUMPFAIL__" in out:
+        die("the UI dump failed while scanning (screen off, a secure window, "
+            "or the screen never went idle). Nothing guessed.", 4)
+    if "__SCANBOTTOM__" in out:
+        m = re.search(r"__SCANBOTTOM__ (\d+)", out)
+        n = int(m.group(1)) if m else 0
+        record("scan", args.query, "read",
+               "not found; list ended after %d screens" % n)
+        sys.stderr.write("phone: %r is not here. The list stopped moving "
+                         "after %d screen(s), so that was the end of it — "
+                         "not the end of my budget.\n" % (args.query, n))
+        return 1
+    if "__SCANEXHAUSTED__" in out:
+        n = max(1, args.max)
+        record("scan", args.query, "read", "not found in %d screens" % n)
+        sys.stderr.write("phone: %r is not in the next %d screens going %s. "
+                         "The list may be shorter than that, or the label "
+                         "may differ — `look` to see what is there.\n"
+                         % (args.query, n, args.direction))
+        return 1
+    m = re.search(r"__SCANFOUND__ (\d+)", out)
+    if not m or "<hierarchy" not in out:
+        die("scan returned nothing readable", 4)
+    if d and "<displays" not in out:
+        die("scan asked display %d for a windows dump and got a "
+            "single-display one — the device build may predate --windows" % d,
+            4)
+    screens = int(m.group(1))
+    if d:
+        # --windows returns every display; take ours, merged bottom-first.
+        i = out.index("<displays")
+        j = out.rfind("</displays>")
+        xml = _hierarchy_for_display(
+            out[i:j + len("</displays>")] if j > 0 else out[i:], d)
+    else:
+        i = out.index("<hierarchy")
+        j = out.rfind("</hierarchy>")
+        xml = out[i:j + len("</hierarchy>")] if j > 0 else out[i:]
+    els = parse_ui(xml)
+    x, y, matched, target, why = resolve_tap(
+        els, args.query, None, args.exact, args.after, args.raw)
+    where = "on screen %d" % screens if screens else "without scrolling"
+    if x is None:
+        record("scan", args.query, "read", "found %s but %s" % (where, why))
+        sys.stderr.write("phone: found %r %s, but %s\n"
+                         % (args.query, where, why))
+        return 1
+    record("scan", args.query, "read", "found %s at %d,%d" % (where, x, y))
+    if args.tap:
+        rc, _ = dev_shell("input%s tap %d %d" % (_dflag(), x, y))
+        record("tap", "%s -> %d,%d" % (args.query, x, y), "act",
+               "dispatched" if rc == 0 else "failed")
+        sys.stderr.write("found %s; tapped %s at %d,%d\n"
+                         % (where, el_handle(target), x, y))
+        if rc == 0 and args.look:
+            time.sleep(args.settle)
+            return cmd_look(argparse.Namespace(
+                limit=args.limit, all=False, from_file=None, grep=None,
+                ids=False))
+        return 0 if rc == 0 else 1
+    sys.stderr.write("found %s\n" % where)
+    print("%d %d" % (x, y))
+    return 0
+
+
+def focused_field():
+    """What is currently accepting text. (state, description).
+
+    state is "yes" (a real, enabled, focused editor), "no" (nothing is), or
+    "unknown" (could not tell — never treat that as "no").
+
+    This exists because `input text` writes into the void without complaining.
+    Measured on DoorDash: an item's Special Instructions box is rendered with
+    enabled="false" and the store's refusal message sitting in it as text,
+    while STILL reporting clickable="true". Tapping it and typing leaves the
+    field untouched and every exit code zero, so `type` reported delivering
+    every character it had thrown away. An actuator that lies about what it
+    typed is worse than one that fails.
+
+    ~0.65s against ~3.1s for a UI dump, so it is cheap enough to always do.
+    """
+    # Three lines mention mServedView and only one of them is the answer.
+    # The standalone `  mServedView=<View>{...}` line is it. The
+    # mFallbackInputConnection line above carries `mServedView=null` as a
+    # substring at all times, so `grep -m1 mServedView` returns the wrong
+    # line and reads "nothing focused" while a field is focused. And when
+    # nothing IS focused the standalone line is absent altogether rather than
+    # reading null — so its absence is the signal, not its contents.
+    rc, out = dev_shell("dumpsys input_method 2>/dev/null | "
+                        "grep 'mServedView'", timeout=20)
+    if rc != 0 or not (out or "").strip():
+        return "unknown", "could not read the input-method state"
+    lines = (out or "").strip().splitlines()
+    served = [ln for ln in lines if re.match(r"^\s*mServedView=", ln)]
+    if not served:
+        if any("mServedView=null" in ln for ln in lines):
+            return "no", "no view is accepting text"
+        return "unknown", "input-method state was not in a shape we know"
+    m = re.search(r"mServedView=([\w.$]+)\{[0-9a-f]+ (\S+) (\S+)",
+                  served[0])
+    if not m:
+        if "mServedView=null" in served[0]:
+            return "no", "no view is accepting text"
+        return "unknown", "input-method state was not in a shape we know"
+    cls, flags1, flags2 = m.group(1), m.group(2), m.group(3)
+    short = cls.rsplit(".", 1)[-1]
+    if short.endswith("DecorView"):
+        return "no", "the window itself is served, not a text field"
+    enabled = len(flags1) > 2 and flags1[2] == "E"
+    focused = len(flags2) > 1 and flags2[1] == "F"
+    if not enabled:
+        return "no", "%s is disabled" % short
+    if not focused:
+        return "no", "%s is not focused" % short
+    return "yes", short
 
 
 def cmd_type(args):
@@ -1601,24 +2809,35 @@ def cmd_type(args):
         if clean != w:
             dropped.append(w)
         argv.append(clean)
+    # (command, characters it delivers). NOT a bare list of strings: the
+    # delivery count used to be recovered with step.startswith("input text ")
+    # plus a plan.index() scan, and a display selector puts "-d 4" between
+    # `input` and `text` — so the prefix stops matching, every count comes
+    # back zero, and a type that worked is reported as one that failed.
     plan = []
     for i, w in enumerate(argv):
         if i:
-            plan.append("input keyevent 62")     # KEYCODE_SPACE
+            plan.append(("input%s keyevent 62" % _dflag(), 0))  # SPACE
         if w:
-            plan.append("input text %s" % shlex.quote(w))
+            plan.append(("input%s text %s" % (_dflag(), shlex.quote(w)),
+                         len(w)))
     if args.print_only:
-        print("\n".join(plan))
+        print("\n".join(step for step, _n in plan))
         return 0
     need_shell()
+    state, why = ("unknown", "") if args.force else focused_field()
+    if state == "no":
+        record("type", {"requested": text[:200]}, "act",
+               "refused: nothing is accepting text (%s)" % why)
+        die("nothing is accepting text right now — %s. Tap the field first; "
+            "if it is disabled the app is refusing input, not you. "
+            "(`--force` types anyway.)" % why, 4)
     delivered = 0
-    for step in plan:
+    for step, chars in plan:
         rc, _ = dev_shell(step)
         if rc != 0:
             break
-        if step.startswith("input text "):
-            delivered += len(argv[len([p for p in plan[:plan.index(step) + 1]
-                                       if p.startswith("input text ")]) - 1])
+        delivered += chars
     want = sum(len(w) for w in argv)
     ok_all = (delivered == want and not dropped)
     record("type", {"requested": text[:200], "sent": " ".join(argv)[:200]},
@@ -1638,7 +2857,7 @@ def cmd_key(args):
         k = "KEYCODE_" + k
     if not re.match(r"^KEYCODE_[A-Z0-9_]+$", k):
         die("bad keycode %r" % args.key, 2)
-    rc, _ = dev_shell("input keyevent %s" % k)
+    rc, _ = dev_shell("input%s keyevent %s" % (_dflag(), k))
     record("key", k, "act", "dispatched" if rc == 0 else "failed")
     return 0 if rc == 0 else 1
 
@@ -1660,8 +2879,8 @@ def launch(url, print_only=False):
     # meant both died with "Termux:API missing and adb is down" on a phone
     # where the shell was up the whole time.
     if not os.environ.get("PHONE_NO_DEVICE") and have_shell():
-        rc, _out = dev_shell("am start -a android.intent.action.VIEW -d %s"
-                             % json.dumps(url), timeout=30)
+        rc, _out = dev_shell("am start%s -a android.intent.action.VIEW -d %s"
+                             % (_amflag(), json.dumps(url)), timeout=30)
         if rc == 0:
             return 0
     die("could not open %s (Termux:API missing and adb is down)" % url, 3)
@@ -1713,6 +2932,12 @@ def cmd_open(args):
     if p and have_shell():
         if args.print_url:
             die("%r launches as an app, not a link" % target, 2)
+        # One app, one display — checked BEFORE the launch, because
+        # `am start --display` on a package that already has a task
+        # elsewhere does not create a second copy: it MOVES the task, and
+        # the driver working on the old display loses its app mid-turn with
+        # no error anywhere.
+        guard_one_display(p)
         # Resolve first. `monkey` prints "No activities found to run" for an
         # uninstalled package and still exits 0, so `open whatsapp` reported
         # success on a phone with no WhatsApp — the most common first step of
@@ -1725,13 +2950,12 @@ def cmd_open(args):
         if rc != 0 or "/" not in comp:
             record("open", target, "act", "failed: not installed")
             die("%s is not installed on this device" % target, 4)
-        dev_shell("am start -n %s" % comp, timeout=30)
+        dev_shell("am start%s -n %s" % (_amflag(), comp), timeout=30)
         # Verify it actually came forward rather than assuming.
         landed = False
         for _ in range(8):
             time.sleep(0.5)
-            _rc, fg = dev_shell("dumpsys activity activities | grep -m1 "
-                                "ResumedActivity", timeout=20)
+            _rc, fg = dev_shell(resumed_probe(), timeout=20)
             if p in (fg or ""):
                 landed = True
                 break
@@ -1830,8 +3054,8 @@ def cmd_play(args):
     if use_intent:
         # -p pins the package and lets Android resolve the component, so we
         # do not have to carry activity names that change between releases.
-        cmd = ("am start -a %s --es query %s -p %s"
-               % (PLAY_FROM_SEARCH, json.dumps(query), pkg))
+        cmd = ("am start%s -a %s --es query %s -p %s"
+               % (_amflag(), PLAY_FROM_SEARCH, json.dumps(query), pkg))
         if args.dry_run:
             print("tier=intent  %s" % cmd)
             record("play", {"query": query, "app": app, "tier": "intent",
@@ -2022,7 +3246,7 @@ def cmd_msg(args):
     # supply the button we tap.
     fg_ok = False
     while _t.time() < deadline and not fg_ok:
-        rc, out = dev_shell("dumpsys activity activities", timeout=30)
+        rc, out = dev_shell(resumed_probe(), timeout=30)
         if "com.whatsapp" in (out or ""):
             fg_ok = True
             break
@@ -2052,7 +3276,7 @@ def cmd_msg(args):
                        "sent": False}, "act", "failed: no send button")
         die("cannot send: never found the send button (the chat may not have "
             "opened). Nothing was sent.", 4)
-    dev_shell("input tap %d %d" % coords)
+    dev_shell("input%s tap %d %d" % (_dflag(), coords[0], coords[1]))
     _t.sleep(2.0)
     # Verify rather than assume: after a send the composer empties, so the
     # send affordance disappears. If it is still there, the tap did not take.
@@ -2086,9 +3310,26 @@ def cmd_msg(args):
 #
 # Reached the same way shelld is: an ssh forward. Same idiom, one more port.
 
-BRIDGE_PORT = 8127
+BRIDGE_PORT = 8127              # on the DEVICE. Bridge.java binds this one.
 BRIDGE_TOKEN_PATH = ("/sdcard/Android/data/com.aadarwal.phonebridge/files/"
                      "token")
+
+
+def bridge_local_port():
+    """The LOCAL end of the forward, which is per-driver.
+
+    It used to be BRIDGE_PORT at both ends, and ensure_bridge opened with an
+    unconditional `pkill -f "L 8127:127.0.0.1:8127"` — a kill of whatever
+    forward was there, including another driver's. Two drivers on one
+    controller meant the second one cut the first's bridge mid-`await_turn`,
+    and the first saw only a socket that stopped answering.
+
+    The device end stays fixed because the app binds it; only this end moves.
+    """
+    try:
+        return int(os.environ.get("PHONE_BRIDGE_PORT") or BRIDGE_PORT)
+    except ValueError:
+        return BRIDGE_PORT
 
 
 def bridge_token(device=None):
@@ -2113,13 +3354,17 @@ def ensure_bridge(device):
         return True
     if not _DEV_RE.match(device or ""):
         die("bad device name %r" % device, 2)
+    lp = bridge_local_port()
+    # Scoped to OUR port. A dead forward of ours still holds the port and
+    # would make the fresh one fail; another driver's forward is none of our
+    # business.
     subprocess.run(["pkill", "-f",
-                    "L %d:127.0.0.1:%d" % (BRIDGE_PORT, BRIDGE_PORT)],
+                    "L %d:127.0.0.1:%d" % (lp, BRIDGE_PORT)],
                    capture_output=True)
     rc, _ = run(["ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
                  "-o", "ControlMaster=no", "-o", "ControlPath=none",
                  "-o", "ServerAliveInterval=20", "-f", "-N",
-                 "-L", "%d:127.0.0.1:%d" % (BRIDGE_PORT, BRIDGE_PORT),
+                 "-L", "%d:127.0.0.1:%d" % (lp, BRIDGE_PORT),
                  device], timeout=25)
     if rc != 0:
         return False
@@ -2135,7 +3380,7 @@ def _bridge_alive():
     c = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
     c.settimeout(1.5)
     try:
-        c.connect(("127.0.0.1", BRIDGE_PORT))
+        c.connect(("127.0.0.1", bridge_local_port()))
         return True
     except OSError:
         return False
@@ -2668,6 +3913,22 @@ def _media_moved(before, after, action):
 def cmd_screen(args):
     need_shell()
     out_path = args.out or "screen.png"
+    if display_id():
+        # A virtual display cannot be screencap'd — see _vd_capture. The
+        # holder that owns the Surface is the only process that can read it.
+        data = _vd_capture(display_id())
+        if not data:
+            die("display %d produced no image" % display_id(), 4)
+        if out_path == "-":
+            record("screen", "stdout", "read")
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            return 0
+        with open(out_path, "wb") as f:
+            f.write(data)
+        record("screen", out_path, "read")
+        print(out_path)
+        return 0
     # Same split, and the same unique-path rule: a screenshot that failed
     # must not hand back the last one that worked.
     remote = "/sdcard/.phone/shot-%d-%d.png" % (os.getpid(),
@@ -2764,7 +4025,7 @@ def cmd_apps(args):
 
 def cmd_foreground(args):
     need_shell()
-    rc, out = dev_shell("dumpsys activity activities", timeout=40)
+    rc, out = dev_shell(resumed_probe(), timeout=40)
     m = re.search(r"ResumedActivity.*?([a-zA-Z0-9_.]+/[a-zA-Z0-9_.$]+)",
                   out or "")
     print(m.group(1) if m else "(unknown)")
@@ -3811,27 +5072,87 @@ def build_parser():
 
     s = add("ui", cmd_ui, "read the screen as tappable text")
     s.add_argument("--grep")
+    s.add_argument("--save", help="also write the raw UI XML to this file")
     s.add_argument("--from", dest="from_file")
 
     s = add("look", cmd_look, "the screen, summarised for an agent")
     s.add_argument("--limit", type=int, default=40)
     s.add_argument("--all", action="store_true",
                    help="include things that cannot be tapped")
+    s.add_argument("--grep", help="only lines whose label contains this")
+    s.add_argument("--ids", action="store_true",
+                   help="append each target's resource-id")
     s.add_argument("--from", dest="from_file")
 
     s = add("find", cmd_find, "label -> tap coordinates (or fail loudly)")
     s.add_argument("query", nargs="?")
     s.add_argument("--id", dest="rid", help="match a resource-id instead")
+    s.add_argument("--all", action="store_true",
+                   help="list every candidate instead of picking one")
+    s.add_argument("--exact", action="store_true",
+                   help="exact label match only, no substrings")
+    s.add_argument("--after", metavar="LABEL",
+                   help="only match below this label in the tree — how you "
+                        "say WHICH 'Medium Spicy' you meant")
+    s.add_argument("--raw", action="store_true",
+                   help="geometric centre, skipping the occlusion check")
+    s.add_argument("--limit", type=int, default=20)
     s.add_argument("--from", dest="from_file")
 
-    s = add("tap", cmd_tap, "tap x y")
-    s.add_argument("x", type=int)
-    s.add_argument("y", type=int)
+    s = add("tap", cmd_tap, "tap x y, or --label/--id in one call")
+    s.add_argument("x", type=int, nargs="?")
+    s.add_argument("y", type=int, nargs="?")
+    s.add_argument("--label", help="find this and tap it, in one round trip")
+    s.add_argument("--id", dest="rid", help="find this resource-id and tap it")
+    s.add_argument("--after", metavar="LABEL")
+    s.add_argument("--exact", action="store_true")
+    s.add_argument("--raw", action="store_true")
+    s.add_argument("--look", action="store_true",
+                   help="look at the screen afterwards, in the same call")
+    s.add_argument("--settle", type=float, default=2.0)
+    s.add_argument("--limit", type=int, default=40)
+
+    s = add("swipe", cmd_swipe, "swipe x1 y1 x2 y2")
+    s.add_argument("x1", type=int)
+    s.add_argument("y1", type=int)
+    s.add_argument("x2", type=int)
+    s.add_argument("y2", type=int)
+    s.add_argument("--ms", type=int, default=260)
+
+    s = add("scroll", cmd_scroll, "scroll the screen a page at a time")
+    s.add_argument("direction", nargs="?", default="down",
+                   choices=["down", "up", "left", "right"])
+    s.add_argument("--n", type=int, default=1, help="how many screenfuls")
+    s.add_argument("--frac", type=float, default=0.85,
+                   help="fraction of the safe band to travel")
+    s.add_argument("--ms", type=int, default=260)
+    s.add_argument("--pause", type=float, default=0.45)
+    s.add_argument("--look", action="store_true")
+    s.add_argument("--limit", type=int, default=40)
+
+    s = add("scan", cmd_scan, "scroll until a label appears — loop on device")
+    s.add_argument("query")
+    s.add_argument("--max", type=int, default=8,
+                   help="how many screenfuls to try before giving up")
+    s.add_argument("--direction", default="down",
+                   choices=["down", "up", "left", "right"])
+    s.add_argument("--tap", action="store_true", help="tap it when found")
+    s.add_argument("--look", action="store_true")
+    s.add_argument("--after", metavar="LABEL")
+    s.add_argument("--exact", action="store_true")
+    s.add_argument("--raw", action="store_true")
+    s.add_argument("--frac", type=float, default=0.85)
+    s.add_argument("--ms", type=int, default=260)
+    s.add_argument("--pause", type=float, default=0.5)
+    s.add_argument("--settle", type=float, default=2.0)
+    s.add_argument("--limit", type=int, default=40)
 
     s = add("type", cmd_type, "type text into the focused field")
     s.add_argument("text", nargs="+")
     s.add_argument("--print-only", action="store_true", dest="print_only",
                    help="show the exact input-text argv instead of typing")
+    s.add_argument("--force", action="store_true",
+                   help="type even when no field looks focused")
 
     s = add("key", cmd_key, "send a keyevent (BACK, HOME, ENTER, ...)")
     s.add_argument("key")
@@ -3974,10 +5295,25 @@ def build_parser():
     s.add_argument("--start", action="store_true")
     s.add_argument("--stop", action="store_true")
 
-    s = add("lease", cmd_lease, "who is driving this phone")
+    s = add("lease", cmd_lease, "who is driving this display")
     s.add_argument("action", choices=["acquire", "release", "status"])
     s.add_argument("--as", dest="holder")
     s.add_argument("--ttl", type=int, default=DEFAULT_TTL)
+
+    s = add("display", cmd_display, "screens to drive, beyond the built-in one")
+    s.add_argument("action", choices=["ls", "create", "rm", "move"])
+    s.add_argument("which", nargs="?",
+                   help="rm: a display id or holder name; move: an app")
+    s.add_argument("--to", type=int,
+                   help="move: the display to move it to (default --display)")
+    s.add_argument("--size", help="WxH (default: the built-in screen's)")
+    s.add_argument("--dpi", type=int,
+                   help="density (default: the built-in screen's)")
+    s.add_argument("--all", action="store_true",
+                   help="rm: release every display we hold")
+    s.add_argument("--visible", action="store_true",
+                   help="create: a display the PERSON can see, as a floating "
+                        "window on the built-in screen")
 
     s = add("sh", cmd_sh, "run a raw device-shell command")
     s.add_argument("--checked", action="store_true",
@@ -4017,6 +5353,7 @@ def main(argv):
     # it is consumed before the subcommand parser ever sees the arguments.
     argv = list(argv)
     device = os.environ.get("PHONE_DEVICE")
+    display = os.environ.get("PHONE_DISPLAY")
     print_link = False
     print_plan = False
     out = []
@@ -4031,6 +5368,17 @@ def main(argv):
             device = a.split("=", 1)[1]
             i += 1
             continue
+        # --display is a GLOBAL for the same reason --device is: it changes
+        # which SCREEN every verb addresses, and the subcommand parsers know
+        # nothing about it.
+        if a == "--display" and i + 1 < len(argv):
+            display = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--display="):
+            display = a.split("=", 1)[1]
+            i += 1
+            continue
         if a == "--print-link":
             print_link = True
             i += 1
@@ -4042,6 +5390,16 @@ def main(argv):
         out.append(a)
         i += 1
     argv = [argv[0]] + out
+
+    if display not in (None, ""):
+        try:
+            _DISPLAY[0] = int(display)
+        except ValueError:
+            die("--display wants a display id (see `phone display ls`)", 2)
+        if _DISPLAY[0]:
+            # So a verb that hops to the device carries the same screen, and
+            # so anything this process spawns inherits it.
+            os.environ["PHONE_DISPLAY"] = str(_DISPLAY[0])
 
     if print_link:
         if not device:
@@ -4055,7 +5413,12 @@ def main(argv):
     # split trace — can see it without threading it through every signature.
     if device:
         os.environ["PHONE_DEVICE"] = device
-    if device and verb0 in BINARY_VERBS:
+    # ...unless a display was named. The remote hop exists because a PNG
+    # cannot cross shelld, but a virtual display's PNG comes from the holder
+    # over ssh anyway — and the device's own `phone` may well be an older
+    # build that has never heard of --display, in which case hopping turns a
+    # working capture into "unrecognized arguments".
+    if device and verb0 in BINARY_VERBS and not display_id():
         # Pull our own --out aside: the device streams to ITS stdout, and the
         # file is written HERE. Leaving --out in the remote argv would write
         # a screenshot onto the phone and print a path that does not exist

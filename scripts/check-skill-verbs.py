@@ -8,21 +8,33 @@ honest as it keeps moving.
 
 Prints "agree", or the verbs the skill invents. Exits non-zero on mismatch.
 """
+import glob
 import os
 import re
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOC = os.path.join(HERE, "docs", "phone-skill.md")
-CLI = os.path.join(HERE, "lib", "phone")
+# Every CLI a skill is allowed to teach, longest name FIRST so that
+# "phone-pay mint" is not read as the `phone` verb "pay". A skill that teaches
+# a second binary drifts from it exactly as easily as from the first, and
+# `pay` was unchecked entirely until this list existed.
+CLIS = [
+    ("phone-pay", os.path.join(HERE, "lib", "phone-pay")),
+    ("phone", os.path.join(HERE, "lib", "phone")),
+]
+# EVERY skill that teaches `phone`, not just the general one. An app skill
+# invents verbs just as easily as the charter does, and a per-app manual is
+# read by an agent that has no reason to doubt it.
+DOCS = sorted(glob.glob(os.path.join(HERE, "plugins", "*", "skills", "*",
+                                     "SKILL.md")))
 
 # Words that follow "phone" in prose but are not verbs.
 NOT_VERBS = {"itself", "is", "and", "or", "the", "log", "verbs"}
 
 
-def documented():
-    text = open(DOC, encoding="utf-8").read()
+def documented(doc):
+    text = open(doc, encoding="utf-8").read()
     # Skip the YAML frontmatter: its description is prose about the phone,
     # not instruction about verbs ("drive an Android phone as an agent"
     # otherwise reads as a verb called "as").
@@ -38,14 +50,18 @@ def documented():
     inline = re.findall(r"`([^`\n]+)`", text)
     found = set()
     for chunk in blocks + inline:
-        for m in re.finditer(r"(?:^|\s)phone (?:--\S+ \S+ )*([a-z][a-z-]*)",
-                             chunk, re.M):
-            found.add(m.group(1))
-    return {v for v in found if v not in NOT_VERBS}
+        for name, _path in CLIS:
+            pat = r"(?:^|\s)%s (?:--\S+ \S+ )*([a-z][a-z-]*)" % re.escape(name)
+            for m in re.finditer(pat, chunk, re.M):
+                found.add((name, m.group(1)))
+            # Blank out what matched, so `phone-pay fill` is not then re-read
+            # by the shorter `phone` pattern on the same text.
+            chunk = re.sub(r"(?:^|\s)%s\b" % re.escape(name), " ", chunk)
+    return {(c, v) for (c, v) in found if v not in NOT_VERBS}
 
 
-def implemented():
-    out = subprocess.run([sys.executable, CLI, "--help"],
+def implemented_one(path):
+    out = subprocess.run([sys.executable, path, "--help"],
                          capture_output=True, text=True).stdout
     known = set()
     # argparse lists subcommands inside {a,b,c}
@@ -57,16 +73,36 @@ def implemented():
     return known
 
 
+def implemented():
+    out = set()
+    for name, path in CLIS:
+        if not os.path.exists(path):
+            continue
+        out |= {(name, v) for v in implemented_one(path)}
+    return out
+
+
 def main():
-    doc, cli = documented(), implemented()
+    cli = implemented()
     if not cli:
         print("could not read the CLI's verbs")
         return 2
-    missing = sorted(doc - cli)
-    if missing:
-        print("skill teaches verbs the CLI lacks: %s" % ", ".join(missing))
+    if not DOCS:
+        print("no skill documents found")
+        return 2
+    bad = 0
+    for doc in DOCS:
+        name = os.path.basename(os.path.dirname(doc))
+        missing = sorted(documented(doc) - cli)
+        if missing:
+            print("%s teaches verbs the CLI lacks: %s"
+                  % (name, ", ".join("%s %s" % cv for cv in missing)))
+            bad = 1
+    if bad:
         return 1
-    print("agree")
+    print("agree (%s)"
+          % ", ".join(os.path.basename(os.path.dirname(d))
+                      for d in DOCS))
     return 0
 
 

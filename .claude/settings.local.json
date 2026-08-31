@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(command -v adb sdkmanager gradle java kotlinc)",
+      "Read(//Users/aadarwal/Library/Android/**)",
+      "Bash(java -version)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:wiki.macrodroid.com)",
+      "WebFetch(domain:companion.home-assistant.io)",
+      "Bash(ssh *)",
+      "Bash(ssh -V)",
+      "Bash(sudo -n true)",
+      "Bash(nc -z localhost 22)"
+    ]
+  }
+}
