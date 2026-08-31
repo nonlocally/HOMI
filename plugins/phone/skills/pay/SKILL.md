@@ -75,6 +75,12 @@ field on the screen first — `fill` types into whatever is focused, exactly
 like a keyboard. `--digits-only` strips the slash for expiry fields that
 refuse it.
 
+A PCI card widget is not a special case. DoorDash's number field is a
+`com.verygoodsecurity.vgscollect.view.internal.CardInputField`, not a plain
+EditText, and it takes `input text` normally — all four fields filled and read
+back correctly. If a card field does not accept a fill, suspect focus, not the
+widget.
+
 A worked checkout:
 
 ```
@@ -133,9 +139,29 @@ suspect the clock before you suspect the card.
   purchases, no keeping one alive between tasks. `done` when the form is
   submitted or abandoned.
 - **Never fill a field you did not just focus and cannot read back.**
-- **One `--test` rule: if you are practising, pass `--test`.** Testmode
-  credentials cost nothing and behave identically.
+- **Uncheck "make this the default" before saving a minted card, anywhere.**
+  Add-card forms routinely pre-tick something like *Default for DashPass
+  subscription* — DoorDash's is checked on arrival. Pointing a recurring
+  charge at a credential that dies in an hour is a broken subscription you
+  handed the person. If a form offers to remember this card, the answer is no:
+  it is a one-time card and remembering it is the one thing it must not do.
+- **If you are practising, pass `--test` — but see the trap below.**
 - Take the lease before acting: `phone lease acquire --as <you>`.
+
+### `--test` proves the mechanism, not acceptance
+
+A testmode card **will be rejected by a real checkout form**, and the
+rejection looks exactly like a bug you just introduced.
+
+The testmode number issued here, `4000009990001984`, is **not Luhn-valid**:
+its checksum is 57, and 57 mod 10 = 7. Client-side validators check Luhn
+before anything reaches a network, so DoorDash renders *"Invalid card number"*
+under the field — with the digits correctly typed and `chars_typed` matching.
+
+So when practising: `--test` confirms mint, approval, fill, read-back and
+shred. It confirms **nothing** about whether the merchant accepts the card.
+Seeing "Invalid card number" after a testmode fill means the flow worked. Do
+not go hunting for a fill bug, and do not "fix" it by retyping.
 
 ## This skill does not override a per-app boundary
 
@@ -158,6 +184,21 @@ centre at (540,2211) sits **inside** `addToCart_button`, and a menu row's
 centre sits inside the floating cart bar. Both taps exited 0. The same
 accident on a checkout screen taps Place Order — and an approved card in the
 vault is exactly what makes that tap go through.
+
+Checkout makes it worse in a way worth generalising: **an id can be reused
+across screens, so the id does not tell you what the button does.** DoorDash's
+footer is one component, `button_place_order`, on *every* checkout screen — it
+reads `Next` on the delivery step and advances, and `Place order` on the last
+step and spends. `Continue`, `Next`, `Place order` and `Add card` all sit at
+**540,2224**. So guarding on the id paralyses you, trusting the id stops you
+two screens early, and reusing the coordinate buys food. Only the rendered
+label (`textView_prism_button_title`) separates them. **Resolve by visible
+text, every time, and never reuse a coordinate.**
+
+And do not assume an empty wallet fails safe. On this account no *card* is
+saved, but Google Pay is a saved method and is what checkout previews — so a
+stray Place order attempts a real payment rather than erroring out. "They have
+no card on file" is not a safety net.
 
 So the approval gate does **not** cover the mis-tap risk. A per-app skill's
 stopping point is what covers it, which is why that stopping point outranks
