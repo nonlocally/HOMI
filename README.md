@@ -48,6 +48,21 @@ backs it with `codex exec`.
 
 ## Install
 
+**npx (Claude Code + Codex plugin, CLI, MCP):**
+
+```sh
+npx -y @aadarwal/communicate setup     # both ecosystems; --claude / --codex to narrow
+```
+
+Stabilizes the payload to `~/.local/share/communicate/`, adds two keys to
+`~/.claude/settings.json` (backup written first), and registers the Codex
+plugin via the `codex` CLI. New Claude sessions and Codex threads then have the
+skills, the `/agents` command, `communicate` on PATH, and the MCP tools.
+`npx -y @aadarwal/communicate doctor` verifies; `setup --uninstall` reverses.
+The package ships the communicate layer only (no homi plane).
+
+**From source (full CLI including homi):**
+
 ```sh
 git clone git@github.com:aadarwal/communicate.git
 export PATH="$PWD/communicate/bin:$PATH"   # or symlink bin/communicate onto your PATH
