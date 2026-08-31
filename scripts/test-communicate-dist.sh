@@ -60,6 +60,7 @@ echo "6) unit smokes + codex-queue payload test"
 ( cd "$PKG" && node test/mcp-smoke.mjs >/dev/null 2>&1 ) && ok "mcp-smoke" || fail "mcp-smoke"
 ( cd "$PKG" && node test/setup-smoke.mjs >/dev/null 2>&1 ) && ok "setup-smoke" || fail "setup-smoke"
 "$ROOT/scripts/test-codex-queue.sh" >/dev/null 2>&1 && ok "codex-queue" || fail "codex-queue"
+"$ROOT/scripts/test-setup-repo.sh" >/dev/null 2>&1 && ok "setup-repo" || fail "setup-repo"
 rm -f "$PKG/$TARBALL"
 
 [ "$fails" -eq 0 ] && echo "PASS: communicate distribution end to end" || { echo "FAIL: $fails check(s)"; exit 1; }
