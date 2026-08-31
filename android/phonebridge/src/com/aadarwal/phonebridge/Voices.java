@@ -36,6 +36,7 @@ class Voices {
 
     static final String ANDROID = "android";
     static final String SARVAM = "sarvam";
+    static final String XAI = "xai";
 
     private static final String PREFS = "homi";
     // EARS AND MOUTH ARE SEPARATE CHOICES, and the right answers differ.
@@ -56,7 +57,12 @@ class Voices {
     // Paying a network round trip to transcribe English is spending latency
     // for nothing, which is exactly what one shared switch would have done.
     private static final String K_TTS = "voice_tts_provider";
-    private static final String K_SPEAKER = "voice_speaker";
+    // A voice name is remembered PER PROVIDER. Switching from bulbul to grok
+    // and back should return you to the bulbul voice you had, not to a
+    // default — and a single slot cannot hold both, because "eve" is not a
+    // bulbul speaker and "anand" is not an xAI voice.
+    private static final String K_SPK_SARVAM = "voice_speaker";
+    private static final String K_SPK_XAI = "voice_speaker_xai";
     private static final String K_LANG = "voice_turn_lang";
 
     /**
@@ -86,13 +92,19 @@ class Voices {
     private final Context ctx;
     private final Speak androidSpeak;
     private final Voice androidVoice;
+    private final Audio audio;
     private final Sarvam sarvam;
+    private final Xai xai;
 
     private Voices(Context ctx) {
         this.ctx = ctx;
         this.androidSpeak = new Speak(ctx);
         this.androidVoice = new Voice(ctx);
-        this.sarvam = new Sarvam(ctx);
+        // One player shared by both cloud voices, so only one thing can be
+        // speaking and `shut_up` silences whichever it is.
+        this.audio = new Audio();
+        this.sarvam = new Sarvam(ctx, audio);
+        this.xai = new Xai(ctx, audio);
     }
 
     // ---------------------------------------------------------- selection
@@ -109,8 +121,14 @@ class Voices {
      */
     String ttsProvider() {
         String stored = prefs().getString(K_TTS, null);
-        if (stored == null) return sarvam.available() ? SARVAM : ANDROID;
-        if (SARVAM.equals(stored)) return sarvam.available() ? SARVAM : ANDROID;
+        if (XAI.equals(stored) && xai.available()) return XAI;
+        if (SARVAM.equals(stored) && sarvam.available()) return SARVAM;
+        if (ANDROID.equals(stored)) return ANDROID;
+        // No stored choice, or a choice whose key has since gone. Prefer the
+        // cloud voices — they are the reason to have this class — and fall
+        // back to on-device rather than failing every turn.
+        if (sarvam.available()) return SARVAM;
+        if (xai.available()) return XAI;
         return ANDROID;
     }
 
@@ -201,20 +219,42 @@ class Voices {
     }
 
     boolean setTtsProvider(String p) {
-        if (!ANDROID.equals(p) && !SARVAM.equals(p)) return false;
         if (SARVAM.equals(p) && !sarvam.available()) return false;
+        if (XAI.equals(p) && !xai.available()) return false;
+        if (!ANDROID.equals(p) && !SARVAM.equals(p) && !XAI.equals(p)) return false;
         prefs().edit().putString(K_TTS, p).apply();
         return true;
     }
 
+    /** The voice of the ACTIVE provider. Android has one, and it is unnamed. */
     String speaker() {
-        return prefs().getString(K_SPEAKER, Sarvam.DEFAULT_SPEAKER);
+        String p = ttsProvider();
+        if (SARVAM.equals(p)) return prefs().getString(K_SPK_SARVAM, Sarvam.DEFAULT_SPEAKER);
+        if (XAI.equals(p)) return prefs().getString(K_SPK_XAI, Xai.DEFAULT_VOICE);
+        return "";
     }
 
+    /**
+     * Set the voice BY NAME, and move the provider to whichever owns it.
+     *
+     * The two catalogues are disjoint, so a name identifies its provider
+     * without being told — which is what lets the picker be one flat list of
+     * voices instead of a provider screen followed by a voice screen. Nobody
+     * choosing how their phone should sound wants to pick a vendor first.
+     */
     boolean setSpeaker(String s) {
-        if (s == null || !Arrays.asList(Sarvam.SPEAKERS).contains(s)) return false;
-        prefs().edit().putString(K_SPEAKER, s).apply();
-        return true;
+        if (s == null || s.isEmpty()) return false;
+        if (Arrays.asList(Sarvam.SPEAKERS).contains(s)) {
+            if (!sarvam.available()) return false;
+            prefs().edit().putString(K_SPK_SARVAM, s).putString(K_TTS, SARVAM).apply();
+            return true;
+        }
+        if (Arrays.asList(Xai.VOICES).contains(s)) {
+            if (!xai.available()) return false;
+            prefs().edit().putString(K_SPK_XAI, s).putString(K_TTS, XAI).apply();
+            return true;
+        }
+        return false;
     }
 
     /** Whether a Sarvam key is present at all. The voice picker asks, so it
@@ -224,10 +264,17 @@ class Voices {
         return sarvam.available();
     }
 
+    boolean xaiConfigured() {
+        return xai.available();
+    }
+
     /** The personas the ACTIVE provider offers. Android exposes one unnamed
      *  system voice through this bridge; Sarvam exposes 38. */
     List<String> speakers() {
-        return SARVAM.equals(ttsProvider()) ? Sarvam.speakers() : new ArrayList<String>();
+        String p = ttsProvider();
+        if (SARVAM.equals(p)) return Sarvam.speakers();
+        if (XAI.equals(p)) return Xai.voices();
+        return new ArrayList<String>();
     }
 
     // -------------------------------------------------------------- speak
@@ -238,6 +285,18 @@ class Voices {
 
     Map<String, Object> say(String text, int timeoutSeconds, Progress p) {
         String want = ttsProvider();
+        if (XAI.equals(want)) {
+            if (p != null) p.at("SPEAKING", "grok " + speaker());
+            Map<String, Object> r = xai.say(text, speaker(), timeoutSeconds);
+            if (Boolean.TRUE.equals(r.get("ok"))) return r;
+            Log.w(Listener.TAG, "grok failed, falling back: " + r.get("err"));
+            if (p != null) p.at("SPEAKING", "on-device (grok failed)");
+            Map<String, Object> back = androidSpeak.say(text, timeoutSeconds);
+            back.put("provider", ANDROID);
+            back.put("fell_back_from", XAI);
+            back.put("fell_back_because", String.valueOf(r.get("err")));
+            return back;
+        }
         if (SARVAM.equals(want)) {
             if (p != null) p.at("SPEAKING", "bulbul " + speaker());
             Map<String, Object> r = sarvam.say(text, speaker(), ttsLanguageFor(text), timeoutSeconds);
@@ -288,7 +347,7 @@ class Voices {
     }
 
     void stop() {
-        sarvam.stop();
+        audio.stop();          // whichever cloud voice is mid-utterance
         androidSpeak.stop();
     }
 
@@ -303,11 +362,13 @@ class Voices {
         out.put("tts_language", ttsLanguage());
         out.put("stt_mode", sttMode());
         out.put("sarvam_configured", sarvam.available());
+        out.put("xai_configured", xai.available());
         out.put("speakers", speakers());
         Map<String, Object> a = new LinkedHashMap<>(androidSpeak.status());
         out.put("android_tts", a);
         out.put("android_stt", androidVoice.status());
         out.put("sarvam", sarvam.status());
+        out.put("xai", xai.status());
         return out;
     }
 

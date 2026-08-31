@@ -167,6 +167,18 @@ else
   echo "→ no SARVAM_API_KEY — the app will use the on-device voice"
 fi
 
+# The xAI key, same place and same 660 for the same reason.
+if [ -z "${XAI_API_KEY:-}" ] && [ -f "$HERE/../../../voice/x-ai/.env" ]; then
+  XAI_API_KEY="$(sed -n 's/^XAI_API_KEY=//p' "$HERE/../../../voice/x-ai/.env" | head -1)"
+fi
+if [ -n "${XAI_API_KEY:-}" ]; then
+  echo "→ planting the xai key (grok tts)"
+  "$PHONE_BIN" --device "$DEVICE" sh \
+    "printf '%s' '$XAI_API_KEY' > $DATA/xai_key && chmod 660 $DATA/xai_key" >/dev/null
+else
+  echo "→ no XAI_API_KEY — grok voices will not be offered"
+fi
+
 echo "→ granting notification access"
 "$PHONE_BIN" --device "$DEVICE" sh "cmd notification allow_listener $LISTENER" | tail -1
 "$PHONE_BIN" --device "$DEVICE" sh "cmd appops set $PKG ACCESS_RESTRICTED_SETTINGS allow" >/dev/null 2>&1 || true

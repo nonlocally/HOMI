@@ -1,10 +1,8 @@
 package com.aadarwal.phonebridge;
 
 import android.content.Context;
-import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
-import android.media.AudioTrack;
 import android.media.MediaRecorder;
 import android.util.Base64;
 import android.util.Log;
@@ -28,7 +26,6 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Sarvam as a voice provider: Bulbul v3 out, Saaras v4 in.
@@ -101,12 +98,12 @@ class Sarvam {
     private static final int RECORD_RATE = 16_000;   // Saaras is happiest here
 
     private final Context ctx;
+    private final Audio audio;
     private volatile String key;
-    private volatile AudioTrack track;
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
 
-    Sarvam(Context ctx) {
+    Sarvam(Context ctx, Audio audio) {
         this.ctx = ctx;
+        this.audio = audio;
     }
 
     // ------------------------------------------------------------- the key
@@ -180,7 +177,7 @@ class Sarvam {
             out.put("err", "sarvam is not configured (no key on this device)");
             return out;
         }
-        cancelled.set(false);
+        audio.begin();
         long t0 = System.currentTimeMillis();
         byte[] wav;
         try {
@@ -213,8 +210,8 @@ class Sarvam {
 
         long fetched = System.currentTimeMillis() - t0;
         try {
-            Pcm pcm = Pcm.parse(wav);
-            long firstAudio = play(pcm, t0);
+            Audio.Pcm pcm = Audio.Pcm.parse(wav);
+            long firstAudio = audio.play(pcm, t0);
             out.put("ok", true);
             out.put("first_audio_ms", firstAudio);
             out.put("total_ms", System.currentTimeMillis() - t0);
@@ -235,65 +232,7 @@ class Sarvam {
         return out;
     }
 
-    /** Blocking playback. Returns ms to first audio. */
-    private long play(Pcm pcm, long t0) {
-        int min = AudioTrack.getMinBufferSize(
-            pcm.rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        int bufSize = Math.max(min, pcm.data.length);
-        AudioTrack t = new AudioTrack.Builder()
-            .setAudioAttributes(new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build())
-            .setAudioFormat(new AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(pcm.rate)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .build())
-            .setBufferSizeInBytes(bufSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build();
-        track = t;
-        long firstAudio = 0;
-        try {
-            t.play();
-            firstAudio = System.currentTimeMillis() - t0;
-            int off = 0;
-            while (off < pcm.data.length && !cancelled.get()) {
-                int n = t.write(pcm.data, off, Math.min(8192, pcm.data.length - off));
-                if (n <= 0) break;
-                off += n;
-            }
-            // Let the buffer drain, otherwise release() cuts the tail off
-            // mid-word — the audible version of returning before the work is
-            // done.
-            if (!cancelled.get()) {
-                long tailMs = (long) (1000.0 * (pcm.data.length / 2.0) / pcm.rate);
-                long deadline = System.currentTimeMillis() + Math.min(tailMs + 500, 60_000);
-                while (System.currentTimeMillis() < deadline && !cancelled.get()
-                       && t.getPlaybackHeadPosition() < pcm.data.length / 2) {
-                    try { Thread.sleep(40); } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        } finally {
-            try { t.stop(); } catch (Throwable ignored) {}
-            try { t.release(); } catch (Throwable ignored) {}
-            if (track == t) track = null;
-        }
-        return firstAudio;
-    }
 
-    void stop() {
-        cancelled.set(true);
-        AudioTrack t = track;
-        if (t != null) {
-            try { t.pause(); } catch (Throwable ignored) {}
-            try { t.flush(); } catch (Throwable ignored) {}
-        }
-    }
 
     // ------------------------------------------------------------- listen
 
@@ -454,43 +393,6 @@ class Sarvam {
 
     private static byte[] le16(int v) {
         return new byte[]{(byte) v, (byte) (v >> 8)};
-    }
-
-    /** Parsed PCM out of a WAV container. */
-    static final class Pcm {
-        byte[] data;
-        int rate;
-
-        /**
-         * Walk the chunks to find `data`. NOT a fixed 44-byte skip: Bulbul
-         * answered at 22050 Hz when the docs said the default was 24000, and
-         * a container that can surprise you on the sample rate can surprise
-         * you on the header length too. Read what arrived.
-         */
-        static Pcm parse(byte[] wav) throws Exception {
-            if (wav.length < 44 || wav[0] != 'R' || wav[1] != 'I'
-                || wav[2] != 'F' || wav[3] != 'F') {
-                throw new IllegalArgumentException("not a RIFF/WAVE payload");
-            }
-            ByteBuffer b = ByteBuffer.wrap(wav).order(ByteOrder.LITTLE_ENDIAN);
-            Pcm out = new Pcm();
-            out.rate = 22050;
-            int pos = 12;
-            while (pos + 8 <= wav.length) {
-                String id = new String(wav, pos, 4, StandardCharsets.US_ASCII);
-                int size = b.getInt(pos + 4);
-                int body = pos + 8;
-                if (size < 0 || body + size > wav.length) size = wav.length - body;
-                if ("fmt ".equals(id) && size >= 16) {
-                    out.rate = b.getInt(body + 4);
-                } else if ("data".equals(id)) {
-                    out.data = Arrays.copyOfRange(wav, body, body + size);
-                    return out;
-                }
-                pos = body + size + (size % 2);   // chunks are word-aligned
-            }
-            throw new IllegalArgumentException("no data chunk in the WAV");
-        }
     }
 
     // ------------------------------------------------------------ the wire
