@@ -11,6 +11,7 @@
 #   communicate claude bridge   <device> [name|pid|newest]
 #   communicate claude unbridge <device|all>
 #
+#   communicate codex  queue <device> <session-name|uuid> <message>  # enqueue for existing session
 #   communicate codex  ask   <device> [--dir D] [--thread N] [--new] [--auto] <message>
 #   communicate codex  peer  <device> [name]     present a remote Codex as a native Claude peer
 #   communicate codex  unpeer <device|all>
@@ -134,12 +135,13 @@ cmd_claude() {
 cmd_codex() {
   local sub="${1:-}"; shift || true
   case "$sub" in
+    queue)  codex_queue "$@";;
     ask)    codex_ask "$@";;
     peer)   codex_peer "$@";;
     unpeer) codex_unpeer "$@";;
     forget) codex_forget "$@";;
     probe)  codex_probe "$@";;
-    *) die "usage: communicate codex {ask|peer|unpeer|forget|probe} ...";;
+    *) die "usage: communicate codex {queue|ask|peer|unpeer|forget|probe} ...";;
   esac
 }
 

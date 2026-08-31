@@ -53,6 +53,57 @@ codex_probe() {
   on_device "$dev" "$(_codex_path_prefix)"'command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null || true'
 }
 
+# Queue a turn for an existing Codex session. This is deliberately
+# asynchronous and persistent: success means enqueued, while the reply remains
+# in that session's UI/history after it consumes the turn. Unlike
+# `codex_ask --thread`, this targets a native Codex UUID or exact session name
+# and never creates a replacement session when the target is absent.
+#
+# Usage: codex_queue <device> <session-name|uuid> [--] <message...>
+codex_queue() {
+  comm_need_python
+  local dev="${1:-}"; shift || true
+  local target="${1:-}"; shift || true
+  [ -n "$dev" ] && [ -n "$target" ] || \
+    die "usage: communicate codex queue <device> <session-name|uuid> <message>"
+
+  local -a msg=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --) shift; msg+=("$@"); break;;
+      *)  msg+=("$1"); shift;;
+    esac
+  done
+  [ "${#msg[@]}" -gt 0 ] || die "empty message"
+  device_reachable "$dev" || die "device '$dev' not reachable over ssh"
+  [ -n "$(codex_probe "$dev")" ] || die "codex is not installed on '$dev'"
+
+  local text
+  printf -v text '%s ' "${msg[@]}"
+  text="${text% }"
+  local pp; pp="$(_codex_path_prefix)"
+
+  # `codex queue` requires --message rather than accepting stdin. Send the
+  # target and text as a NUL-delimited payload to a tiny Python argv adapter so
+  # neither is interpolated into a local or remote shell command; quotes,
+  # newlines, and shell syntax stay literal.
+  local py
+  py='import subprocess, sys
+target, message = sys.stdin.buffer.read().split(b"\0", 1)
+p = subprocess.run(["codex", "queue", "--thread=" + target.decode(),
+                    "--message=" + message.decode()])
+raise SystemExit(p.returncode)'
+  local remote_cmd="${pp}python3 -c $(comm_shq "$py")"
+
+  if comm_is_local "$dev"; then
+    printf '%s\0%s' "$target" "$text" | bash -c "$remote_cmd"
+  else
+    # Force no PTY: a host-level RequestTTY setting could otherwise transform
+    # or buffer the NUL-delimited binary payload.
+    printf '%s\0%s' "$target" "$text" | ssh -T "${COMM_SSH_OPTS[@]}" "$dev" "$remote_cmd"
+  fi
+}
+
 # Ask a Codex agent a question and print its reply.
 # Usage: codex_ask <device> [--dir D] [--thread NAME] [--new] [--auto] [--model M] -- <message...>
 codex_ask() {
