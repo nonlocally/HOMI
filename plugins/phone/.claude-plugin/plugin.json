@@ -1,7 +1,7 @@
 {
   "name": "phone",
-  "version": "0.5.2",
-  "description": "Drive a real Android phone as an agent surface. Read its state (notifications, calendar, contacts, media, battery, location) through structured queries, act through intents, and fall to the screen only when nothing above it will do \u2014 and when the screen is taken, take one of your own: several agents drive different apps on separate trusted displays without touching the person's. Ships the general phone skill, screens for running more than one agent at once, the per-app doordash and ubereats skills, phone-ask, and pay \u2014 one-time virtual cards minted on-device and approved per purchase by the person.",
+  "version": "0.3.2",
+  "description": "Drive a real Android phone as an agent surface. Read its state (notifications, calendar, contacts, media, battery, location) through structured queries, act through intents, and fall to the screen only when nothing above it will do \u2014 and when the screen is taken, take one of your own: several agents drive different apps on separate trusted displays without touching the person's. Ships the general phone skill, screens for running more than one agent at once, the per-app doordash skill, phone-ask, and pay \u2014 one-time virtual cards minted on-device and approved per purchase by the person.",
   "author": {
     "name": "Aadarsh Agarwal",
     "url": "https://github.com/aadarwal"
