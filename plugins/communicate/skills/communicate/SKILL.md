@@ -20,8 +20,9 @@ communicate agents --json    # same rows, machine-readable (adds socket)
 communicate whereis NAME     # resolve one name -> type, via, socket
 ```
 
-**DESCRIPTION is the session's own chat title** (what the human sees in their
-app sidebar), joined read-only onto the bus; DIR is its working directory. So
+**DESCRIPTION is the agent's self-described card when it has one** (what it is
+— ask me for: …; set via `communicate card set self`), **else the session's
+chat title** from the human's app sidebar; DIR is its working directory. So
 when you're told "talk to the GitHub-widget one" or "whoever is in repo X",
 don't guess a name — read the roster, match intent against DESCRIPTION/DIR,
 then address by the exact NAME. **Names are addresses; descriptions are for
