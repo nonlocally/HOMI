@@ -179,6 +179,20 @@ else
   echo "→ no XAI_API_KEY — grok voices will not be offered"
 fi
 
+# The Muse key (Meta Model API). Same place, same 660. Without it the app has
+# no ears for Hindi at all — the हिंदी and HINGLISH buttons refuse with a
+# message saying so, and EN keeps working on-device.
+if [ -z "${MODEL_API_KEY:-}" ] && [ -f "$HERE/../../../voice/muse/.env" ]; then
+  MODEL_API_KEY="$(sed -n 's/^MODEL_API_KEY=//p' "$HERE/../../../voice/muse/.env" | head -1)"
+fi
+if [ -n "${MODEL_API_KEY:-}" ]; then
+  echo "→ planting the muse key (voice transcribe, hindi + code-mix)"
+  "$PHONE_BIN" --device "$DEVICE" sh \
+    "printf '%s' '$MODEL_API_KEY' > $DATA/muse_key && chmod 660 $DATA/muse_key" >/dev/null
+else
+  echo "→ no MODEL_API_KEY — Hindi and Hinglish will be unavailable"
+fi
+
 echo "→ granting notification access"
 "$PHONE_BIN" --device "$DEVICE" sh "cmd notification allow_listener $LISTENER" | tail -1
 "$PHONE_BIN" --device "$DEVICE" sh "cmd appops set $PKG ACCESS_RESTRICTED_SETTINGS allow" >/dev/null 2>&1 || true

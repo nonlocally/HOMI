@@ -213,8 +213,9 @@ class Bridge implements Runnable {
                     }
                     if (q.has("lang") && !voices.setTurnLang(q.optString("lang"))) {
                         return err(r, "lang must be en, hi or mix (and hi/mix "
-                                      + "need a sarvam key): " + q.optString("lang"));
+                                      + "need a muse key): " + q.optString("lang"));
                     }
+                    if (q.has("stream")) voices.setStreaming(q.optBoolean("stream"));
                     put(r, voices.status());
                     r.put("ok", true);
                     return r;

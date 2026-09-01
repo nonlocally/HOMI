@@ -96,6 +96,131 @@ class Audio {
         }
     }
 
+    // ------------------------------------------------------------- capture
+    //
+    // Moved here from Sarvam when Muse replaced Saaras as the ears. Capture
+    // was never Sarvam's; it was the microphone's, and two cloud recognisers
+    // in a row wanting "mono 16-bit PCM at 16 kHz" made that obvious.
+
+    static final int RECORD_RATE = 16_000;
+
+    /** Muse's one-shot endpoint allows ten minutes. Nobody wants a
+     *  ten-minute turn; this is a safety stop, not a feature. */
+    static final int MAX_RECORD_MS = 28_000;
+
+    /**
+     * Endpointing for the record-then-send path, and it is a HEURISTIC: an
+     * RMS threshold and a silence timer, invented rather than trained. It is
+     * what the one-shot HTTP path has to live with, because a file API cannot
+     * tell you when someone stopped talking. The streaming path does not use
+     * it at all — Muse's own endpointer runs on the server and is the reason
+     * to prefer that path.
+     */
+    private static final int SILENCE_MS = 900;
+    private static final int MIN_SPEECH_MS = 300;
+    private static final double SILENCE_RMS = 550.0;
+
+    static final class Recorded {
+        byte[] pcm;
+        boolean heardSpeech;
+        long ms;
+    }
+
+    /** A configured, started microphone. The caller owns stop()/release(). */
+    static android.media.AudioRecord openMic() {
+        int min = android.media.AudioRecord.getMinBufferSize(
+            RECORD_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        if (min <= 0) throw new IllegalStateException("no usable microphone buffer size");
+        int bufSize = Math.max(min, RECORD_RATE / 2);
+        android.media.AudioRecord r = new android.media.AudioRecord(
+            android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION, RECORD_RATE,
+            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+        if (r.getState() != android.media.AudioRecord.STATE_INITIALIZED) {
+            try { r.release(); } catch (Throwable ignored) {}
+            throw new IllegalStateException("microphone unavailable (permission or in use)");
+        }
+        r.startRecording();
+        return r;
+    }
+
+    /** Little-endian bytes for a run of samples. */
+    static byte[] bytesOf(short[] chunk, int n) {
+        byte[] bytes = new byte[n * 2];
+        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(chunk, 0, n);
+        return bytes;
+    }
+
+    static double rms(short[] chunk, int n) {
+        double sum = 0;
+        for (int i = 0; i < n; i++) sum += (double) chunk[i] * chunk[i];
+        return Math.sqrt(sum / n);
+    }
+
+    /** Record until the person stops (by the heuristic above), or maxMs. */
+    static Recorded record(int maxMs) throws Exception {
+        android.media.AudioRecord r = openMic();
+        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream(RECORD_RATE * 4);
+        Recorded out = new Recorded();
+        short[] chunk = new short[1024];
+        long start = System.currentTimeMillis();
+        long lastVoice = 0;
+        long speechFor = 0;
+        try {
+            while (true) {
+                long now = System.currentTimeMillis();
+                if (now - start > maxMs) break;
+                int n = r.read(chunk, 0, chunk.length);
+                if (n <= 0) continue;
+                buf.write(bytesOf(chunk, n));
+                if (rms(chunk, n) > SILENCE_RMS) {
+                    lastVoice = now;
+                    speechFor += (long) (1000.0 * n / RECORD_RATE);
+                } else if (lastVoice > 0 && speechFor > MIN_SPEECH_MS
+                           && now - lastVoice > SILENCE_MS) {
+                    break;     // they stopped talking
+                }
+            }
+        } finally {
+            try { r.stop(); } catch (Throwable ignored) {}
+            try { r.release(); } catch (Throwable ignored) {}
+        }
+        out.pcm = buf.toByteArray();
+        out.heardSpeech = speechFor > MIN_SPEECH_MS;
+        out.ms = System.currentTimeMillis() - start;
+        return out;
+    }
+
+    /** Little-endian 16-bit mono WAV around raw PCM. */
+    static byte[] wrapWav(byte[] pcm, int rate) throws Exception {
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream(pcm.length + 44);
+        java.io.DataOutputStream d = new java.io.DataOutputStream(o);
+        int byteRate = rate * 2;
+        d.writeBytes("RIFF");
+        d.write(le32(36 + pcm.length));
+        d.writeBytes("WAVE");
+        d.writeBytes("fmt ");
+        d.write(le32(16));
+        d.write(le16(1));          // PCM
+        d.write(le16(1));          // mono
+        d.write(le32(rate));
+        d.write(le32(byteRate));
+        d.write(le16(2));          // block align
+        d.write(le16(16));         // bits
+        d.writeBytes("data");
+        d.write(le32(pcm.length));
+        d.write(pcm);
+        d.flush();
+        return o.toByteArray();
+    }
+
+    private static byte[] le32(int v) {
+        return new byte[]{(byte) v, (byte) (v >> 8), (byte) (v >> 16), (byte) (v >> 24)};
+    }
+
+    private static byte[] le16(int v) {
+        return new byte[]{(byte) v, (byte) (v >> 8)};
+    }
+
     /** PCM lifted out of a RIFF/WAVE container. */
     static final class Pcm {
         byte[] data;
