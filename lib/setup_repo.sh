@@ -42,6 +42,12 @@ if prev and mode == "install" and prev != market_root:
 PY
 }
 
+_sr_run_codex() { # <args...> -> ok/fail, logged
+  # shellcheck disable=SC2068
+  if codex $@ >/dev/null 2>&1; then log "codex $* — ok"; return 0
+  else return 1; fi
+}
+
 _sr_codex() {
   local mode="$1" dry="$2"
   local -a cmds
@@ -55,14 +61,30 @@ _sr_codex() {
     local c; for c in "${cmds[@]}"; do printf '  codex %s\n' "$c" >&2; done
     return 0
   fi
-  local c
-  for c in "${cmds[@]}"; do
-    if [ "$dry" = 1 ]; then log "[dry-run] would run: codex $c"; continue; fi
-    # shellcheck disable=SC2086
-    if codex $c >/dev/null 2>&1; then log "codex $c — ok"
-    else log "codex $c — failed (may already be ${mode}ed); run manually if needed: codex $c"; fi
-  done
-  [ "$mode" = install ] && [ "$dry" != 1 ] && log "Codex: start a NEW thread to see the plugin."
+  if [ "$dry" = 1 ]; then
+    local c; for c in "${cmds[@]}"; do log "[dry-run] would run: codex $c"; done
+    return 0
+  fi
+  if [ "$mode" = install ]; then
+    # A marketplace named 'communicate' may already exist (e.g. the npm-mode
+    # frozen payload). Switching modes IS the point of this verb: remove the
+    # stale one and retry once, so the checkout actually wins.
+    if ! _sr_run_codex plugin marketplace add "$COMM_HOME"; then
+      log "marketplace 'communicate' already registered elsewhere — repointing at this checkout"
+      _sr_run_codex plugin marketplace remove communicate || true
+      _sr_run_codex plugin marketplace add "$COMM_HOME" || \
+        log "codex plugin marketplace add $COMM_HOME — still failing; run it manually"
+    fi
+    _sr_run_codex plugin add communicate@communicate || \
+      log "codex plugin add communicate@communicate — failed; run it manually"
+    log "Codex: start a NEW thread to see the plugin."
+  else
+    local c
+    for c in "${cmds[@]}"; do
+      # shellcheck disable=SC2086
+      _sr_run_codex $c || log "codex $c — failed (may not have been installed)"
+    done
+  fi
   return 0
 }
 

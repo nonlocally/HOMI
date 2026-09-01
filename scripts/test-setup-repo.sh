@@ -34,6 +34,22 @@ run >/dev/null || fail "setup-repo errored"
 ls "$FH/.claude/"settings.json.communicate-backup-* >/dev/null 2>&1 && ok "backup written" || fail "no backup"
 grep -q "plugin marketplace add $ROOT" "$FH/codex.log" && grep -q "plugin add communicate@communicate" "$FH/codex.log" && ok "codex registered via CLI" || fail "codex commands wrong: $(cat "$FH/codex.log" 2>/dev/null)"
 
+echo "2b) marketplace conflict: remove-and-retry completes the switch"
+cat > "$FH/bin/codex" <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "${CODEX_LOG:?}"
+if [ "$1 $2 $3" = "plugin marketplace add" ] && [ -f "${CODEX_CONFLICT:?}" ]; then
+  rm -f "$CODEX_CONFLICT"; exit 1
+fi
+exit 0
+STUB
+chmod +x "$FH/bin/codex"
+: > "$FH/codex.log"; touch "$FH/conflict.flag"
+HOME="$FH" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" CODEX_CONFLICT="$FH/conflict.flag" "$CLI" setup-repo --codex >/dev/null 2>&1
+seq="$(grep -c "plugin marketplace add" "$FH/codex.log")"
+[ "$seq" = 2 ] && grep -q "plugin marketplace remove communicate" "$FH/codex.log" && grep -q "plugin add communicate@communicate" "$FH/codex.log" \
+  && ok "conflict -> remove -> retry -> install" || fail "conflict sequence wrong: $(cat "$FH/codex.log")"
+
 echo "3) uninstall restores"
 run --uninstall >/dev/null || fail "uninstall errored"
 [ "$(jqs "d.get('extraKnownMarketplaces',{}).get('communicate')")" = "None" ] && [ "$(jqs "d.get('enabledPlugins',{}).get('communicate@communicate')")" = "None" ] && ok "keys removed" || fail "keys remain"
