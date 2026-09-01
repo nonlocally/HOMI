@@ -15,7 +15,9 @@ registry — **the session's `/rename` name is the whole namespace**.
 ## Rename yourself
 
 Inside a Claude Code session: run `/rename <name>`. The sidecar updates and
-every router sees the new name immediately. Pick names matching
+every router sees the new name immediately. (The roster's DESCRIPTION column already
+shows each session's chat title automatically — rename when you want the
+ADDRESS itself to carry the meaning, e.g. so `route <semantic-name>` works.) Pick names matching
 `[a-z0-9][a-z0-9._-]*` — short, stable, purpose-shaped (`reviewer-api`,
 `say-hi-to-me-2`).
 

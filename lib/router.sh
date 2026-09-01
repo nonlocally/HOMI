@@ -5,13 +5,48 @@
 # are all just sockets in the same table, so one `route` reaches any of them.
 
 # Print the routing table: every agent currently reachable by name on this host.
+# DIR and DESCRIPTION join the app's own naming onto the bus, read-only: the
+# description is the session's newest custom-title (the chat title the human
+# sees in their sidebar), pulled from the transcript. Names are addresses;
+# descriptions are for choosing whom to address.
 router_agents() {
   comm_need_python
-  python3 -c '
-import sys, json, glob, os
-sessions_dir, state_dir, mysock = sys.argv[1:4]
+  local as_json=0
+  [ "${1:-}" = "--json" ] && as_json=1
+  python3 - "$(comm_sessions_dir)" "$COMM_STATE" "${CLAUDE_CODE_MESSAGING_SOCKET:-}" "$as_json" <<'PY'
+import sys, json, glob, os, mmap
+sessions_dir, state_dir, mysock, as_json = sys.argv[1:5]
+projects_dir = os.path.join(os.path.dirname(sessions_dir.rstrip("/")), "projects")
 
-# Classify via our own bookkeeping.
+def newest_title(sid):
+    """Last custom-title record in the session's transcript — scanned from the
+    END via mmap.rfind so a huge transcript costs almost nothing."""
+    if not sid:
+        return ""
+    for tf in glob.glob(os.path.join(projects_dir, "*", sid + ".jsonl")):
+        try:
+            with open(tf, "rb") as fh:
+                try:
+                    mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+                except ValueError:
+                    continue
+                pos = mm.rfind(b'"type":"custom-title"')
+                if pos < 0:
+                    pos = mm.rfind(b'"type": "custom-title"')
+                if pos < 0:
+                    continue
+                bol = mm.rfind(b"\n", 0, pos) + 1
+                eol = mm.find(b"\n", pos)
+                line = mm[bol:eol if eol >= 0 else len(mm)]
+            try:
+                t = json.loads(line).get("customTitle") or ""
+            except Exception:
+                return ""
+            return " ".join(t.split())
+        except OSError:
+            continue
+    return ""
+
 peers = {}      # socket -> (device, name)   [codex peers]
 bridged = {}    # remote_pid -> device       [bridged remote claude]
 for meta in glob.glob(os.path.join(state_dir, "peers", "*", "meta")):
@@ -31,6 +66,9 @@ for f in glob.glob(os.path.join(sessions_dir, "*.json")):
     except Exception: continue
     sock = r.get("messagingSocketPath",""); name = r.get("name") or "(unnamed)"
     pid = str(r.get("pid","")); status = r.get("status","?")
+    cwd = r.get("cwd") or ""
+    dirname = os.path.basename(cwd.rstrip("/")) if cwd and cwd != "-" else ""
+    desc = newest_title(r.get("sessionId"))
     if sock in peers:
         typ, via = "codex", peers[sock][0]
     elif pid in bridged:
@@ -39,17 +77,24 @@ for f in glob.glob(os.path.join(sessions_dir, "*.json")):
         typ, via = "claude", "self"
     else:
         typ, via = "claude", "local"
-    rows.append((name, typ, via, status, sock))
+    rows.append({"name": name, "type": typ, "via": via, "status": status,
+                 "socket": sock, "dir": dirname, "description": desc})
 
-rows.sort(key=lambda x:(x[1], x[0]))
+rows.sort(key=lambda x: (x["type"], x["name"]))
+if as_json == "1":
+    print(json.dumps(rows))
+    raise SystemExit
 if not rows:
     print("  (no reachable agents)"); raise SystemExit
-print("  %-24s %-8s %-18s %-8s %s" % ("NAME","TYPE","VIA","STATUS","SOCKET"))
-for n,t,v,s,sk in rows:
-    print("  %-24s %-8s %-18s %-8s %s" % (n[:24],t,v[:18],s[:8],sk))
+print("  %-24s %-8s %-10s %-8s %-16s %s" % ("NAME","TYPE","VIA","STATUS","DIR","DESCRIPTION"))
+for r in rows:
+    print("  %-24s %-8s %-10s %-8s %-16s %s" % (
+        r["name"][:24], r["type"], r["via"][:10], r["status"][:8],
+        r["dir"][:16], r["description"][:48]))
 print()
-print("  claude* = a remote Claude session bridged in over ssh")
-' "$(comm_sessions_dir)" "$COMM_STATE" "${CLAUDE_CODE_MESSAGING_SOCKET:-}"
+print("  address by NAME (communicate route <name>); DESCRIPTION is the chat's own title, for choosing")
+print("  sockets: communicate whereis <name> · full data: communicate agents --json")
+PY
 }
 
 # Resolve a name to "type\tvia\tsocket".
