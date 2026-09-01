@@ -21,7 +21,10 @@ for (const f of readdirSync(path.join(repo, "lib"))) {
   if (/homi/.test(f)) throw new Error(`homi file escaped the filter: ${f}`);
   cpSync(path.join(repo, "lib", f), path.join(vendor, "lib", f));
 }
-cpSync(path.join(repo, "plugins"), path.join(vendor, "plugins"), { recursive: true });
+// plugins/ may hold other planes (phone, ...) — vendor ONLY the communicate plugin.
+mkdirSync(path.join(vendor, "plugins"), { recursive: true });
+cpSync(path.join(repo, "plugins", ".claude-plugin"), path.join(vendor, "plugins", ".claude-plugin"), { recursive: true });
+cpSync(path.join(repo, "plugins", "communicate"), path.join(vendor, "plugins", "communicate"), { recursive: true });
 cpSync(path.join(repo, ".agents"), path.join(vendor, ".agents"), { recursive: true });
 
 // Belt and braces: nothing under vendor/ may mention a homi lib file.

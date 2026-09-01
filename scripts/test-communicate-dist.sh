@@ -40,6 +40,7 @@ fi
 echo "3) vendor is homi-free"
 ( cd "$PKG" && node scripts/vendor.mjs >/dev/null ) || fail "vendor.mjs errored"
 find "$PKG/vendor" \( -name 'homi*.py' -o -name 'homi.sh' \) | grep -q . && fail "homi artifact in vendor" || ok "no homi artifacts"
+ls "$PKG/vendor/plugins" | grep -v "^\.claude-plugin$\|^communicate$" | grep -q . && fail "foreign plugin in vendor: $(ls "$PKG/vendor/plugins")" || ok "only the communicate plugin vendored"
 
 echo "4) npm pack -> install into temp prefix -> run"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
