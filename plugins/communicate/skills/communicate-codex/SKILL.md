@@ -50,6 +50,21 @@ runs a `codex ask` behind the scenes and the answer is written BACK to the
 sender's socket. Note: the peer owns its own headless thread — it is not
 attached to any app session (that's Lane 1's job).
 
+## Getting a reply back (closing the queue lane's loop)
+
+`queue` alone is one-way. Two ways to close the loop:
+
+```sh
+communicate codex queue <dev> <name> --coach "<msg>"   # teach them how to reply to YOUR session
+communicate ask <name> "<question>"                    # sync: coached delivery + blocking reply wait
+```
+
+`--coach` appends a `[reply-to …]` block with your reply address; `ask` does
+that AND waits — it finds a local Codex session by its native thread name
+automatically. The receiving Codex agent replies by running the
+`communicate send` command from the block (communicate is on PATH via the
+plugin, or at ~/.local/share/communicate/current/vendor/bin/communicate).
+
 ## Utilities
 
 ```sh

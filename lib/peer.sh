@@ -111,18 +111,27 @@ codex_unpeer() {
 peer_send() {
   comm_need_python
   local target="$1"; shift || true
-  [ -n "$target" ] || die "usage: communicate send <peer-name|socket> [--as NAME] <message>"
-  local as="communicate"
+  [ -n "$target" ] || die "usage: communicate send <peer-name|socket> [--as NAME] [--from SOCK] [--coach] <message>"
+  local as="communicate" from_override="" coach=0
   local -a msg=()
   while [ $# -gt 0 ]; do
-    case "$1" in --as) as="$2"; shift 2;; --) shift; msg+=("$@"); break;; *) msg+=("$1"); shift;; esac
+    case "$1" in
+      --as) as="$2"; shift 2;;
+      --from) from_override="$2"; shift 2;;
+      --coach) coach=1; shift;;
+      --) shift; msg+=("$@"); break;;
+      *) msg+=("$1"); shift;;
+    esac
   done
   [ "${#msg[@]}" -gt 0 ] || die "empty message"
   local sock; sock="$(_peer_resolve "$target")"
   [ -n "$sock" ] || die "no peer named '$target' (try: communicate agents)"
   [ -S "$sock" ] || die "peer '$target' socket not live: $sock"
-  local from="${CLAUDE_CODE_MESSAGING_SOCKET:-$(comm_socket_dir)/communicate-cli.sock}"
+  local from="${from_override:-${CLAUDE_CODE_MESSAGING_SOCKET:-$(comm_socket_dir)/communicate-cli.sock}}"
   local text; text="$(printf '%s ' "${msg[@]}")"; text="${text% }"
+  [ "$coach" = 1 ] && text="$text
+
+$(comm_coach_text "$as" "$from")"
   python3 "$CC_PEER_PY" send --to "$sock" --text "$text" --from "$from" --name "$as"
   ok "delivered to '$target'"
 }

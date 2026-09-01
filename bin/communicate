@@ -26,6 +26,8 @@
 #   communicate wake    <name> --on-pr <owner/repo> [--every SEC] [--catchup]  new-PR trigger
 #   communicate wake    stop <name|all> | wake ls
 #
+#   communicate ask <name> [--timeout SEC] [--as NAME] <question>
+#                                                sync ask of ANY agent (claude or local codex session)
 #   communicate setup-repo [--claude] [--codex] [--dry-run] [--uninstall]
 #                                                register THIS checkout as the Claude+Codex plugin
 #   communicate homi ...                         the fabric: durable identities, mailboxes,
@@ -58,6 +60,8 @@ source "$COMM_HOME/lib/peer.sh"
 source "$COMM_HOME/lib/router.sh"
 # shellcheck source=lib/wake.sh
 source "$COMM_HOME/lib/wake.sh"
+# shellcheck source=lib/ask.sh
+[ -f "$COMM_HOME/lib/ask.sh" ] && . "$COMM_HOME/lib/ask.sh"
 # shellcheck source=lib/setup_repo.sh
 [ -f "$COMM_HOME/lib/setup_repo.sh" ] && . "$COMM_HOME/lib/setup_repo.sh"
 # homi plane is optional: packaged installs (@aadarwal/communicate) ship without it.
@@ -164,6 +168,7 @@ main() {
     whereis) router_whereis "$@" && echo;;
     route)   router_route "$@";;
     wake)    wake_cmd "$@";;
+    ask)     ask_cmd "$@";;
     setup-repo) setup_repo "$@";;
     homi)    type homi_cmd >/dev/null 2>&1 || \
                  die "homi plane not bundled in this install — clone github.com/aadarwal/communicate for the full CLI"
