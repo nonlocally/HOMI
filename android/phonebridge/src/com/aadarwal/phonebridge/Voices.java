@@ -19,9 +19,10 @@ import java.util.Map;
  *             en-US voice, and en-US is the only language actually installed
  *             on this phone — hi-IN and en-IN are "supported", meaning
  *             downloadable, not present.
- *   sarvam    bulbul:v3 out (38 named speakers), saaras:v4 in (22 Indic
- *             languages + Indian English). Measured 2.16s and 1.72s against
- *             the live API — a real latency cost, paid for voice and reach.
+ *   sarvam    bulbul:v3 out (38 named speakers). 2.9s on the phone. Out only.
+ *   xai       grok tts, 28 multilingual voices, 0.8s on the phone. Out only.
+ *   muse      Meta's Voice Transcribe: the ears for Hindi and code-mixed
+ *             speech, one-shot or streaming. In only. Replaced Saaras 2026-09-01.
  *
  * Neither is the right answer for every turn, so this holds both and makes
  * the choice explicit and persistent rather than compiled in.
@@ -37,6 +38,7 @@ class Voices {
     static final String ANDROID = "android";
     static final String SARVAM = "sarvam";
     static final String XAI = "xai";
+    static final String MUSE = "muse";
 
     private static final String PREFS = "homi";
     // EARS AND MOUTH ARE SEPARATE CHOICES, and the right answers differ.
@@ -64,6 +66,12 @@ class Voices {
     private static final String K_SPK_SARVAM = "voice_speaker";
     private static final String K_SPK_XAI = "voice_speaker_xai";
     private static final String K_LANG = "voice_turn_lang";
+    // Muse streams by preference. Off means record-then-POST, which is the
+    // proven shape; on means partials while you talk and Muse's own
+    // endpointer. Defaults OFF until the stream path has been proven on a
+    // real turn on this device — a provider landed too fast crashed this
+    // app once already today.
+    private static final String K_STREAM = "voice_muse_stream";
 
     /**
      * One per process. Both Bridge and Home used to build their own Speak and
@@ -95,6 +103,7 @@ class Voices {
     private final Audio audio;
     private final Sarvam sarvam;
     private final Xai xai;
+    private final Muse muse;
 
     private Voices(Context ctx) {
         this.ctx = ctx;
@@ -105,6 +114,7 @@ class Voices {
         this.audio = new Audio();
         this.sarvam = new Sarvam(ctx, audio);
         this.xai = new Xai(ctx, audio);
+        this.muse = new Muse(ctx, audio);
     }
 
     // ---------------------------------------------------------- selection
@@ -141,11 +151,10 @@ class Voices {
     //
     //   EN    on-device. Free, instant, private, and good at English. The
     //         local recogniser has en-US installed and nothing else.
-    //   HI    saaras, hi-IN. The phone CANNOT do this — hi-IN is listed as
-    //         "supported", meaning downloadable, and is not present.
-    //   MIX   saaras in `codemix` mode, which is the mode built for Hindi and
-    //         English inside one sentence. Sending `transcribe` at Hinglish
-    //         is asking the wrong question of a model that has the right one.
+    //   HI    muse, languageBias ["Hindi"]. The phone CANNOT do this — hi-IN
+    //         is listed as "supported", meaning downloadable, and not present.
+    //   MIX   muse, languageBias ["Hindi", "English"]. Code-switching inside
+    //         a sentence is native to Muse, so this is a hint, not a mode.
     //
     // The language also picks what Bulbul speaks BACK, because answering a
     // Hindi question in an American accent is its own kind of wrong.
@@ -157,32 +166,35 @@ class Voices {
     String turnLang() {
         String l = prefs().getString(K_LANG, LANG_EN);
         if (LANG_HI.equals(l) || LANG_MIX.equals(l)) {
-            // Without a key there is no Hindi at all on this device, so fall
-            // back rather than record a turn nothing can transcribe.
-            return sarvam.available() ? l : LANG_EN;
+            // Without a Muse key there is no Hindi at all on this device, so
+            // fall back rather than record a turn nothing can transcribe.
+            return muse.available() ? l : LANG_EN;
         }
         return LANG_EN;
     }
 
     boolean setTurnLang(String l) {
         if (!LANG_EN.equals(l) && !LANG_HI.equals(l) && !LANG_MIX.equals(l)) return false;
-        if (!LANG_EN.equals(l) && !sarvam.available()) return false;
+        if (!LANG_EN.equals(l) && !muse.available()) return false;
         prefs().edit().putString(K_LANG, l).apply();
         return true;
     }
 
     /** Derived, never stored: English listens locally, everything else cannot. */
     String sttProvider() {
-        return LANG_EN.equals(turnLang()) ? ANDROID : SARVAM;
+        return LANG_EN.equals(turnLang()) ? ANDROID : MUSE;
     }
 
-    /** null lets Saaras detect it, which is what codemix wants. */
-    private String sttLanguageCode() {
-        return LANG_HI.equals(turnLang()) ? "hi-IN" : null;
+    boolean streaming() {
+        return prefs().getBoolean(K_STREAM, false);
     }
 
-    private String sttMode() {
-        return LANG_MIX.equals(turnLang()) ? "codemix" : "transcribe";
+    void setStreaming(boolean on) {
+        prefs().edit().putBoolean(K_STREAM, on).apply();
+    }
+
+    boolean museConfigured() {
+        return muse.available();
     }
 
     /** What Bulbul speaks back when we have nothing but the setting to go on. */
@@ -323,20 +335,20 @@ class Voices {
 
     Map<String, Object> listen(int timeoutSeconds, Progress p) {
         String want = sttProvider();
-        if (SARVAM.equals(want)) {
-            if (p != null) p.at("LISTENING", "saaras");
-            Map<String, Object> r = sarvam.listen(timeoutSeconds, sttLanguageCode(), sttMode());
+        if (MUSE.equals(want)) {
+            Map<String, Object> r = muse.listen(timeoutSeconds, Muse.biasFor(turnLang()),
+                                                streaming(), p);
             // "didn't catch that" is an ANSWER, not a provider failure —
             // falling back to the other recogniser and re-recording would
             // make the person say it twice for no reason.
             if (Boolean.TRUE.equals(r.get("ok"))) return r;
             String err = String.valueOf(r.get("err"));
             if (err.startsWith("didn't catch")) return r;
-            Log.w(Listener.TAG, "saaras failed, falling back: " + err);
-            if (p != null) p.at("LISTENING", "on-device (saaras failed)");
+            Log.w(Listener.TAG, "muse failed, falling back: " + err);
+            if (p != null) p.at("LISTENING", "on-device (muse failed)");
             Map<String, Object> back = androidVoice.listen(timeoutSeconds);
             back.put("provider", ANDROID);
-            back.put("fell_back_from", SARVAM);
+            back.put("fell_back_from", MUSE);
             back.put("fell_back_because", err);
             return back;
         }
@@ -360,7 +372,8 @@ class Voices {
         out.put("speaker", speaker());
         out.put("turn_lang", turnLang());
         out.put("tts_language", ttsLanguage());
-        out.put("stt_mode", sttMode());
+        out.put("stt_streaming", streaming());
+        out.put("muse_configured", muse.available());
         out.put("sarvam_configured", sarvam.available());
         out.put("xai_configured", xai.available());
         out.put("speakers", speakers());
@@ -369,6 +382,7 @@ class Voices {
         out.put("android_stt", androidVoice.status());
         out.put("sarvam", sarvam.status());
         out.put("xai", xai.status());
+        out.put("muse", muse.status());
         return out;
     }
 

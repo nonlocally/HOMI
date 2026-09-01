@@ -159,7 +159,7 @@ public class Home extends Activity {
         // to Hindi by tapping "हिंदी" and then talking.
         //
         // It is a LANGUAGE control, not a provider control. Choosing हिंदी
-        // silently moves the ears to saaras because the phone has no Hindi
+        // silently moves the ears to muse because the phone has no Hindi
         // recogniser installed, and moves bulbul to hi-IN so the answer comes
         // back in the language it was asked in. Naming the provider here would
         // be naming our plumbing instead of your intent.
@@ -291,7 +291,7 @@ public class Home extends Activity {
 
     private void pickLang(String l) {
         if (!voices.setTurnLang(l)) {
-            status("Hindi needs a sarvam key on this device", Ui.WARN);
+            status("Hindi needs a muse key on this device", Ui.WARN);
             return;
         }
         showLang();
