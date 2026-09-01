@@ -28,6 +28,7 @@ const EXPECT = ["agents_list", "whereis", "route", "send", "codex_queue", "codex
 try {
   const init = await rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } });
   if (init.result?.serverInfo?.name !== "communicate") throw new Error("bad serverInfo: " + JSON.stringify(init.result?.serverInfo));
+  if (!/agent bus/.test(init.result?.instructions ?? "")) throw new Error("instructions missing from initialize result");
   notify("notifications/initialized", {});
   const list = await rpc(2, "tools/list", {});
   const names = list.result.tools.map((t) => t.name);
@@ -35,6 +36,6 @@ try {
   const call = await rpc(3, "tools/call", { name: "agents_list", arguments: {} });
   const out = call.result.content?.[0]?.text ?? "";
   if (!/NAME|no reachable agents/.test(out)) throw new Error("agents_list output unexpected: " + out.slice(0, 120));
-  console.log("PASS: mcp-smoke — initialize, 7 tools in order, agents_list returns the table");
+  console.log("PASS: mcp-smoke — initialize (with instructions), 7 tools in order, agents_list returns the table");
   child.kill(); process.exit(0);
 } catch (e) { console.error("FAIL: " + e.message); child.kill(); process.exit(1); }
