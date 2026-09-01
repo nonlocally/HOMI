@@ -164,7 +164,7 @@ main() {
     claude)  cmd_claude "$@";;
     codex)   cmd_codex "$@";;
     send)    peer_send "$@";;
-    agents)    router_agents;;
+    agents)    router_agents "$@";;
     whereis) router_whereis "$@" && echo;;
     route)   router_route "$@";;
     wake)    wake_cmd "$@";;

@@ -62,6 +62,7 @@ echo "6) unit smokes + codex-queue payload test"
 "$ROOT/scripts/test-codex-queue.sh" >/dev/null 2>&1 && ok "codex-queue" || fail "codex-queue"
 "$ROOT/scripts/test-setup-repo.sh" >/dev/null 2>&1 && ok "setup-repo" || fail "setup-repo"
 "$ROOT/scripts/test-ask.sh" >/dev/null 2>&1 && ok "ask+coach" || fail "ask+coach"
+"$ROOT/scripts/test-roster-desc.sh" >/dev/null 2>&1 && ok "roster-desc" || fail "roster-desc"
 rm -f "$PKG/$TARBALL"
 
 [ "$fails" -eq 0 ] && echo "PASS: communicate distribution end to end" || { echo "FAIL: $fails check(s)"; exit 1; }

@@ -15,9 +15,18 @@ app, anywhere with a shell.
 ## See who's here
 
 ```sh
-communicate agents        # NAME / TYPE / VIA / STATUS / SOCKET — every reachable agent
-communicate whereis NAME  # resolve one name -> type, via, socket
+communicate agents           # NAME / TYPE / VIA / STATUS / DIR / DESCRIPTION
+communicate agents --json    # same rows, machine-readable (adds socket)
+communicate whereis NAME     # resolve one name -> type, via, socket
 ```
+
+**DESCRIPTION is the session's own chat title** (what the human sees in their
+app sidebar), joined read-only onto the bus; DIR is its working directory. So
+when you're told "talk to the GitHub-widget one" or "whoever is in repo X",
+don't guess a name — read the roster, match intent against DESCRIPTION/DIR,
+then address by the exact NAME. **Names are addresses; descriptions are for
+choosing.** A missing description just means the session was never titled or
+renamed (fresh spawns, terminal sessions).
 
 Inside Claude Code, the native `ListAgents` tool shows the same peers. A row of
 type `claude*` is a remote session bridged in over ssh; `codex` is a Codex peer.
