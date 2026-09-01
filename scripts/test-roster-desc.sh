@@ -64,7 +64,7 @@ echo "5) --json is machine-clean and carries all fields"
 "$CLI" agents --json | python3 -c "
 import json, sys
 rows = json.load(sys.stdin)
-assert all(set(r) == {'name','type','via','status','socket','dir','description'} for r in rows), 'fields'
+assert all(set(r) == {'name','type','via','status','socket','dir','description','description_source','title','card'} for r in rows), 'fields'
 assert any(r['name']=='titled-b' and r['description'].startswith('line one') for r in rows), 'content'
 print('parsed', len(rows), 'rows')" >/dev/null && ok "--json parses with full fields" || fail "--json broken"
 

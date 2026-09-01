@@ -16,6 +16,15 @@ router_agents() {
   python3 - "$(comm_sessions_dir)" "$COMM_STATE" "${CLAUDE_CODE_MESSAGING_SOCKET:-}" "$as_json" <<'PY'
 import sys, json, glob, os, mmap
 sessions_dir, state_dir, mysock, as_json = sys.argv[1:5]
+cards_dir = os.path.join(state_dir, "cards")
+
+def card_for(sid, name):
+    for key in ([sid] if sid else []) + ["name:" + name]:
+        p = os.path.join(cards_dir, key.replace("/", "_") + ".json")
+        if os.path.exists(p):
+            try: return json.load(open(p))
+            except Exception: return None
+    return None
 projects_dir = os.path.join(os.path.dirname(sessions_dir.rstrip("/")), "projects")
 
 def newest_title(sid):
@@ -68,7 +77,17 @@ for f in glob.glob(os.path.join(sessions_dir, "*.json")):
     pid = str(r.get("pid","")); status = r.get("status","?")
     cwd = r.get("cwd") or ""
     dirname = os.path.basename(cwd.rstrip("/")) if cwd and cwd != "-" else ""
-    desc = newest_title(r.get("sessionId"))
+    title = newest_title(r.get("sessionId"))
+    card = card_for(r.get("sessionId"), name)
+    if card and (card.get("what") or card.get("ask_me_for")):
+        bits = []
+        if card.get("what"): bits.append(card["what"])
+        if card.get("ask_me_for"): bits.append("ask me for: " + card["ask_me_for"])
+        desc, source = " -- ".join(bits), "card"
+    elif title:
+        desc, source = title, "title"
+    else:
+        desc, source = "", ""
     if sock in peers:
         typ, via = "codex", peers[sock][0]
     elif pid in bridged:
@@ -78,7 +97,9 @@ for f in glob.glob(os.path.join(sessions_dir, "*.json")):
     else:
         typ, via = "claude", "local"
     rows.append({"name": name, "type": typ, "via": via, "status": status,
-                 "socket": sock, "dir": dirname, "description": desc})
+                 "socket": sock, "dir": dirname, "description": desc,
+                 "description_source": source, "title": title,
+                 "card": card if card else None})
 
 rows.sort(key=lambda x: (x["type"], x["name"]))
 if as_json == "1":
@@ -92,7 +113,7 @@ for r in rows:
         r["name"][:24], r["type"], r["via"][:10], r["status"][:8],
         r["dir"][:16], r["description"][:48]))
 print()
-print("  address by NAME (communicate route <name>); DESCRIPTION is the chat's own title, for choosing")
+print("  address by NAME (communicate route <name>); DESCRIPTION = self-described card, else chat title")
 print("  sockets: communicate whereis <name> · full data: communicate agents --json")
 PY
 }

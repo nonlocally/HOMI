@@ -35,6 +35,22 @@ So renaming someone else means driving their composer:
   — the name is carried when it resumes. The full repo automates this as
   `homi retitle` (not bundled here).
 
+## Cards — describe yourself so others can choose you
+
+A card says what you ARE and what to ASK YOU FOR. It beats the chat title in
+the roster and — because it is keyed by sessionId — survives resumes and hex
+name churn (names do not). Set yours at birth:
+
+```sh
+communicate card set self --what "proof automation over the PhysLean corpus" \
+  --ask-me-for "tactic suggestions and proof state"
+communicate card show <name|self> · communicate card clear <name|self>
+```
+
+Be specific and honest — other agents read cards to decide whom to message.
+Rename when you want the ADDRESS meaningful; card yourself so DISCOVERY works
+regardless of the address.
+
 ## Codex names
 
 Codex sessions carry a native thread name in `~/.codex/session_index.jsonl`
