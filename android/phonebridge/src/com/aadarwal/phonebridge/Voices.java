@@ -66,11 +66,18 @@ class Voices {
     private static final String K_SPK_SARVAM = "voice_speaker";
     private static final String K_SPK_XAI = "voice_speaker_xai";
     private static final String K_LANG = "voice_turn_lang";
-    // Muse streams by preference. Off means record-then-POST, which is the
-    // proven shape; on means partials while you talk and Muse's own
-    // endpointer. Defaults OFF until the stream path has been proven on a
-    // real turn on this device — a provider landed too fast crashed this
-    // app once already today.
+    // Muse STREAMS by default, and the reason is measured, not preferred.
+    // Loopback on this phone, 2026-09-01, a Hinglish clip through the
+    // speaker into the mic:
+    //
+    //   stream  ok=true  "मेरी बैटरी कितनी है और आज का शेड्यूल क्या है"
+    //           completed=true — Muse's endpointer closed the turn itself
+    //   http    ok=false "didn't catch that", 12119ms, never reached the API
+    //
+    // The one-shot path gated its upload on an RMS threshold I invented, and
+    // that threshold called real speech silence. The "proven shape" was the
+    // one that failed; the path with Muse's trained endpointer was the one
+    // that worked. Off is still honoured for a caller that asks for it.
     private static final String K_STREAM = "voice_muse_stream";
 
     /**
@@ -186,7 +193,7 @@ class Voices {
     }
 
     boolean streaming() {
-        return prefs().getBoolean(K_STREAM, false);
+        return prefs().getBoolean(K_STREAM, true);
     }
 
     void setStreaming(boolean on) {

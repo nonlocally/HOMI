@@ -166,7 +166,14 @@ class Muse {
             out.put("err", "the microphone failed: " + String.valueOf(e.getMessage()));
             return out;
         }
-        if (!rec.heardSpeech) {
+        // Do NOT gate the upload on heardSpeech. That flag comes from an RMS
+        // threshold invented in Audio.record, and on 2026-09-01 it called a
+        // real Hinglish utterance silence for twelve straight seconds — the
+        // clip transcribed perfectly over the streaming path in the same
+        // minute. The heuristic is fit to stop a recording EARLY once speech
+        // has clearly ended; it is not fit to decide whether speech happened.
+        // Muse is. Twelve seconds of nothing costs a fifteenth of a cent.
+        if (rec.ms < 800) {
             out.put("ok", false);
             out.put("err", "didn't catch that");
             out.put("recorded_ms", rec.ms);
