@@ -21,7 +21,7 @@ Wire facts (reverse-engineered + verified live):
     connecting to that path and writing another user message.
   * Liveness discovery merely connects to the socket; accepting is enough.
 """
-import argparse, json, os, signal, socket, subprocess, sys, threading, time, uuid
+import argparse, json, os, re, signal, socket, subprocess, sys, threading, time, uuid
 
 
 def _extract_text(content):
@@ -241,9 +241,22 @@ def serve(opts):
         threading.Thread(target=_handle, args=(conn, opts), daemon=True).start()
 
 
+def _unwrap_leading(text):
+    """Strip ONE leading cross-session-message wrapper. Returns (body, from_name).
+    A wrapper appearing mid-text is content and is left alone."""
+    m = re.match(r"^<cross-session-message\b([^>]*)>\n?(.*?)\n?</cross-session-message>\s*$",
+                 text, re.S)
+    if not m:
+        return text, None
+    nm = re.search(r'from-name="([^"]*)"', m.group(1))
+    return m.group(2), (nm.group(1) if nm else None)
+
+
 def recv(opts):
     """Listen on a socket and print the body of the first real message that
-    arrives (ignoring empty liveness probes), then exit. For tests."""
+    arrives (ignoring empty liveness probes), then exit. With --plant-name the
+    listener is a first-class bus citizen for its lifetime: a numeric sidecar
+    (own live pid) so ListAgents lists it and native SendMessage can reply."""
     if os.path.exists(opts.socket):
         os.unlink(opts.socket)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -251,6 +264,11 @@ def recv(opts):
     os.chmod(opts.socket, 0o600)
     srv.listen(8)
     srv.settimeout(opts.timeout)
+    sidecar = None
+    if getattr(opts, "plant_name", "") and getattr(opts, "sessions_dir", ""):
+        sidecar = os.path.join(opts.sessions_dir, "%d.json" % os.getpid())
+        with open(sidecar, "w") as f:
+            json.dump(_sidecar_obj(opts.socket, opts.plant_name, os.getpid()), f)
     try:
         while True:
             try:
@@ -272,7 +290,12 @@ def recv(opts):
                 continue
             if msg.get("type") != "user":
                 continue
-            sys.stdout.write(_extract_text((msg.get("message") or {}).get("content")))
+            body = _extract_text((msg.get("message") or {}).get("content"))
+            if getattr(opts, "unwrap", False):
+                body, from_name = _unwrap_leading(body)
+                if from_name:
+                    sys.stderr.write("recv: reply from %s\n" % from_name)
+            sys.stdout.write(body)
             sys.stdout.flush()
             return 0
     finally:
@@ -280,6 +303,11 @@ def recv(opts):
             os.unlink(opts.socket)
         except OSError:
             pass
+        if sidecar:
+            try:
+                os.unlink(sidecar)
+            except OSError:
+                pass
 
 
 def mailbox(opts):
@@ -467,6 +495,11 @@ def main():
     r = sub.add_parser("recv")
     r.add_argument("--socket", required=True)
     r.add_argument("--timeout", type=float, default=60)
+    r.add_argument("--unwrap", action="store_true",
+                   help="strip a LEADING cross-session-message wrapper; attribution goes to stderr")
+    r.add_argument("--plant-name", default="",
+                   help="plant a numeric sidecar with this name while listening (with --sessions-dir)")
+    r.add_argument("--sessions-dir", dest="sessions_dir", default="")
 
     mb = sub.add_parser("mailbox")
     mb.add_argument("--socket", required=True)

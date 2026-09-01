@@ -86,11 +86,13 @@ sys.stdout.write("%s\t%s\t%s" % (typ,via,sock))
 # any agent: resolve the name, write the socket.
 router_route() {
   local name="$1"; shift || true
-  [ -n "$name" ] || die "usage: communicate route <name> <message>"
+  [ -n "$name" ] || die "usage: communicate route <name> [--coach] <message>"
+  local -a extra=()
+  [ "${1:-}" = "--coach" ] && { extra+=(--coach); shift; }
   [ "$#" -gt 0 ] || die "empty message"
   local info; info="$(router_whereis "$name" 2>/dev/null)" || die "no agent named '$name' (see: communicate agents). Bridge/peer it first."
   local typ via sock
   typ="${info%%$'\t'*}"; info="${info#*$'\t'}"; via="${info%%$'\t'*}"; sock="${info#*$'\t'}"
   log "route -> $name  [$typ via $via]"
-  peer_send "$sock" --as "router" -- "$@"
+  peer_send "$sock" --as "router" "${extra[@]+"${extra[@]}"}" -- "$@"
 }

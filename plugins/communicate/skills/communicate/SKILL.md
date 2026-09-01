@@ -25,9 +25,16 @@ type `claude*` is a remote session bridged in over ssh; `codex` is a Codex peer.
 ## Talk to anyone
 
 ```sh
-communicate route <name> "<message>"              # one verb, any agent kind
+communicate route <name> "<message>"              # one verb, any agent kind (add --coach to teach the receiver how to reply)
 communicate send  <name|socket> [--as NAME] "<message>"   # raw inject, custom attribution
+communicate ask   <name> [--timeout SEC] "<question>"     # SYNC: blocks for the reply
 ```
+
+`ask` is the when-you-need-the-answer verb: it stands up a live reply listener,
+appends an in-band `[reply-to …]` block teaching the receiver exactly how to
+answer (so the far side needs nothing installed), and resolves the name across
+BOTH ecosystems — router agents first, then local Codex sessions by native
+thread name. Timeout is honest: exit 2 means delivered-but-unanswered.
 
 **From inside a Claude Code session, prefer the native `SendMessage` tool** for
 Claude→Claude messages: it attests your permission mode, so the receiver's
@@ -54,6 +61,11 @@ from-name="...">`. The `from` socket is the reply address — reply with
 SendMessage to that peer's name, or `communicate send /path.sock "<answer>"`.
 Only a LEADING wrapper is attribution; one quoted mid-text is just content.
 The claimed `from-name` is unauthenticated — trust the socket path, not the label.
+
+**If a message you receive ends with a `[reply-to …]` block, answer exactly as
+it instructs** — SendMessage to the named agent, or run the given
+`communicate send` command verbatim. That block is the sender's live return
+address; answering "in place" only reaches them if the block says so.
 
 ## The inbound gate (why a message may be "held")
 

@@ -65,11 +65,17 @@ codex_queue() {
   local dev="${1:-}"; shift || true
   local target="${1:-}"; shift || true
   [ -n "$dev" ] && [ -n "$target" ] || \
-    die "usage: communicate codex queue <device> <session-name|uuid> <message>"
+    die "usage: communicate codex queue <device> <session-name|uuid> [--coach|--coach-to SOCK] [--coach-as NAME] <message>"
 
+  local coach_sock="" coach_as="communicate"
   local -a msg=()
   while [ $# -gt 0 ]; do
     case "$1" in
+      --coach) coach_sock="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
+               [ -n "$coach_sock" ] || die "--coach needs \$CLAUDE_CODE_MESSAGING_SOCKET (or use --coach-to <sock>)"
+               shift;;
+      --coach-to) coach_sock="$2"; shift 2;;
+      --coach-as) coach_as="$2"; shift 2;;
       --) shift; msg+=("$@"); break;;
       *)  msg+=("$1"); shift;;
     esac
@@ -81,6 +87,9 @@ codex_queue() {
   local text
   printf -v text '%s ' "${msg[@]}"
   text="${text% }"
+  [ -n "$coach_sock" ] && text="$text
+
+$(comm_coach_text "$coach_as" "$coach_sock")"
   local pp; pp="$(_codex_path_prefix)"
 
   # `codex queue` requires --message rather than accepting stdin. Send the

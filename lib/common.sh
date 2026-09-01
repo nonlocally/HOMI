@@ -154,3 +154,11 @@ sys.stdout.write(v if isinstance(v,str) else (str(v) if v is not None else ""))'
 }
 
 mkdir -p "$COMM_STATE" 2>/dev/null || true
+
+# In-band reply coaching: appended to an outbound message so the RECEIVER —
+# Claude, Codex, or anything with a shell — knows exactly how to answer,
+# with nothing installed. Keep wording in sync with the communicate skill.
+comm_coach_text() { # <asker-name> <reply-socket>
+  printf '[reply-to %s uds:%s — from a Claude Code session: SendMessage to "%s" (or just reply to this message); from any shell: communicate send %s --as <your-name> -- "<answer>" (communicate is on PATH, or ~/.local/share/communicate/current/vendor/bin/communicate, or <repo>/bin/communicate). If you cannot run commands, answer in place.]' \
+    "$1" "$2" "$1" "$2"
+}
