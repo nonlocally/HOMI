@@ -29,6 +29,10 @@ holds the reverse-engineered wire protocol; `README.md` the user story.
   the native SendMessage tool for Claude→Claude (it attests your permission
   mode, so the receiver's inbound gate holds less). Reply to the `from` socket
   of any cross-session message you receive.
+- **Need the answer?** `communicate ask <name> "<q>"` — blocks for the reply;
+  its in-band `[reply-to …]` block teaches the receiver how to answer (works on
+  Claude sessions and local Codex sessions by thread name). If a message YOU
+  receive ends with `[reply-to …]`, answer exactly as it instructs.
 - **Codex lanes:** existing session → `communicate codex queue <dev> <name>
   "<msg>"` (async; reply stays in that session; Codex ≥ 0.151); fresh headless
   answer → `communicate codex ask <dev> "<q>"` (sync, thread continuity);

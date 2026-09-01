@@ -143,6 +143,7 @@ communicate codex  peer  <device> [name]     # remote Codex -> native Claude pee
 communicate codex  unpeer <device|all>
 
 communicate send <peer-name|socket> [--as NAME] <message>   # raw inject into a peer socket
+communicate ask  <name> [--timeout SEC] <message>           # sync ask: coached delivery + blocking reply
 ```
 
 `<device>` is `local`, a Tailscale hostname (e.g. `aadarshs-mac-mini-2`), or
