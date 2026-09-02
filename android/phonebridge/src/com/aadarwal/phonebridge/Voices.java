@@ -144,8 +144,11 @@ class Voices {
         // No stored choice, or a choice whose key has since gone. Prefer the
         // cloud voices — they are the reason to have this class — and fall
         // back to on-device rather than failing every turn.
-        if (sarvam.available()) return SARVAM;
+        // grok first: 832ms to first audio on this phone against bulbul's
+        // 2937ms, same sentence. The voice picker (behind the header) still
+        // offers all 66.
         if (xai.available()) return XAI;
+        if (sarvam.available()) return SARVAM;
         return ANDROID;
     }
 
@@ -170,13 +173,10 @@ class Voices {
     static final String LANG_HI = "hi";
     static final String LANG_MIX = "mix";
 
+    /** Now only a HINT to Muse (languageBias), not a provider switch. */
     String turnLang() {
         String l = prefs().getString(K_LANG, LANG_EN);
-        if (LANG_HI.equals(l) || LANG_MIX.equals(l)) {
-            // Without a Muse key there is no Hindi at all on this device, so
-            // fall back rather than record a turn nothing can transcribe.
-            return muse.available() ? l : LANG_EN;
-        }
+        if (LANG_HI.equals(l) || LANG_MIX.equals(l)) return muse.available() ? l : LANG_EN;
         return LANG_EN;
     }
 
@@ -187,9 +187,15 @@ class Voices {
         return true;
     }
 
-    /** Derived, never stored: English listens locally, everything else cannot. */
+    /**
+     * MUSE FOR EVERYTHING, while it is being made to work. English included:
+     * Muse is multilingual and its streaming endpointer is the thing being
+     * relied on, and the person asked for one set of ears with nothing else
+     * in the way. On-device stays wired underneath as the fallback for a
+     * missing key or a dead network — never as a choice on the screen.
+     */
     String sttProvider() {
-        return LANG_EN.equals(turnLang()) ? ANDROID : MUSE;
+        return muse.available() ? MUSE : ANDROID;
     }
 
     boolean streaming() {

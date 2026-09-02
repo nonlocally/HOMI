@@ -122,8 +122,13 @@ public class Home extends Activity {
         TextView title = Ui.text(this, "homi", 28, Ui.TEXT);
         title.setLetterSpacing(-0.02f);
         head.addView(title, Ui.lpWrap());
+        // Everything that is not talking lives BEHIND this one tap: which
+        // voice speaks, where a turn escalates, whether Muse streams. The
+        // main screen is for the turn, and only the turn.
         headerNote = Ui.text(this, "", 12, Ui.DIM);
         headerNote.setGravity(Gravity.END);
+        headerNote.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), 0, Ui.dp(this, 6));
+        headerNote.setOnClickListener(v -> openSettings());
         head.addView(headerNote, Ui.lpGrow());
         col.addView(head, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -213,37 +218,8 @@ public class Home extends Activity {
         answerLine.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 4));
         col.addView(answerLine, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // the voice, first, because this is a voice interface ----------------
-        //
-        // What used to sit here was "TALK goes to <agent>", and it was not
-        // true: the ladder answers most turns itself and the agent is never
-        // reached. A permanent label naming a destination that a typical
-        // turn never visits is a lie the screen tells every time you look at
-        // it. The VOICE is the thing that is always involved, so it goes
-        // here; the agent moved down to where its actual role — escalation —
-        // can be stated honestly.
-        LinearLayout vpick = Ui.row(this);
-        vpick.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6));
-        TextView vLabel = Ui.text(this, "", 13, Ui.TEXT);
-        vpick.addView(vLabel, Ui.lpGrow());
-        TextView vChev = Ui.text(this, "change", 13, Ui.ACCENT);
-        vpick.addView(vChev, Ui.lpWrap());
-        vpick.setOnClickListener(v -> chooseVoice());
-        col.addView(vpick, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
-        voiceLabel = vLabel;
 
-        // (the language buttons live up by TALK, where the choice is made)
 
-        // where it escalates TO, when the ladder cannot answer ----------------
-        LinearLayout pick = Ui.row(this);
-        pick.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), Ui.dp(this, 6));
-        TextView pickLabel = Ui.text(this, "", 13, Ui.DIM);
-        pick.addView(pickLabel, Ui.lpGrow());
-        TextView chev = Ui.text(this, "change", 13, Ui.ACCENT);
-        pick.addView(chev, Ui.lpWrap());
-        pick.setOnClickListener(v -> chooseTarget());
-        col.addView(pick, Ui.lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT));
-        pickTargetLabel = pickLabel;
 
         // a status line that says what just happened -------------------------
         statusLine = Ui.text(this, "", 13, Ui.DIM);
@@ -276,8 +252,6 @@ public class Home extends Activity {
         return sv;
     }
 
-    private TextView pickTargetLabel;
-    private TextView voiceLabel;
     private TextView langEn, langHi, langMix;
 
     // ---------------------------------------------------------- the language
@@ -415,7 +389,7 @@ public class Home extends Activity {
                 ui.post(() -> {
                     renderAgents(roster);
                     String h = Api.handle();
-                    headerNote.setText(h == null ? "" : "you are " + h);
+                    setHeader(h == null ? "" : h);   // never paint over the settings door
                 });
             } catch (Exception e) {
                 Log.w(Listener.TAG, "roster failed", e);
@@ -488,10 +462,35 @@ public class Home extends Activity {
 
     // ------------------------------------------------------------ the target
 
+    private String handleShown = null;
+
+    /** One writer for the header, so the settings door cannot be painted over. */
+    private void setHeader(String handle) {
+        if (handle != null) handleShown = handle;
+        String who = handleShown == null || handleShown.isEmpty() ? "" : handleShown + "  ·  ";
+        headerNote.setText(who + voiceName() + "  ›");
+    }
+
     private void showTarget() {
-        pickTargetLabel.setText("escalates to " + target);
-        voiceLabel.setText("voice · " + voiceName());
+        setHeader(null);
         if (!busy) talkSub.setText("tap and speak");
+    }
+
+    /** The door to everything that is not the turn. */
+    private void openSettings() {
+        final String[] items = {
+            "voice  ·  " + voiceName(),
+            "escalates to  ·  " + target,
+            (voices.streaming() ? "muse streams  ·  on" : "muse streams  ·  off"),
+        };
+        new AlertDialog.Builder(this)
+            .setTitle("homi")
+            .setItems(items, (d, i) -> {
+                if (i == 0) chooseVoice();
+                else if (i == 1) chooseTarget();
+                else { voices.setStreaming(!voices.streaming()); showTarget(); }
+            })
+            .show();
     }
 
     /** What is actually going to answer, in the fewest words that stay true. */
@@ -616,8 +615,10 @@ public class Home extends Activity {
         setTalkState("LISTENING", "speak now");
         work.execute(() -> {
             String heard = "";
+            String ears = "";
             try {
                 Map<String, Object> got = voices.listen(20, this::stage);
+                ears = String.valueOf(got.get("provider")) + " · " + String.valueOf(got.get("mode"));
                 Object t = got.get("text");
                 if (Boolean.TRUE.equals(got.get("ok")) && t != null) {
                     heard = t.toString().trim();
@@ -635,8 +636,10 @@ public class Home extends Activity {
             }
 
             final String said = heard;
+            final String earsF = ears;
             ui.post(() -> {
                 heardLine.setText("YOU SAID   " + said);
+                status(earsF, Ui.DIM);
                 stage("THINKING", "the router");
             });
 
@@ -675,7 +678,7 @@ public class Home extends Activity {
                 ui.post(() -> {
                     setLadder(tier);
                     answerLine.setText(ans);
-                    status(tier, Ui.DIM);
+                    status(earsF + "  →  " + tier, Ui.DIM);
                 });
                 try {
                     voices.say(ans, 120, this::stage);
