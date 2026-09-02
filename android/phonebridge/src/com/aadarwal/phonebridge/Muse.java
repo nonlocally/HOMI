@@ -463,6 +463,8 @@ class Muse {
         } else if (Voices.LANG_MIX.equals(turnLang)) {
             l.add("Hindi");
             l.add("English");
+        } else {
+            l.add("English");     // EN goes to Muse too now; say so
         }
         return l;
     }
