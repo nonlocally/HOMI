@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
+import { copyRuntimeDependencies, hasRuntimeDependencies } from "./runtime-deps.mjs";
 
 const pkgDir = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
@@ -36,7 +37,7 @@ function parseFlags(argv) {
 
 function stabilize(dry) {
   const dest = path.join(dataRoot(), pkg.version);
-  const hasDeps = existsSync(path.join(pkgDir, "node_modules"));
+  const hasDeps = hasRuntimeDependencies(pkgDir);
   if (dry) {
     log(`[dry-run] would copy payload -> ${dest} (vendor, src, package.json${hasDeps ? ", node_modules" : ""})`);
     log(`[dry-run] would point symlink ${currentLink()} -> ${dest}`);
@@ -46,7 +47,7 @@ function stabilize(dry) {
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
   for (const item of ["vendor", "src", "package.json"]) cpSync(path.join(pkgDir, item), path.join(tmp, item), { recursive: true });
-  if (hasDeps) cpSync(path.join(pkgDir, "node_modules"), path.join(tmp, "node_modules"), { recursive: true });
+  if (hasDeps) copyRuntimeDependencies(pkgDir, tmp);
   // The installed plugin must not depend on the npm registry: point its MCP
   // entry at the stabilized files when the deps travelled with them.
   const mcpPath = path.join(tmp, "vendor", "plugins", "communicate", ".mcp.json");
@@ -87,7 +88,7 @@ function claudeInstall(dry) {
   s.extraKnownMarketplaces = { ...(s.extraKnownMarketplaces || {}), [MARKET_ID]: { source: { source: "directory", path: marketRoot } } };
   s.enabledPlugins = { ...(s.enabledPlugins || {}), [PLUGIN_ID]: true };
   writeSettings(s, dry, `add extraKnownMarketplaces.${MARKET_ID} + enabledPlugins["${PLUGIN_ID}"]`);
-  log("Claude Code: new sessions load the plugin (skills, /agents, CLI on PATH, MCP tools).");
+  log("Claude Code: new sessions load the plugin (six skills, /agents, /bus, CLI on PATH, MCP tools).");
 }
 
 function claudeUninstall(dry) {

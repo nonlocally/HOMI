@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Sandboxed setup test: fake $HOME + $COMMUNICATE_DATA, assert merge-not-clobber,
 // backup, payload+symlink, uninstall restore, and dry-run writes nothing.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 
 const pkgDir = fileURLToPath(new URL("..", import.meta.url));
-const cli = path.join(pkgDir, "src", "cli.mjs");
+const cli = process.env.COMM_SETUP_TEST_ENTRY || path.join(pkgDir, "src", "cli.mjs");
 const fakeHome = mkdtempSync(path.join(os.tmpdir(), "comm-setup-home-"));
 const data = path.join(fakeHome, "data");
 mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
@@ -17,7 +17,7 @@ writeFileSync(sp, JSON.stringify({ sentinel: "keep-me", enabledPlugins: { "exist
 
 const env = { ...process.env, HOME: fakeHome, COMMUNICATE_DATA: data };
 const runCli = (...args) => spawnSync("node", [cli, ...args], { encoding: "utf8", env });
-const die = (m) => { console.error("FAIL: " + m); process.exit(1); };
+const die = (m) => { console.error("FAIL: " + m); rmSync(fakeHome, { recursive: true, force: true }); process.exit(1); };
 
 // 1. dry-run writes nothing
 let r = runCli("setup", "--claude", "--dry-run");
@@ -38,13 +38,22 @@ if (s.enabledPlugins["communicate@communicate"] !== true) die("plugin not enable
 if (!readdirSync(path.join(fakeHome, ".claude")).some((f) => f.startsWith("settings.json.communicate-backup-"))) die("no backup written");
 if (!lstatSync(path.join(data, "current")).isSymbolicLink()) die("current is not a symlink");
 if (!existsSync(path.join(data, "current", "vendor", "bin", "communicate"))) die("payload CLI missing");
+for (const file of ["bus.py", "bus_broker.py", "bus_ui.html"])
+  if (!existsSync(path.join(data, "current", "vendor", "lib", file))) die(`bus payload missing: ${file}`);
+if (!existsSync(path.join(data, "current", "vendor", "plugins", "communicate", "skills", "communicate-bus", "SKILL.md"))) die("bus registration skill missing");
 if (!existsSync(path.join(data, "current", "vendor", "plugins", ".claude-plugin", "marketplace.json"))) die("marketplace file missing in payload");
 // stabilized .mcp.json must not depend on the registry when deps travelled
 const mcp = JSON.parse(readFileSync(path.join(data, "current", "vendor", "plugins", "communicate", ".mcp.json"), "utf8"));
-if (existsSync(path.join(pkgDir, "node_modules")) && mcp.mcpServers.communicate.command !== "node") die("stabilized .mcp.json still uses npx");
+if (mcp.mcpServers.communicate.command !== "node") die("stabilized .mcp.json must launch its local dependencies");
 // payload CLI actually runs
 const agents = spawnSync(path.join(data, "current", "vendor", "bin", "communicate"), ["agents"], { encoding: "utf8", env });
 if (agents.status !== 0) die("payload CLI failed: " + agents.stderr);
+// Exercise the stabilized copy, whose dependency graph must be self-contained
+// even when npm hoisted the original package's dependencies to another root.
+const stabilized = spawnSync("node", [path.join(pkgDir, "test", "mcp-smoke.mjs")], {
+  encoding: "utf8", env: { ...env, COMM_MCP_TEST_ENTRY: path.join(data, "current", "src", "cli.mjs") }, timeout: 45000,
+});
+if (stabilized.status !== 0) die("stabilized MCP/bus failed: " + stabilized.stdout + stabilized.stderr);
 
 // 3. uninstall restores
 r = runCli("setup", "--claude", "--uninstall");
@@ -54,4 +63,5 @@ if (s2.extraKnownMarketplaces?.communicate || s2.enabledPlugins?.["communicate@c
 if (s2.sentinel !== "keep-me" || !s2.enabledPlugins["existing@mkt"]) die("uninstall damaged unrelated keys");
 if (!existsSync(path.join(data, "current"))) die("uninstall should keep payload without --purge");
 
-console.log("PASS: setup-smoke — dry-run inert, merge-not-clobber, backup, payload+symlink, mcp rewrite, uninstall restores");
+rmSync(fakeHome, { recursive: true, force: true });
+console.log("PASS: setup-smoke — dry-run inert, settings merge/backup, standalone dependency graph, stabilized MCP/bus, uninstall restores");

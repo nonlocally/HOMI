@@ -6,6 +6,36 @@
 
 _sr_settings() { printf '%s/.claude/settings.json' "$HOME"; }
 
+# A shared launcher pointer avoids relying on different plugin-root expansion
+# syntaxes in Claude and Codex. It is local installer state, not plugin source.
+_sr_repo_pointer() {
+  local mode="$1" dry="$2"
+  python3 - "$mode" "$dry" "$COMM_HOME" "${COMMUNICATE_DATA:-$HOME/.local/share/communicate}" <<'PY'
+import os, sys, tempfile
+mode, dry, repo, root = sys.argv[1:]
+dest = os.path.join(root, "repo-path")
+if mode == "keep":
+    print("keeping shared checkout MCP path for other plugin clients; setup-repo --uninstall removes it")
+    sys.exit(0)
+if dry == "1":
+    print("[dry-run] would " + ("record checkout MCP path in " if mode == "install" else "remove matching checkout MCP path from ") + dest)
+elif mode == "install":
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".repo-path-", dir=root)
+    with os.fdopen(fd, "w") as f:
+        f.write(repo + "\n")
+    os.replace(tmp, dest)
+else:
+    try:
+        with open(dest) as f:
+            matches = f.read().rstrip("\n") == repo
+        if matches:
+            os.unlink(dest)
+    except FileNotFoundError:
+        pass
+PY
+}
+
 # Merge (or remove) the two Claude keys. python3 owns the JSON: backup first,
 # merge-not-clobber, refuse an unparsable file.
 _sr_claude() {
@@ -43,8 +73,7 @@ PY
 }
 
 _sr_run_codex() { # <args...> -> ok/fail, logged
-  # shellcheck disable=SC2068
-  if codex $@ >/dev/null 2>&1; then log "codex $* — ok"; return 0
+  if codex "$@" >/dev/null 2>&1; then log "codex $* — ok"; return 0
   else return 1; fi
 }
 
@@ -106,10 +135,14 @@ setup_repo() {
   local mode=install; [ "$uninstall" = 1 ] && mode=uninstall
   [ "$claude" = 1 ] && { _sr_claude "$mode" "$dry" || die "claude registration failed"; }
   [ "$codex" = 1 ] && _sr_codex "$mode" "$dry"
+  local pointer_mode="$mode"
+  if [ "$mode" = uninstall ] && { [ "$claude" != 1 ] || [ "$codex" != 1 ]; }; then
+    pointer_mode=keep
+  fi
+  _sr_repo_pointer "$pointer_mode" "$dry" || die "checkout MCP path registration failed"
   if [ "$mode" = install ] && [ "$dry" != 1 ]; then
     ok "this checkout is registered — new Claude sessions load skills + /agents + bin; git pull = upgrade"
-    log "MCP face note: the plugin's .mcp.json launches 'npx -y @aadarwal/communicate serve',"
-    log "which activates once the package is published (until then, sessions may report that"
-    log "server as unavailable — everything else works; the npm-mode setup wires MCP locally)."
+    log "MCP uses this checkout too. Install its Node dependencies once:"
+    log "  npm --prefix \"$COMM_HOME/packages/communicate\" install"
   fi
 }

@@ -1,9 +1,21 @@
 ---
 name: communicate-fleet
-description: Reaching agents on other devices — ssh substrate, remote session listing, and bridging a remote Claude session in as a native local peer. Use when asked to talk to an agent on another machine/device, list sessions on a remote host, bridge/unbridge a session, or check/tear down communicate's active plumbing.
+description: Reaching agents on other devices — bus invitations over HTTPS for new participants, plus legacy SSH remote session listing and Claude bridges. Use when connecting another person's device, joining a remote bus, listing sessions, bridging/unbridging, or checking communicate's network plumbing.
 ---
 
 # communicate-fleet — other devices
+
+For a shared registered bus, use the `communicate-bus` skill. The owner issues
+a scoped invite with `communicate bus invite BUS --url https://HOST`; the
+participant runs `communicate bus connect INVITE_CODE` and then
+`communicate bus register --bus BUS` inside its existing agent session.
+Participants only make outbound HTTPS requests. This works across tailnets
+when the owner intentionally exposes its authenticated gateway over public
+HTTPS, and requires no participant SSH access or inbound agent socket.
+
+The SSH tools below remain useful for trusted devices already under your
+administration. They grant the access of the SSH account and do not implement
+private bus membership checks.
 
 Devices are addressed as `local`, a Tailscale hostname (e.g.
 `aadarshs-mac-mini-2`), or `user@host`. Transport is plain ssh — your keys are

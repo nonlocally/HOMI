@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end check of the communicate distribution: manifests valid, payload
 # homi-free, tarball installable, CLI + MCP + setup work from the packed artifact.
+# The complete broker/client TLS/UI suite is intentionally separate:
+# scripts/test-bus.sh (temporary endpoints only, no external network).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$ROOT/packages/communicate"
@@ -41,6 +43,9 @@ echo "3) vendor is homi-free"
 ( cd "$PKG" && node scripts/vendor.mjs >/dev/null ) || fail "vendor.mjs errored"
 find "$PKG/vendor" \( -name 'homi*.py' -o -name 'homi.sh' \) | grep -q . && fail "homi artifact in vendor" || ok "no homi artifacts"
 ls "$PKG/vendor/plugins" | grep -v "^\.claude-plugin$\|^communicate$" | grep -q . && fail "foreign plugin in vendor: $(ls "$PKG/vendor/plugins")" || ok "only the communicate plugin vendored"
+for artifact in bus.py bus_broker.py bus_ui.html; do
+  [ -f "$PKG/vendor/lib/$artifact" ] && ok "bus payload: $artifact" || fail "bus payload missing: $artifact"
+done
 
 echo "4) npm pack -> install into temp prefix -> run"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -50,6 +55,10 @@ npm install --prefix "$TMP" --silent "$PKG/$TARBALL" >/dev/null 2>&1 || fail "np
 BIN="$TMP/node_modules/.bin/communicate"
 "$BIN" version >/dev/null 2>&1 && ok "installed bin: version" || fail "installed bin: version"
 "$BIN" agents >/dev/null 2>&1 && ok "installed bin: agents" || fail "installed bin: agents"
+COMM_MCP_TEST_ENTRY="$TMP/node_modules/@aadarwal/communicate/src/cli.mjs" node "$PKG/test/mcp-smoke.mjs" \
+  && ok "packed artifact: full bus MCP flow" || fail "packed artifact: bus MCP flow"
+COMM_SETUP_TEST_ENTRY="$TMP/node_modules/@aadarwal/communicate/src/cli.mjs" node "$PKG/test/setup-smoke.mjs" \
+  && ok "packed artifact: install with hoisted dependencies" || fail "packed artifact: stabilized installation"
 
 echo "5) setup --dry-run from the installed artifact writes nothing"
 FH="$(mktemp -d)"
@@ -60,6 +69,7 @@ rm -rf "$FH"
 echo "6) unit smokes + codex-queue payload test"
 ( cd "$PKG" && node test/mcp-smoke.mjs >/dev/null 2>&1 ) && ok "mcp-smoke" || fail "mcp-smoke"
 ( cd "$PKG" && node test/setup-smoke.mjs >/dev/null 2>&1 ) && ok "setup-smoke" || fail "setup-smoke"
+( cd "$PKG" && node test/launcher-smoke.mjs >/dev/null 2>&1 ) && ok "launcher-smoke" || fail "launcher-smoke"
 "$ROOT/scripts/test-codex-queue.sh" >/dev/null 2>&1 && ok "codex-queue" || fail "codex-queue"
 "$ROOT/scripts/test-setup-repo.sh" >/dev/null 2>&1 && ok "setup-repo" || fail "setup-repo"
 "$ROOT/scripts/test-ask.sh" >/dev/null 2>&1 && ok "ask+coach" || fail "ask+coach"

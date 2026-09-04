@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# communicate — plugin shim. Prefers the stabilized install, falls back to the
-# repo checkout this plugin dir lives in (dev mode).
+# communicate — plugin shim. Prefer this plugin's neighboring payload so a
+# registered checkout cannot be shadowed by an older frozen installation.
 set -euo pipefail
 src="${BASH_SOURCE[0]}"
 while [ -L "$src" ]; do src="$(readlink "$src")"; done
 here="$(cd "$(dirname "$src")" && pwd)"
+registered=""
+data="${COMMUNICATE_DATA:-$HOME/.local/share/communicate}"
+[ ! -f "$data/repo-path" ] || IFS= read -r registered < "$data/repo-path"
 for c in \
   "${COMMUNICATE_HOME:-}/bin/communicate" \
-  "$HOME/.local/share/communicate/current/vendor/bin/communicate" \
-  "$here/../../../bin/communicate"; do
+  "$here/../../../bin/communicate" \
+  "$registered/bin/communicate" \
+  "$data/current/vendor/bin/communicate"; do
   [ -n "$c" ] && [ -x "$c" ] && [ "$c" != "${src}" ] && exec "$c" "$@"
 done
 echo "communicate: no backing install found (run: npx -y @aadarwal/communicate setup)" >&2

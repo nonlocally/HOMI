@@ -11,6 +11,8 @@ holds the reverse-engineered wire protocol; `README.md` the user story.
    rendezvous routing: sidecars, sockets, ssh bridges, codex lanes, wake
    triggers. Standalone; distributed as `@aadarwal/communicate`
    (`packages/communicate/` + `plugins/communicate/`).
+   Explicit buses add `lib/bus.py`, `lib/bus_broker.py`, and `lib/bus_ui.html`:
+   opt-in session registration, scoped membership, an HTTPS gateway, and dashboard.
 2. **homi** (`lib/homi*.py`, `lib/homi.sh`, `packages/homi/`) — the durable
    plane: identities that outlive processes, mailboxes, store→wake, device
    links, seats, federation, move. NOT part of the communicate distribution;
@@ -22,6 +24,16 @@ holds the reverse-engineered wire protocol; `README.md` the user story.
    package's `setup` is the no-repo path.
 
 ## Operating on the bus (for any agent working here)
+
+- **Register explicitly:** `communicate bus register` attaches this current
+  session to general; `--bus photonics` joins only photonics. Verify its exact
+  registration ID with `bus agents --bus photonics --json`. Never use a newest
+  session guess or headless `codex peer` as a substitute for self.
+- **Explicit-bus interface:** `communicate bus dashboard --open` shows permitted
+  buses/agents. `bus send ID --bus NAME -- TEXT` enforces shared membership;
+  `bus receipt ID` distinguishes persistence, endpoint delivery and queueing.
+  Invite/connect/revoke and the network boundary are documented in `docs/BUSES.md`.
+  Native `agents`/`route` below remain a separate filesystem/SSH trust path.
 
 - **See who's here:** `communicate agents` (or the native ListAgents inside
   Claude Code). `communicate whereis <name>` resolves one name.

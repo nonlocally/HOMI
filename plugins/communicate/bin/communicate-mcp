@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Local MCP launcher used by setup-repo. Source and CLI stay on the same
+# checkout; no npx registry fallback may silently serve an older toolset.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd "$here/../../.." && pwd)"
+pkg="$repo/packages/communicate"
+if [ ! -f "$pkg/src/cli.mjs" ]; then
+  data="${COMMUNICATE_DATA:-$HOME/.local/share/communicate}"
+  if [ -f "$data/repo-path" ]; then
+    IFS= read -r repo < "$data/repo-path"
+    pkg="$repo/packages/communicate"
+  elif [ -f "$data/current/src/cli.mjs" ]; then
+    exec node "$data/current/src/cli.mjs" serve
+  fi
+fi
+if [ ! -f "$pkg/src/cli.mjs" ] || [ ! -d "$pkg/node_modules/@modelcontextprotocol/sdk" ]; then
+  printf 'communicate: install checkout MCP dependencies with: npm --prefix "%s" install\n' "$pkg" >&2
+  exit 127
+fi
+exec node "$pkg/src/cli.mjs" serve

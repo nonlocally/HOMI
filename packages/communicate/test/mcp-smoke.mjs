@@ -1,41 +1,145 @@
 #!/usr/bin/env node
-// Drive `communicate serve` as a raw MCP stdio client: initialize, tools/list
-// (exact 7 names in order), one agents_list call.
-import { spawn } from "node:child_process";
+// Exercise the MCP contract against isolated state and a fake Codex executable.
+// No live sessions, real messages, registry server, or user settings are used.
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import path from "node:path";
+import { communicateCli, packageVersion } from "../src/paths.mjs";
 
 const pkgDir = fileURLToPath(new URL("..", import.meta.url));
-const child = spawn("node", [path.join(pkgDir, "src", "cli.mjs"), "serve"], { stdio: ["pipe", "pipe", "inherit"] });
-let buf = ""; const pending = new Map();
+const taskHome = mkdtempSync(path.join(os.tmpdir(), "comm-mcp-"));
+const env = { ...process.env, HOME: taskHome, COMM_STATE: path.join(taskHome, "state"),
+  COMM_BUS_PORT: "0", COMMUNICATE_DATA: path.join(taskHome, "data"),
+  PATH: path.join(taskHome, "bin") + path.delimiter + process.env.PATH };
+for (const key of ["CODEX_HOME", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "COMM_CODEX_INDEX",
+  "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MESSAGING_SOCKET", "COMMUNICATE_HOME"]) delete env[key];
+mkdirSync(path.join(taskHome, ".codex"), { recursive: true });
+mkdirSync(path.join(taskHome, "bin"));
+writeFileSync(path.join(taskHome, "bin", "tailscale"), '#!/bin/sh\nprintf \'%s\\n\' \'{"Self":{"HostName":"mcp-fixture","DNSName":"mcp-fixture.test.ts.net."}}\'\n', { mode: 0o755 });
+const senderThread = "11111111-1111-4111-8111-111111111111";
+const recipientThread = "22222222-2222-4222-8222-222222222222";
+writeFileSync(path.join(taskHome, ".codex", "session_index.jsonl"),
+  [{ id: senderThread, thread_name: "sender" }, { id: recipientThread, thread_name: "recipient" }]
+    .map((v) => JSON.stringify(v)).join("\n") + "\n");
+writeFileSync(path.join(taskHome, "bin", "codex"), `#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:] == ["queue", "--help"]:
+    raise SystemExit(0)
+if len(sys.argv) < 2 or sys.argv[1] != "queue":
+    raise SystemExit("test refuses headless session creation")
+with open(os.path.join(os.environ["HOME"], "queued.jsonl"), "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+`, { mode: 0o755 });
+
+// Override the entry point to test a packed artifact with the same protocol checks.
+const entry = process.env.COMM_MCP_TEST_ENTRY || path.join(pkgDir, "src", "cli.mjs");
+const child = spawn("node", [entry, "serve"], { env, stdio: ["pipe", "pipe", "pipe"] });
+let buf = "", stderr = ""; const pending = new Map();
+child.stderr.on("data", (d) => { stderr += d; });
 child.stdout.on("data", (d) => {
   buf += d;
   let i; while ((i = buf.indexOf("\n")) >= 0) {
     const line = buf.slice(0, i); buf = buf.slice(i + 1);
     if (!line.trim()) continue;
     const msg = JSON.parse(line);
-    if (msg.id !== undefined && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+    if (msg.id !== undefined && pending.has(msg.id)) {
+      const { resolve, timer } = pending.get(msg.id);
+      clearTimeout(timer); pending.delete(msg.id); resolve(msg);
+    }
   }
 });
-const rpc = (id, method, params) => new Promise((res, rej) => {
-  pending.set(id, res);
+let nextId = 0;
+const rpc = (method, params) => new Promise((resolve, reject) => {
+  const id = ++nextId;
+  const timer = setTimeout(() => { pending.delete(id); reject(new Error(`timeout: ${method}\n${stderr}`)); }, 30000);
+  pending.set(id, { resolve, timer });
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  setTimeout(() => rej(new Error(`timeout: ${method}`)), 30000);
 });
 const notify = (method, params) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
-
-const EXPECT = ["agents_list", "whereis", "route", "send", "codex_queue", "codex_ask", "status", "ask", "card_set"];
+const call = async (name, args = {}, errorExpected = false) => {
+  const result = await rpc("tools/call", { name, arguments: args });
+  if (result.error) throw new Error(`${name}: ${JSON.stringify(result.error)}`);
+  const output = result.result.content?.[0]?.text ?? "";
+  if (Boolean(result.result.isError) !== errorExpected) throw new Error(`${name}: ${output}`);
+  return output;
+};
+const jsonCall = async (...args) => JSON.parse(await call(...args));
+const assert = (ok, message) => { if (!ok) throw new Error(message); };
+const EXPECT = ["agents_list", "whereis", "route", "send", "codex_queue", "codex_ask", "status", "ask", "card_set",
+  "bus_register", "bus_list", "bus_agents", "bus_leave", "bus_send", "bus_receipt", "bus_status", "bus_dashboard", "bus_create", "bus_device", "bus_reply"];
+let failed = false;
 try {
-  const init = await rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } });
-  if (init.result?.serverInfo?.name !== "communicate") throw new Error("bad serverInfo: " + JSON.stringify(init.result?.serverInfo));
-  if (!/agent bus/.test(init.result?.instructions ?? "")) throw new Error("instructions missing from initialize result");
+  const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } });
+  assert(init.result?.serverInfo?.name === "communicate", "bad serverInfo");
+  assert(init.result?.serverInfo?.version === packageVersion, "MCP server version must match package version");
+  assert(/register yourself on the bus/.test(init.result?.instructions ?? ""), "registration instructions missing");
   notify("notifications/initialized", {});
-  const list = await rpc(2, "tools/list", {});
-  const names = list.result.tools.map((t) => t.name);
-  if (JSON.stringify(names) !== JSON.stringify(EXPECT)) throw new Error(`tool list mismatch: ${names}`);
-  const call = await rpc(3, "tools/call", { name: "agents_list", arguments: {} });
-  const out = call.result.content?.[0]?.text ?? "";
-  if (!/NAME|no reachable agents/.test(out)) throw new Error("agents_list output unexpected: " + out.slice(0, 120));
-  console.log("PASS: mcp-smoke — initialize (with instructions), 9 tools in order, agents_list returns the table");
-  child.kill(); process.exit(0);
-} catch (e) { console.error("FAIL: " + e.message); child.kill(); process.exit(1); }
+  const list = await rpc("tools/list", {});
+  assert(JSON.stringify(list.result.tools.map((t) => t.name)) === JSON.stringify(EXPECT), "tool list mismatch");
+  assert(/NAME|no reachable agents/.test(await call("agents_list")), "legacy agents_list output");
+  const fresh = await jsonCall("bus_status");
+  assert(fresh.configured === false && fresh.hub === null, "first-use bus_status must not invent a local hub");
+  assert(!existsSync(path.join(env.COMM_STATE, "bus", "server.json")), "first-use bus_status started a local broker");
+  assert(/cannot identify this session/.test(await call("bus_register", {}, true)), "missing self must fail without creating an agent");
+  await call("bus_create", { name: "photonics" });
+  const sender = await jsonCall("bus_register", { bus: "photonics", kind: "codex", session: senderThread, description: "Sender fixture" });
+  const recipient = await jsonCall("bus_register", { bus: "photonics", kind: "codex", session: recipientThread });
+  assert(sender.id && recipient.id && sender.id !== recipient.id, "distinct current-session registrations");
+  const roster = await jsonCall("bus_agents", { bus: "photonics" });
+  assert(JSON.stringify(roster).includes(sender.id) && JSON.stringify(roster).includes(recipient.id), "registrations missing from selected bus");
+  const general = await jsonCall("bus_agents", { bus: "general" });
+  assert(!JSON.stringify(general).includes(sender.id), "private registration leaked into general");
+  const message = "literal quotes ' \" $HOME `touch nope` $(touch nope)\nsecond line";
+  const hub = (await jsonCall("bus_status")).hub;
+  const device = await jsonCall("bus_device", { name: "MCP device fixture", hub });
+  assert(device.device === "MCP device fixture", "bus_device failed to update this device label");
+  assert(device.device_id === sender.device_id && device.user === sender.user, "device update changed enrollment identity or account");
+  assert(device.device_metadata?.tailscale_hostname === "mcp-fixture", "device metadata was not refreshed from Self");
+  assert(/not connected/.test(await call("bus_send", {
+    target: recipient.id, from: sender.id, bus: "photonics", message, hub: "https://unconnected.invalid",
+  }, true)), "bus_send must forward the selected hub before the subcommand");
+  assert(/not connected/.test(await call("bus_receipt", {
+    id: "unused-receipt", hub: "https://unconnected.invalid",
+  }, true)), "bus_receipt must forward the selected hub before the subcommand");
+  assert(!existsSync(path.join(taskHome, "queued.jsonl")), "unknown-hub send must not reach the default broker");
+  const sent = await jsonCall("bus_send", { target: recipient.id, from: sender.id, bus: "photonics", message, hub });
+  const receiptId = sent.id || sent.message_id || sent.receipt?.id;
+  assert(receiptId, "bus_send must return receipt ID");
+  for (let i = 0; i < 40 && !existsSync(path.join(taskHome, "queued.jsonl")); i++) {
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  assert(existsSync(path.join(taskHome, "queued.jsonl")), "worker did not queue the bus message");
+  const queued = readFileSync(path.join(taskHome, "queued.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert(queued.some((args) => args.some((arg) => arg.includes(recipientThread)) && args.some((arg) => arg.includes(message))), "MCP lost literal message or exact target thread");
+  await call("bus_receipt", { id: receiptId, hub });
+  assert(/not connected/.test(await call("bus_reply", { id: receiptId, from: recipient.id, message: "wrong hub", hub: "https://unconnected.invalid" }, true)), "bus_reply must preserve operation-specific hub");
+  const reply = await jsonCall("bus_reply", { id: receiptId, from: recipient.id, message: "MCP scoped reply", hub });
+  assert(reply.conversation_expires_at === sent.conversation_expires_at, "reply changed fixed conversation deadline");
+  let replyQueued = false;
+  for (let i = 0; i < 40; i++) {
+    replyQueued = readFileSync(path.join(taskHome, "queued.jsonl"), "utf8").split("\n").some((line) => line.includes("MCP scoped reply") && line.includes(senderThread));
+    if (replyQueued) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  assert(replyQueued, "scoped MCP reply did not queue to original sender");
+  assert((await jsonCall("bus_status")).hub === hub, "operation-specific hub changed the default connection");
+  const dashboard = await call("bus_dashboard");
+  assert(/^http:\/\/127\.0\.0\.1:\d+\/#token=\S+\s*$/.test(dashboard), "dashboard must return authenticated loopback URL");
+  const page = await fetch(dashboard.split("#")[0]);
+  assert(page.status === 200 && (await page.text()).includes("<html"), "dashboard asset missing");
+  await call("bus_leave", { target: recipient.id, bus: "photonics" });
+  const after = await jsonCall("bus_agents", { bus: "photonics" });
+  assert(!JSON.stringify(after).includes(recipient.id), "leave did not remove membership");
+  await call("bus_status");
+  console.log(`PASS: mcp-smoke — ${EXPECT.length} tools, current-session registration, scope, literal send/queue, receipt, dashboard, leave`);
+} catch (e) {
+  failed = true; console.error("FAIL: " + e.message);
+} finally {
+  child.kill();
+  for (const { timer } of pending.values()) clearTimeout(timer);
+  spawnSync(communicateCli, ["bus", "stop"], { env, encoding: "utf8", timeout: 15000 });
+  rmSync(taskHome, { recursive: true, force: true });
+}
+process.exit(failed ? 1 : 0);
