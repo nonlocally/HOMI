@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """A live socket is insufficient when its original Claude session disappears."""
 import json
+import contextlib
 import os
 from pathlib import Path
 import socket
 import sys
+import sqlite3
 import tempfile
 import threading
 import time
@@ -81,6 +83,81 @@ class LifecycleTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "different-config")}):
             self.assertEqual(bus.current_status(record), "live")
 
+    def test_worker_upgrade_timeout_does_not_start_competitor_or_stop_broker(self):
+        state = self.root / "blocked-upgrade"
+        state.mkdir()
+        (state / "worker.json").write_text(json.dumps({"runtime": "older-version"}))
+        def lock(name, **_kwargs):
+            return contextlib.nullcontext(name != "worker")
+        with mock.patch.object(bus, "state_dir", return_value=state), \
+                mock.patch.object(bus, "locked", side_effect=lock), \
+                mock.patch.object(bus.time, "monotonic", side_effect=[0, 10, 20, 31]), \
+                mock.patch.object(bus.time, "sleep"), mock.patch.object(bus, "spawn_daemon") as spawn:
+            with self.assertRaisesRegex(bus.BusError, "did not stop within 30 seconds"):
+                bus.start_worker()
+        spawn.assert_not_called()
+        self.assertTrue((state / "worker.stop").exists())
+        self.assertFalse((state / "broker.stop").exists())
+
+    def test_device_poll_batches_hidden_adapters_and_journals_other_ack_failures(self):
+        state = self.root / "batched-worker"
+        state.mkdir()
+        url = "https://batch.invalid"
+        records = {str(i): {"id": "agent-" + str(i), "kind": "codex", "binary": sys.executable,
+                           "url": url, "buses": [], "reply_until": time.time() + 60} for i in range(3)}
+        records["2"]["reply_until"] = time.time() - 1
+        records["3"] = dict(records["2"], id="agent-3", buses=["general"])
+        cfg = {"connections": {url: {"url": url}}}
+        polls, delivered, acknowledged, errors = [], [], [], []
+        barrier = threading.Barrier(2)
+
+        def request(conn, operation, **payload):
+            if operation == "heartbeat":
+                self.assertNotIn("agent-2", {entry["id"] for entry in payload["agents"]})
+                return {"ok": True}
+            if operation == "poll_device":
+                polls.append(payload["agents"])
+                return {"messages": [{"id": "message-" + str(i), "target": "agent-" + str(i), "lease": "lease"}
+                                     for i in range(2)] if len(polls) == 1 else []}
+            if operation == "ack":
+                acknowledged.append(payload["id"])
+                if len(acknowledged) == 2:
+                    (state / "worker.stop").touch()
+                if payload["id"] == "message-0":
+                    raise bus.BusError("simulated lost ACK")
+                return {"ok": True}
+            raise AssertionError(operation)
+
+        def deliver(record, envelope):
+            barrier.wait(timeout=3)
+            delivered.append((record["id"], envelope["target"]))
+            return "queued", "fixture queued"
+
+        def run():
+            try:
+                bus.worker()
+            except Exception as exc:
+                errors.append(exc)
+
+        with mock.patch.object(bus, "state_dir", return_value=state), \
+                mock.patch.object(bus, "config", return_value=cfg), \
+                mock.patch.object(bus, "registrations", return_value=records), \
+                mock.patch.object(bus, "request", side_effect=request), \
+                mock.patch.object(bus, "deliver", side_effect=deliver), mock.patch.object(bus.signal, "signal"):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            thread.join(6)
+            (state / "worker.stop").touch()
+            thread.join(4)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(polls), 1)
+        self.assertEqual(set(polls[0]), {"agent-0", "agent-1", "agent-3"})
+        self.assertEqual(set(delivered), {("agent-0", "agent-0"), ("agent-1", "agent-1")})
+        self.assertEqual(set(acknowledged), {"message-0", "message-1"})
+        with sqlite3.connect(state / "receipts.sqlite") as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM delivered WHERE status='queued'").fetchone()[0], 2)
+
     def test_worker_is_ready_before_network_and_heartbeats_continue_during_delivery(self):
         state = self.root / "worker-state"
         state.mkdir()
@@ -108,9 +185,9 @@ class LifecycleTests(unittest.TestCase):
                     if counts["heartbeats"] >= 2:
                         healthy_twice.set()
                 return {"ok": True}
-            if operation == "poll":
+            if operation == "poll_device":
                 counts["polls"] += 1
-                return {"messages": [{"id": "message-1", "lease": "lease"}] if counts["polls"] == 1 else []}
+                return {"messages": [{"id": "message-1", "lease": "lease", "target": payload["agents"][0]}] if counts["polls"] == 1 else []}
             if operation == "ack":
                 return {"ok": True}
             raise AssertionError(operation)

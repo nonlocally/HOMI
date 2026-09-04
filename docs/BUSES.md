@@ -4,6 +4,18 @@ The bus is a directory and message gateway for sessions that choose to register.
 It is separate from the legacy `communicate agents` native-socket discovery
 table. Nothing is registered merely because a sidecar or transcript exists.
 
+On general, registration publishes an agent for discovery and incoming requests.
+Any local Claude or Codex agent on a device enrolled in general can initiate
+to a published general agent without publishing itself. A private bus requires
+both agents to join explicitly. Local Claude/Codex discovery, sockets, and the
+existing SSH router continue to work without bus publication or membership.
+
+For natural first-use requests through the plugin, “Register yourself on the
+bus” targets the hosted Communicate bus unless the user explicitly requests a
+local or self-hosted hub. The agent checks `bus status --no-start --json` first
+and requests the owner's invitation when no connection exists. Later requests
+use the configured hub. Standalone CLI commands keep their local default.
+
 ## Hosted Communicate bus
 
 `https://bus.communicate.sh` uses the same reader usernames and passwords as
@@ -14,12 +26,12 @@ when that gateway is redeployed. Aadarsh administers buses and invitations;
 other admitted readers can view general. Private bus membership requires an
 explicit invitation, even for someone who can sign in to the website.
 
-The tested 0.2.0 plugin archive is also available behind that login at
-`https://bus.communicate.sh/assets/communicate-0.2.0.tgz`. Download it in a
+The tested 0.2.1 plugin archive is also available behind that login at
+`https://bus.communicate.sh/assets/communicate-0.2.1.tgz`. Download it in a
 signed-in browser, then install the local file:
 
 ```sh
-npx -y --package "$HOME/Downloads/communicate-0.2.0.tgz" communicate setup
+npx -y --package "$HOME/Downloads/communicate-0.2.1.tgz" communicate setup
 ```
 
 Use the actual download path if your browser saved it elsewhere. Start a new
@@ -63,11 +75,63 @@ uses port 8443; Vercel has matching `BUS_ORIGIN_URL` and
 existing site's signing key. The private hub settings also retain this key for
 operator recovery; the origin process does not use it.
 
+The private settings also include `BUS_READER_USERS`, mapping existing reader
+logins to canonical account handles: `{"aadarsh":"aadarwal","peer":"peer"}`.
+With this mapping configured, unmapped readers are denied bus access. Add a
+mapping when admitting another reader. This does not change existing reader
+passwords or turn ordinary device credentials into administrator credentials.
+
 Stage a release, run the installer, and verify authenticated health locally
 before enabling its proxy. Keep the previous release for rollback. Changing
 gateway secrets requires updating both private origin settings and Vercel,
 then restarting the service and deploying the gateway. Back up the broker state
 directory, including its SQLite database and private admin token, together.
+Version 0.2.1 migrates the database for attribution. Keep a matching pre-upgrade
+state backup with the previous release: rolling back to 0.2.0 requires restoring
+that backup before starting the old broker, whose schema writes cannot use the
+new database directly.
+
+## Accounts and devices
+
+An agent belongs to an enrolled device, and that device belongs to the account
+assigned by the administrator's invitation. The device ID is its broker-issued
+principal, so changing a display name does not change its identity. Agent rows
+show the account, device name, and stable device ID. Browser readers are separate
+from enrolled devices and do not appear in the Devices revocation list.
+
+The hosted administrator signs in to the dashboard and chooses the account in
+the invitation form. Account ownership is separate from administrative access:
+an enrolled device owned by `aadarwal` still has a scoped device credential.
+The CLI equivalent is available only with an actual broker-admin credential:
+
+```sh
+communicate bus invite general --user peer --url https://YOUR-HUB
+```
+
+The joining client cannot assign itself to an account during connect or
+registration. An existing unassigned enrollment can receive its first account
+assignment through a new invitation. Once assigned, an invitation for another
+account cannot transfer that device to the other account.
+
+Connect and registration refresh the device's hostname and platform, plus its
+own Tailscale hostname and DNS name if the local CLI is available. The optional
+lookup has a 1.5-second timeout. Only `Self.HostName` and `Self.DNSName` are used;
+peer data and Tailscale user/account data are not sent. Device metadata describes
+the machine and does not establish account ownership.
+For a new enrollment, the default device label uses the first component of the
+Tailscale DNS name, then its hostname, then the OS hostname. `connect --device`
+overrides this choice. Discovery runs once per connection attempt.
+
+Refresh metadata or change the label from that installation:
+
+```sh
+communicate bus device
+communicate bus device --name lab-laptop
+```
+
+These commands preserve account ownership, stable device ID, registrations,
+and memberships. Older clients remain compatible but may lack host details
+until updated and registered again.
 
 ## One device
 
@@ -143,6 +207,9 @@ your local hub. The dashboard opened by the CLI follows the selected hub.
 For one operation without changing the default, use
 `communicate bus --hub HTTPS_ORIGIN send AGENT_ID --bus BUS -- MESSAGE`.
 Reply instructions include the correct hub automatically.
+They use `communicate bus --hub HTTPS_ORIGIN reply RECEIVED_MESSAGE_ID -- MESSAGE`.
+One outbound worker handles the device's local session adapters; no per-agent
+network ports or tunnels are needed.
 
 [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve) is
 tailnet-only. The native SSH router still works for sessions already bridged
@@ -188,16 +255,28 @@ The hub owns stable registration IDs and sets sender attribution from the
 authenticated registration; it never accepts caller-selected destination
 sockets, commands, or filesystem paths.
 
-Both sender and recipient must belong to the chosen bus. A private bus gives
-all of its members mutual reachability; it is not a directional per-agent ACL.
+On general, the recipient must be published and the initiating device must have
+general access. Sending identifies its exact local agent without adding a bus
+membership or roster entry. A private bus requires both agents to explicitly
+join and gives all members mutual reachability; it is not a directional per-agent ACL.
 Private buses and their members are omitted from unauthorized snapshots. A
 member also on general is still reachable through general. Same-UID processes
 are trusted together; this does not sandbox local processes or revoke older
 native socket/SSH access.
 
+Each send starts a conversation between those two agents on that bus. Only the
+recipient of an existing message can use `bus reply MESSAGE_ID` to answer it;
+the reply cannot change the participants or bus. General replies can reach an
+unpublished initiator without making it discoverable for unrelated requests.
+The conversation ends 24 hours after the initiating send. Replies retain that
+deadline. Leaving the bus or losing its access closes affected conversations
+permanently; rejoining does not revive them. The worker retains unpublished
+adapters only through their outstanding reply windows and batches their inbox
+polling by device. Per-agent queue order is preserved.
+
 The hub stores messages and receipts in SQLite. Queues are bounded to 256 pending
 messages per recipient, each at most 32 KiB, expiring after 24 hours. The broker
-rechecks membership before leasing messages to the recipient's worker. Revocation
+rechecks conversation access before leasing messages to the recipient's worker. Revocation
 cancels messages still in the broker; a payload already fetched by a client or
 written to an agent's queue cannot be retracted. Remote input remains peer text
 and does not attest a sender's agent permission mode.
@@ -229,9 +308,17 @@ It is an observation from the participating installation, not remote attestation
 
 `communicate bus status --json` reports worker errors and the selected hub.
 `bus receipt ID` reads a message outcome. `bus stop` cooperatively stops this
-machine's worker and owned broker while retaining registration state. Run
-`bus register` again to resume after stopping/restarting. Network reverse proxies
+machine's worker and owned broker while retaining registration state. A successful
+`bus send` or `bus reply` resumes the worker for its reply windows; `bus register`
+also resumes published/joined agents. Register only when publication or private
+membership is intended. Network reverse proxies
 are configured separately and are not removed by `bus stop`.
+
+After a plugin update, the next registration or successful send/reply compares
+the worker's loaded runtime with the installed client. An old worker is asked
+to stop and replaced cooperatively. The broker and native local routes remain
+running. If the old worker cannot release its lock within 30 seconds, the
+command reports the failure instead of killing a PID or starting a competitor.
 
 The deterministic checks are:
 
@@ -251,3 +338,16 @@ message delivery and receipts, forged-header rejection, and device revocation.
 It also queued a nonce through the public hub into a disposable real Codex
 thread, resumed that exact thread, and confirmed that the model returned the
 nonce. Test devices were revoked afterward; no existing collaborator was messaged.
+
+Opt-in live model checks use authenticated Claude/Codex CLIs and consume model
+usage. They default to isolated broker state and disposable model sessions:
+
+```sh
+python3 scripts/test-bus-claude-live.py
+python3 scripts/test-bus-codex-live.py
+```
+
+Add `--hosted --reader-env PATH` for a hosted gateway check using the operator's
+private reader environment file. These create temporary enrolled test devices
+and revoke them afterward. The deterministic suite never invokes these paid
+live-model checks automatically. Keep operator credentials outside the repository.

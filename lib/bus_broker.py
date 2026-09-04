@@ -6,6 +6,7 @@ reverse proxy; no agent socket, shell, or local administration credential is
 published by this module. Every data operation authenticates independently.
 """
 import base64
+import getpass
 import hashlib
 import hmac
 import http.server
@@ -36,6 +37,8 @@ MESSAGE_TTL = 86400
 LIVE_TTL = 45
 LEASE_TTL = 60
 BUS_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}\Z")
+USER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}\Z")
+DEVICE_FIELDS = {"hostname": 253, "platform": 64, "tailscale_hostname": 253, "tailscale_dns_name": 253}
 ACTIVE = ("accepted", "leased")
 TERMINAL = ("delivered", "queued", "failed", "expired", "cancelled")
 
@@ -64,6 +67,18 @@ def _bus(value):
     return value
 
 
+def _user(value):
+    if not isinstance(value, str) or not USER_RE.fullmatch(value):
+        raise BusError("invalid user handle")
+    return value
+
+
+def _device_metadata(value):
+    if not isinstance(value, dict) or any(key not in DEVICE_FIELDS for key in value):
+        raise BusError("invalid device metadata")
+    return {key: _text(text, key, DEVICE_FIELDS[key]) for key, text in value.items()}
+
+
 class Broker:
     """One durable broker; SQLite transactions serialize enrollment and leases."""
 
@@ -73,6 +88,17 @@ class Broker:
             raise ValueError("BUS_GATEWAY_SHARED_SECRET must contain at least 32 characters")
         self.admin_readers = frozenset(reader.strip() for reader in os.environ.get("BUS_ADMIN_READERS", "").split(",")
                                       if reader.strip())
+        try:
+            self.reader_users = json.loads(os.environ.get("BUS_READER_USERS", "{}"))
+            if (not isinstance(self.reader_users, dict) or len(self.reader_users) > MAX_PRINCIPALS
+                    or any(not isinstance(reader, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", reader)
+                           for reader in self.reader_users)):
+                raise ValueError()
+            for user in self.reader_users.values():
+                _user(user)
+        except (ValueError, TypeError, BusError):
+            raise ValueError("BUS_READER_USERS must map reader logins to valid user handles") from None
+        self.users = sorted(set(self.reader_users.values()))
         self.root = Path(state_dir).expanduser().absolute()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.root.is_symlink() or self.root.stat().st_uid != os.getuid():
@@ -131,6 +157,10 @@ class Broker:
                 CREATE TABLE IF NOT EXISTS memberships(
                   agent TEXT NOT NULL REFERENCES agents(id),
                   bus TEXT NOT NULL REFERENCES buses(name), PRIMARY KEY(agent,bus));
+                CREATE TABLE IF NOT EXISTS conversations(
+                  id TEXT PRIMARY KEY, initiator TEXT NOT NULL REFERENCES agents(id),
+                  published TEXT NOT NULL REFERENCES agents(id), bus TEXT NOT NULL REFERENCES buses(name),
+                  expires_at REAL NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS messages(
                   id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES agents(id),
                   target TEXT NOT NULL REFERENCES agents(id), bus TEXT NOT NULL,
@@ -139,8 +169,29 @@ class Broker:
                   lease TEXT, lease_until REAL, updated_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS message_delivery ON messages(target,status,created_at);
             """)
+            # Upgrade existing hubs without changing credentials or guessing the
+            # owner of an enrolled device from its self-reported display name.
+            db.execute("BEGIN IMMEDIATE")
+            for table, name, declaration in (("principals", "user", "TEXT"),
+                                              ("principals", "device_metadata", "TEXT NOT NULL DEFAULT '{}'"),
+                                              ("invites", "user", "TEXT"),
+                                              ("messages", "conversation", "TEXT REFERENCES conversations(id)")):
+                columns = {row[1] for row in db.execute("PRAGMA table_info(%s)" % table)}
+                if name not in columns:
+                    db.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, declaration))
+            # Preserve queued payloads and their original expiry on upgrade,
+            # while giving upgraded receivers the same scoped reply operation.
+            for message in db.execute("SELECT * FROM messages WHERE conversation IS NULL").fetchall():
+                conversation = "c_legacy_" + message["id"]
+                db.execute("INSERT OR IGNORE INTO conversations VALUES(?,?,?,?,?,0)",
+                           (conversation, message["sender"], message["target"], message["bus"], message["expires_at"]))
+                db.execute("UPDATE messages SET conversation=? WHERE id=?", (conversation, message["id"]))
             db.execute("INSERT OR IGNORE INTO meta VALUES('server_id',?)", (uuid.uuid4().hex,))
-            db.execute("INSERT OR IGNORE INTO principals VALUES('admin','local',?,0,1)", (self.clock(),))
+            db.execute("INSERT OR IGNORE INTO principals(id,device,created_at,is_admin) VALUES('admin','local',?,1)",
+                       (self.clock(),))
+            local_user = getpass.getuser().lower()
+            db.execute("UPDATE principals SET user=COALESCE(user,?) WHERE id='admin'",
+                       (local_user if USER_RE.fullmatch(local_user) else "local",))
             db.execute("INSERT OR IGNORE INTO buses VALUES('general','open')")
             db.execute("INSERT OR IGNORE INTO tokens VALUES(?,'admin')", (_digest(self.admin_token),))
             self.server_id = db.execute("SELECT value FROM meta WHERE key='server_id'").fetchone()[0]
@@ -175,9 +226,10 @@ class Broker:
                     if existing is None and db.execute("SELECT COUNT(*) FROM principals").fetchone()[0] >= MAX_PRINCIPALS:
                         raise BusError("device enrollment limit reached", "limit")
                     admin = reader in self.admin_readers
-                    db.execute("""INSERT INTO principals(id,device,created_at,is_admin) VALUES(?,?,?,?)
-                                  ON CONFLICT(id) DO UPDATE SET device=excluded.device,is_admin=excluded.is_admin""",
-                               (principal, "browser:" + reader, self.clock(), admin))
+                    user = self._reader_user(reader)
+                    db.execute("""INSERT INTO principals(id,device,created_at,is_admin,user) VALUES(?,?,?,?,?)
+                                  ON CONFLICT(id) DO UPDATE SET device=excluded.device,is_admin=excluded.is_admin,user=excluded.user""",
+                               (principal, "browser:" + reader, self.clock(), admin, user))
                     db.execute("DELETE FROM grants WHERE principal=?", (principal,))
                     db.execute("INSERT INTO grants VALUES(?,'general')", (principal,))
                     # Password changes replace the credential, without changing the reader's identity.
@@ -186,7 +238,17 @@ class Broker:
                     db.execute("INSERT OR REPLACE INTO browser_credentials VALUES(?,?,?)", (digest, reader, reader_hash))
             finally:
                 db.close()
-        return {"ok": True, "token": token, "browser_session": True, "logout_url": "/_gateway/logout"}
+        return {"ok": True, "token": token, "user": user, "browser_session": True, "logout_url": "/_gateway/logout"}
+
+    def _reader_user(self, reader):
+        if self.reader_users and reader not in self.reader_users:
+            raise BusError("reader has no configured bus user", "forbidden")
+        return _user(self.reader_users.get(reader, reader.lower()))
+
+    @staticmethod
+    def _device_info(principal):
+        return {"user": principal["user"], "device": principal["device"], "device_id": principal["id"],
+                "device_metadata": json.loads(principal["device_metadata"])}
 
     @staticmethod
     def _reader_context(reader, reader_hash):
@@ -211,7 +273,8 @@ class Broker:
                     or not secrets.compare_digest(reader_hash, p["browser_hash"])):
                 raise BusError("browser reader session does not match", "unauthorized")
             p["is_admin"] = reader in self.admin_readers
-            db.execute("UPDATE principals SET is_admin=? WHERE id=?", (p["is_admin"], p["id"]))
+            p["user"] = self._reader_user(reader)
+            db.execute("UPDATE principals SET is_admin=?,user=? WHERE id=?", (p["is_admin"], p["user"], p["id"]))
             if not p["is_admin"]:
                 db.execute("DELETE FROM grants WHERE principal=? AND bus<>'general'", (p["id"],))
         return p
@@ -248,11 +311,40 @@ class Broker:
         db.execute("DELETE FROM messages WHERE updated_at<? AND status NOT IN ('accepted','leased')",
                    (now - 7 * MESSAGE_TTL,))
         db.execute("DELETE FROM invites WHERE expires_at<?", (now - MESSAGE_TTL,))
+        db.execute("DELETE FROM conversations WHERE expires_at<? AND NOT EXISTS (SELECT 1 FROM messages WHERE conversation=conversations.id)",
+                   (now - 7 * MESSAGE_TTL,))
+        db.execute("""DELETE FROM agents WHERE last_seen<?
+                      AND NOT EXISTS (SELECT 1 FROM memberships WHERE agent=agents.id)
+                      AND NOT EXISTS (SELECT 1 FROM messages WHERE sender=agents.id OR target=agents.id)
+                      AND NOT EXISTS (SELECT 1 FROM conversations WHERE initiator=agents.id OR published=agents.id)""",
+                   (now - 7 * MESSAGE_TTL,))
+
+    def _conversation_valid(self, db, conversation, now):
+        if conversation is None or conversation["closed"] or conversation["expires_at"] <= now:
+            return False
+        bus = conversation["bus"]
+        if not self._member(db, conversation["published"], bus):
+            return False
+        if bus != "general":
+            return self._member(db, conversation["initiator"], bus)
+        sender = db.execute("SELECT principal FROM agents WHERE id=?", (conversation["initiator"],)).fetchone()
+        return bool(sender and self._granted(db, sender[0], bus))
 
     def _cancel_invalid(self, db, now):
-        pending = db.execute("SELECT id,sender,target,bus FROM messages WHERE status IN ('accepted','leased')").fetchall()
+        # Close permanently on loss of admission/publication; rejoining must
+        # never reactivate a previously withdrawn conversation.
+        for conversation in db.execute("SELECT * FROM conversations WHERE closed=0").fetchall():
+            if not self._conversation_valid(db, conversation, now):
+                db.execute("UPDATE conversations SET closed=1 WHERE id=?", (conversation["id"],))
+        pending = db.execute("SELECT id,sender,target,bus,conversation FROM messages WHERE status IN ('accepted','leased')").fetchall()
         for m in pending:
-            if not self._member(db, m["sender"], m["bus"]) or not self._member(db, m["target"], m["bus"]):
+            if m["conversation"]:
+                conversation = db.execute("SELECT * FROM conversations WHERE id=?", (m["conversation"],)).fetchone()
+                valid = self._conversation_valid(db, conversation, now)
+            else:
+                # Preserve deliveries queued by the pre-conversation broker.
+                valid = self._member(db, m["sender"], m["bus"]) and self._member(db, m["target"], m["bus"])
+            if not valid:
                 db.execute("UPDATE messages SET status='cancelled',detail='membership changed',updated_at=? WHERE id=?",
                            (now, m["id"]))
 
@@ -313,10 +405,16 @@ class Broker:
             raise BusError("invite ttl must be 60 to 604800 seconds")
         if db.execute("SELECT COUNT(*) FROM invites WHERE redeemed_at IS NULL AND expires_at>?", (now,)).fetchone()[0] >= MAX_INVITES:
             raise BusError("outstanding invitation limit reached", "limit")
+        user = r.get("user", None if self.users else p["user"])
+        if user is None:
+            raise BusError("select the user who will own this device")
+        user = _user(user)
+        if self.users and user not in self.users:
+            raise BusError("unknown invitation user", "forbidden")
         secret = secrets.token_urlsafe(32)
-        db.execute("INSERT INTO invites(digest,bus,expires_at) VALUES(?,?,?)",
-                   (_digest(secret), bus, now + ttl))
-        return {"invite": secret, "bus": bus, "expires_at": now + ttl}
+        db.execute("INSERT INTO invites(digest,bus,expires_at,user) VALUES(?,?,?,?)",
+                   (_digest(secret), bus, now + ttl, user))
+        return {"invite": secret, "bus": bus, "user": user, "expires_at": now + ttl}
 
     def _op_invite_revoke(self, db, p, r, now):
         self._admin(p)
@@ -333,27 +431,68 @@ class Broker:
                             (_digest(secret), now)).fetchone()
         if invite is None:
             raise BusError("invite is invalid, expired, or already used", "forbidden")
+        if invite["user"] is None and self.users:
+            raise BusError("this older invitation has no user; request a new invitation", "forbidden")
+        if self.users and invite["user"] not in self.users:
+            raise BusError("invitation user is no longer configured", "forbidden")
         device = _text(r.get("device", "device"), "device", 128)
+        metadata = _device_metadata(r.get("device_metadata", {}))
         if p is None:
             if db.execute("SELECT COUNT(*) FROM principals").fetchone()[0] >= MAX_PRINCIPALS:
                 raise BusError("device enrollment limit reached", "limit")
             principal = "p_" + uuid.uuid4().hex
             token = secrets.token_urlsafe(32)
-            db.execute("INSERT INTO principals(id,device,created_at) VALUES(?,?,?)", (principal, device, now))
+            db.execute("INSERT INTO principals(id,device,created_at,user,device_metadata) VALUES(?,?,?,?,?)",
+                       (principal, device, now, invite["user"], json.dumps(metadata)))
             db.execute("INSERT INTO tokens VALUES(?,?)", (_digest(token), principal))
         else:
             principal = p["id"]
+            if p["browser_reader"] is not None:
+                raise BusError("enroll a device separately from a browser session", "forbidden")
+            if p["user"] is not None and invite["user"] != p["user"]:
+                raise BusError("invitation belongs to a different user; use a separate installation", "forbidden")
+            db.execute("UPDATE principals SET user=COALESCE(user,?) WHERE id=?", (invite["user"], principal))
+            if "device_metadata" in r:
+                db.execute("UPDATE principals SET device_metadata=? WHERE id=?", (json.dumps(metadata), principal))
         db.execute("INSERT OR IGNORE INTO grants VALUES(?,?)", (principal, invite["bus"]))
         db.execute("UPDATE invites SET redeemed_at=?,principal=? WHERE digest=?", (now, principal, _digest(secret)))
         buses = [b[0] for b in db.execute("SELECT bus FROM grants WHERE principal=? ORDER BY bus", (principal,))]
         if p is not None and p["is_admin"]:
             buses = [b[0] for b in db.execute("SELECT name FROM buses ORDER BY name")]
-        return {"token": token, "principal": principal, "buses": buses, "server_id": self.server_id}
+        info = self._device_info(db.execute("SELECT * FROM principals WHERE id=?", (principal,)).fetchone())
+        return {"token": token, "principal": principal, "buses": buses, "server_id": self.server_id, **info}
+
+    def _op_device(self, db, p, r, now):
+        if p["browser_reader"] is not None:
+            raise BusError("this operation updates an enrolled device", "forbidden")
+        if "user" in r or "owner" in r:
+            raise BusError("device ownership is assigned by its invitation", "forbidden")
+        if "device" in r:
+            db.execute("UPDATE principals SET device=? WHERE id=?", (_text(r["device"], "device", 128), p["id"]))
+        if "device_metadata" in r:
+            db.execute("UPDATE principals SET device_metadata=? WHERE id=?",
+                       (json.dumps(_device_metadata(r["device_metadata"])), p["id"]))
+        return {"principal": p["id"], **self._device_info(db.execute("SELECT * FROM principals WHERE id=?", (p["id"],)).fetchone())}
 
     def _op_register(self, db, p, r, now):
         bus = _bus(r.get("bus", "general"))
         if not self._granted(db, p["id"], bus) or not db.execute("SELECT 1 FROM buses WHERE name=?", (bus,)).fetchone():
             raise BusError("bus membership has not been granted", "forbidden")
+        return self._identify(db, p, r, now, publish=bus)
+
+    def _op_identify(self, db, p, r, now):
+        # An internal reply adapter is not directory membership. One device
+        # credential admits its local agents to outbound general traffic.
+        if not self._granted(db, p["id"], "general"):
+            raise BusError("device has not been admitted to general", "forbidden")
+        return self._identify(db, p, r, now)
+
+    def _identify(self, db, p, r, now, publish=None):
+        if p["browser_reader"] is not None:
+            raise BusError("agents connect through an enrolled device", "forbidden")
+        if "device_metadata" in r:
+            db.execute("UPDATE principals SET device_metadata=? WHERE id=?",
+                       (json.dumps(_device_metadata(r["device_metadata"])), p["id"]))
         session_key = _text(r.get("session_key"), "session_key", 256)
         name = _text(r.get("name"), "name", 128)
         kind = r.get("kind", "claude")
@@ -375,10 +514,12 @@ class Broker:
             agent = "a_" + uuid.uuid4().hex
             db.execute("INSERT INTO agents VALUES(?,?,?,?,?,?,?,?)",
                        (agent, p["id"], session_key, name, kind, description, status, now))
-        db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?)", (agent, bus))
+        if publish:
+            db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?)", (agent, publish))
         buses = [b[0] for b in db.execute("SELECT bus FROM memberships WHERE agent=? ORDER BY bus", (agent,))]
-        return {"id": agent, "agent": agent, "name": name, "bus": bus, "buses": buses,
-                "principal": p["id"], "status": status, "last_seen": now, "server_id": self.server_id}
+        return {"id": agent, "agent": agent, "name": name, "bus": publish, "buses": buses,
+                "principal": p["id"], "status": status, "last_seen": now, "server_id": self.server_id,
+                **self._device_info(db.execute("SELECT * FROM principals WHERE id=?", (p["id"],)).fetchone())}
 
     def _op_heartbeat(self, db, p, r, now):
         rows = r.get("agents")
@@ -397,7 +538,7 @@ class Broker:
         for bus in allowed:
             visibility = db.execute("SELECT visibility FROM buses WHERE name=?", (bus,)).fetchone()[0]
             agents = []
-            for a in db.execute("""SELECT a.*,p.device FROM agents a JOIN memberships m ON m.agent=a.id
+            for a in db.execute("""SELECT a.*,p.device,p.user,p.device_metadata FROM agents a JOIN memberships m ON m.agent=a.id
                                    JOIN principals p ON p.id=a.principal WHERE m.bus=? AND p.revoked=0
                                    ORDER BY a.name,a.id""", (bus,)):
                 if not self._granted(db, a["principal"], bus):
@@ -405,6 +546,7 @@ class Broker:
                 memberships = [b[0] for b in db.execute("SELECT bus FROM memberships WHERE agent=? ORDER BY bus", (a["id"],))
                                if b[0] in allowed]
                 row = {"id": a["id"], "name": a["name"], "kind": a["kind"], "device": a["device"],
+                       "user": a["user"], "device_id": a["principal"], "device_metadata": json.loads(a["device_metadata"]),
                        "description": a["description"], "last_seen": a["last_seen"], "buses": memberships,
                        "status": a["status"] if now - a["last_seen"] <= LIVE_TTL else "offline"}
                 if p["is_admin"]:
@@ -412,7 +554,7 @@ class Broker:
                 agents.append(row)
             buses.append({"name": bus, "visibility": visibility, "agents": agents})
         result = {"server_id": self.server_id, "is_admin": bool(p["is_admin"]),
-                  "principal": p["id"], "buses": buses, "ts": now}
+                  "principal": p["id"], "buses": buses, "ts": now, **self._device_info(p)}
         if p.get("browser_reader") is not None:
             result.update(browser_session=True, read_only=not p["is_admin"], logout_url="/_gateway/logout")
         if p["is_admin"]:
@@ -421,12 +563,15 @@ class Broker:
                     SELECT 1 FROM tokens t JOIN browser_credentials b ON b.digest=t.digest
                     WHERE t.principal=p.id) ORDER BY p.created_at,p.id"""):
                 row = dict(ent)
+                row.update(self._device_info(ent))
                 row["is_admin"] = bool(row["is_admin"])
                 row["revoked"] = bool(row["revoked"])
                 row["buses"] = allowed if ent["is_admin"] else [b[0] for b in db.execute(
                     "SELECT bus FROM grants WHERE principal=? ORDER BY bus", (ent["id"],))]
                 principals.append(row)
             result["principals"] = principals
+            if self.users:
+                result["users"] = [{"id": user} for user in self.users]
         return result
 
     def _op_members(self, db, p, r, now):
@@ -437,10 +582,7 @@ class Broker:
         sender = self._owned(db, p, r.get("sender"))
         bus = _bus(r.get("bus", "general"))
         target = _text(r.get("target"), "target", 128)
-        message = r.get("message")
-        if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > MAX_MESSAGE or "\x00" in message:
-            raise BusError("message must contain 1 to %d UTF-8 bytes" % MAX_MESSAGE)
-        if not self._member(db, sender["id"], bus):
+        if not self._granted(db, p["id"], bus) or (bus != "general" and not self._member(db, sender["id"], bus)):
             raise BusError("unknown or unavailable recipient", "not_found")
         candidates = db.execute("""SELECT a.id FROM agents a JOIN memberships m ON m.agent=a.id
                                   WHERE m.bus=? AND (a.id=? OR a.name=?) ORDER BY a.id""", (bus, target, target)).fetchall()
@@ -453,32 +595,78 @@ class Broker:
             raise BusError("recipient name is ambiguous; use its agent id", "ambiguous")
         self._cancel_invalid(db, now)
         target = ids[0]
+        if db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] >= MAX_RECORDS:
+            raise BusError("conversation limit reached", "limit")
+        conversation = "c_" + uuid.uuid4().hex
+        expires_at = now + MESSAGE_TTL
+        db.execute("INSERT INTO conversations VALUES(?,?,?,?,?,0)", (conversation, sender["id"], target, bus, expires_at))
+        return self._enqueue(db, sender["id"], target, bus, r.get("message"), conversation, expires_at, now)
+
+    def _op_reply(self, db, p, r, now):
+        sender = self._owned(db, p, r.get("sender"))
+        mid = _text(r.get("id"), "message id", 128)
+        # The message ID is not a bearer capability. The authenticated device
+        # must own exactly the recipient of this already-fetched message.
+        previous = db.execute("SELECT * FROM messages WHERE id=? AND target=?", (mid, sender["id"])).fetchone()
+        if previous is None or previous["status"] not in ("leased", "delivered", "queued"):
+            raise BusError("unknown or unavailable conversation", "not_found")
+        if any(field in r for field in ("target", "bus", "conversation")):
+            raise BusError("reply destination and bus are fixed by the original message")
+        self._cancel_invalid(db, now)
+        conversation = db.execute("SELECT * FROM conversations WHERE id=?", (previous["conversation"],)).fetchone()
+        if not self._conversation_valid(db, conversation, now):
+            raise BusError("conversation has ended or access changed", "not_found")
+        return self._enqueue(db, sender["id"], previous["sender"], previous["bus"], r.get("message"),
+                             conversation["id"], conversation["expires_at"], now)
+
+    def _enqueue(self, db, sender, target, bus, message, conversation, expires_at, now):
+        if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > MAX_MESSAGE or "\x00" in message:
+            raise BusError("message must contain 1 to %d UTF-8 bytes" % MAX_MESSAGE)
         pending = db.execute("SELECT COUNT(*) FROM messages WHERE target=? AND status IN ('accepted','leased')", (target,)).fetchone()[0]
         if pending >= MAX_PENDING or db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] >= MAX_RECORDS:
             raise BusError("recipient queue is full", "limit")
         mid = "m_" + uuid.uuid4().hex
-        db.execute("""INSERT INTO messages(id,sender,target,bus,message,status,created_at,expires_at,updated_at)
-                      VALUES(?,?,?,?,?,'accepted',?,?,?)""", (mid, sender["id"], target, bus, message, now, now + MESSAGE_TTL, now))
-        return {"id": mid, "status": "accepted", "target": target, "expires_at": now + MESSAGE_TTL}
+        db.execute("""INSERT INTO messages(id,sender,target,bus,message,status,created_at,expires_at,updated_at,conversation)
+                      VALUES(?,?,?,?,?,'accepted',?,?,?,?)""", (mid, sender, target, bus, message, now, expires_at, now, conversation))
+        return {"id": mid, "status": "accepted", "target": target, "expires_at": expires_at,
+                "conversation_expires_at": expires_at}
 
     def _op_poll(self, db, p, r, now):
         # Leases permit crash recovery, not payload retraction: once fetched,
         # a client already has the message. Revocation blocks future fetches
         # and acknowledgments; it cannot undo a delivery already in progress.
         agent = self._owned(db, p, r.get("agent"))
+        return self._poll(db, [agent["id"]], now, limit=1)
+
+    def _op_poll_device(self, db, p, r, now):
+        agents = r.get("agents")
+        if not isinstance(agents, list) or not 1 <= len(agents) <= MAX_AGENTS:
+            raise BusError("agents must be a nonempty bounded list of agent ids")
+        # Validate all ownership before leasing anything; no partial fetch.
+        owned = list(dict.fromkeys(self._owned(db, p, agent)["id"] for agent in agents))
+        return self._poll(db, owned, now, limit=32)
+
+    def _poll(self, db, agents, now, limit):
         self._cancel_invalid(db, now)
-        rows = db.execute("""SELECT * FROM messages WHERE target=? AND
-                             (status='accepted' OR (status='leased' AND lease_until<=?))
-                             ORDER BY created_at,id LIMIT 1""", (agent["id"], now)).fetchall()
+        slots = ",".join("?" for _ in agents)
+        # SQLite insertion order survives equal timestamps or a backwards wall
+        # clock; neither may let a second message bypass an active target lease.
+        rows = db.execute("""SELECT m.* FROM messages m WHERE m.target IN (%s) AND
+                             (m.status='accepted' OR (m.status='leased' AND m.lease_until<=?))
+                             AND NOT EXISTS (SELECT 1 FROM messages earlier WHERE earlier.target=m.target
+                               AND earlier.status IN ('accepted','leased') AND
+                               earlier.rowid<m.rowid)
+                             ORDER BY m.rowid LIMIT ?""" % slots, (*agents, now, limit)).fetchall()
         messages = []
         for m in rows:
             lease = secrets.token_urlsafe(18)
             db.execute("UPDATE messages SET status='leased',lease=?,lease_until=?,updated_at=? WHERE id=?",
                        (lease, now + LEASE_TTL, now, m["id"]))
-            sender = db.execute("SELECT a.id,a.name,a.kind,p.device FROM agents a JOIN principals p ON a.principal=p.id WHERE a.id=?",
+            sender = db.execute("SELECT a.id,a.name,a.kind,p.device,p.user,p.id AS device_id FROM agents a JOIN principals p ON a.principal=p.id WHERE a.id=?",
                                 (m["sender"],)).fetchone()
             messages.append({"id": m["id"], "sender": dict(sender), "target": m["target"], "bus": m["bus"],
-                             "message": m["message"], "created_at": m["created_at"], "expires_at": m["expires_at"], "lease": lease})
+                             "message": m["message"], "created_at": m["created_at"], "expires_at": m["expires_at"], "lease": lease,
+                             "reply_to": m["id"], "conversation_expires_at": m["expires_at"]})
         return {"messages": messages, "lease_seconds": LEASE_TTL}
 
     def _op_ack(self, db, p, r, now):
@@ -515,6 +703,8 @@ class Broker:
         agent = self._owned(db, p, r.get("agent"), admin=True)
         bus = _bus(r.get("bus", "general"))
         db.execute("DELETE FROM memberships WHERE agent=? AND bus=?", (agent["id"], bus))
+        db.execute("UPDATE conversations SET closed=1 WHERE bus=? AND (initiator=? OR published=?)",
+                   (bus, agent["id"], agent["id"]))
         self._cancel_invalid(db, now)
         return {"agent": agent["id"], "bus": bus, "left": True}
 

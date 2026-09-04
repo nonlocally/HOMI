@@ -12,8 +12,11 @@ for tool in python3 node openssl; do
 done
 export PYTHONDONTWRITEBYTECODE=1
 python3 "$ROOT/scripts/test-bus-broker.py"
+python3 "$ROOT/scripts/test-bus-conversations.py"
 python3 "$ROOT/scripts/test-bus-gateway.py"
+python3 "$ROOT/scripts/test-bus-identity.py"
 python3 "$ROOT/scripts/test-bus-client.py"
 python3 "$ROOT/scripts/test-bus-lifecycle.py"
+python3 "$ROOT/scripts/test-bus-remote-fixture.py"
 node "$ROOT/scripts/test-bus-ui.js"
 printf 'PASS: complete bus suite (broker, existing-session client, verified TLS, dashboard)\n'

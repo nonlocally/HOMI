@@ -42,6 +42,9 @@ config = json.loads(Path(%r).read_text())
 for name in ('BUS_GATEWAY_SHARED_SECRET', 'BUS_ADMIN_READERS'):
     if name in config:
         os.environ[name] = config[name]
+if 'BUS_READER_USERS' in config:
+    users = config['BUS_READER_USERS']
+    os.environ['BUS_READER_USERS'] = json.dumps(users) if isinstance(users, dict) else users
 sys.path.insert(0, %r)
 from bus_broker import Broker, serve
 serve(Broker(%r), '127.0.0.1', %r)

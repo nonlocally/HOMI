@@ -17,6 +17,7 @@ for (const key of ["CODEX_HOME", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "COMM_CO
   "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MESSAGING_SOCKET", "COMMUNICATE_HOME"]) delete env[key];
 mkdirSync(path.join(taskHome, ".codex"), { recursive: true });
 mkdirSync(path.join(taskHome, "bin"));
+writeFileSync(path.join(taskHome, "bin", "tailscale"), '#!/bin/sh\nprintf \'%s\\n\' \'{"Self":{"HostName":"mcp-fixture","DNSName":"mcp-fixture.test.ts.net."}}\'\n', { mode: 0o755 });
 const senderThread = "11111111-1111-4111-8111-111111111111";
 const recipientThread = "22222222-2222-4222-8222-222222222222";
 writeFileSync(path.join(taskHome, ".codex", "session_index.jsonl"),
@@ -67,7 +68,7 @@ const call = async (name, args = {}, errorExpected = false) => {
 const jsonCall = async (...args) => JSON.parse(await call(...args));
 const assert = (ok, message) => { if (!ok) throw new Error(message); };
 const EXPECT = ["agents_list", "whereis", "route", "send", "codex_queue", "codex_ask", "status", "ask", "card_set",
-  "bus_register", "bus_list", "bus_agents", "bus_leave", "bus_send", "bus_receipt", "bus_status", "bus_dashboard", "bus_create"];
+  "bus_register", "bus_list", "bus_agents", "bus_leave", "bus_send", "bus_receipt", "bus_status", "bus_dashboard", "bus_create", "bus_device", "bus_reply"];
 let failed = false;
 try {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } });
@@ -78,6 +79,9 @@ try {
   const list = await rpc("tools/list", {});
   assert(JSON.stringify(list.result.tools.map((t) => t.name)) === JSON.stringify(EXPECT), "tool list mismatch");
   assert(/NAME|no reachable agents/.test(await call("agents_list")), "legacy agents_list output");
+  const fresh = await jsonCall("bus_status");
+  assert(fresh.configured === false && fresh.hub === null, "first-use bus_status must not invent a local hub");
+  assert(!existsSync(path.join(env.COMM_STATE, "bus", "server.json")), "first-use bus_status started a local broker");
   assert(/cannot identify this session/.test(await call("bus_register", {}, true)), "missing self must fail without creating an agent");
   await call("bus_create", { name: "photonics" });
   const sender = await jsonCall("bus_register", { bus: "photonics", kind: "codex", session: senderThread, description: "Sender fixture" });
@@ -89,6 +93,10 @@ try {
   assert(!JSON.stringify(general).includes(sender.id), "private registration leaked into general");
   const message = "literal quotes ' \" $HOME `touch nope` $(touch nope)\nsecond line";
   const hub = (await jsonCall("bus_status")).hub;
+  const device = await jsonCall("bus_device", { name: "MCP device fixture", hub });
+  assert(device.device === "MCP device fixture", "bus_device failed to update this device label");
+  assert(device.device_id === sender.device_id && device.user === sender.user, "device update changed enrollment identity or account");
+  assert(device.device_metadata?.tailscale_hostname === "mcp-fixture", "device metadata was not refreshed from Self");
   assert(/not connected/.test(await call("bus_send", {
     target: recipient.id, from: sender.id, bus: "photonics", message, hub: "https://unconnected.invalid",
   }, true)), "bus_send must forward the selected hub before the subcommand");
@@ -106,6 +114,16 @@ try {
   const queued = readFileSync(path.join(taskHome, "queued.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
   assert(queued.some((args) => args.some((arg) => arg.includes(recipientThread)) && args.some((arg) => arg.includes(message))), "MCP lost literal message or exact target thread");
   await call("bus_receipt", { id: receiptId, hub });
+  assert(/not connected/.test(await call("bus_reply", { id: receiptId, from: recipient.id, message: "wrong hub", hub: "https://unconnected.invalid" }, true)), "bus_reply must preserve operation-specific hub");
+  const reply = await jsonCall("bus_reply", { id: receiptId, from: recipient.id, message: "MCP scoped reply", hub });
+  assert(reply.conversation_expires_at === sent.conversation_expires_at, "reply changed fixed conversation deadline");
+  let replyQueued = false;
+  for (let i = 0; i < 40; i++) {
+    replyQueued = readFileSync(path.join(taskHome, "queued.jsonl"), "utf8").split("\n").some((line) => line.includes("MCP scoped reply") && line.includes(senderThread));
+    if (replyQueued) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  assert(replyQueued, "scoped MCP reply did not queue to original sender");
   assert((await jsonCall("bus_status")).hub === hub, "operation-specific hub changed the default connection");
   const dashboard = await call("bus_dashboard");
   assert(/^http:\/\/127\.0\.0\.1:\d+\/#token=\S+\s*$/.test(dashboard), "dashboard must return authenticated loopback URL");

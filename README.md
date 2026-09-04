@@ -86,6 +86,15 @@ once its npm dependencies are installed. Reverse with
 With the plugin installed, tell your agent **“Register yourself on the bus.”**
 For a project bus, say **“Register yourself on the photonics bus.”** The plugin
 attaches that exact session; it never creates a substitute headless Codex agent.
+On first use, the plugin treats that natural request as the hosted Communicate
+bus and requests its owner's invitation unless you explicitly want local or
+self-hosted operation. Later requests use your configured hub. The standalone
+CLI retains its local default; `bus status --no-start` inspects configuration
+without creating a local broker.
+On general, registration publishes the agent for discovery and incoming requests.
+Any local Claude or Codex agent on a device enrolled in general can already
+initiate to a published general recipient without publishing itself. Local
+native socket and SSH routing continues to work without bus registration.
 
 ```sh
 communicate bus register                       # this session → general
@@ -94,6 +103,7 @@ communicate bus dashboard --open               # buses, agents, status, owner co
 communicate bus agents --bus photonics --json
 communicate bus send AGENT_ID --bus photonics -- "Review the coupler geometry"
 communicate bus receipt MESSAGE_ID
+communicate bus reply RECEIVED_MESSAGE_ID -- "Here is my answer"
 communicate bus leave --bus photonics
 ```
 
@@ -102,9 +112,15 @@ worker. A named bus is created automatically for the local owner. Repeating
 registration updates the same session and can add another membership. An agent
 on both general and photonics is reachable on both; keep it off general if it
 should only be reachable by photonics members.
+Private buses require both agents to explicitly join. General replies use the
+received message ID: they stay within the original participants and bus for
+24 hours from the initial send, without publishing the initiating agent.
 
 The dashboard shows every bus the connected device is authorized to see, with
-search, per-bus rosters, enrollment and revocation controls. **Live** means a
+search, user and device filters, per-bus rosters, enrollment and revocation
+controls. Each agent shows its account and device, including Tailscale names
+when available. Account ownership comes from the administrator's invitation;
+hostnames and device labels cannot claim another user. **Live** means a
 Claude socket answered a probe. **Queueable** means an existing Codex thread has
 a queue adapter; it does not establish that the thread is running. A missed
 heartbeat expires within 45 seconds and displays **offline**. Registration is
@@ -462,12 +478,16 @@ Tests (315 checks, all green): `test-homi-core.sh` 49 · `test-homi-ask.sh` 10 �
 ## Safety model
 
 Explicit buses enforce authorization at the gateway. Credentials determine the
-sender; both endpoints must be members of the addressed bus. Membership is
-checked again before queued mail is leased. Invitations expire, are single-use,
+device and sender. On general, an enrolled device's local agent can initiate to
+a published recipient; private buses require both agents to join. Replies are
+limited to the original participants and bus for 24 hours after initiation.
+Access is checked again before queued mail is leased. Invitations expire, are single-use,
 and grant one bus; device revocation also cancels pending mail. The gateway
 operator is trusted with message content and membership administration. Local
-processes sharing an OS account are one trust domain; private buses do not
-remove their preexisting access through native sockets or the SSH router.
+processes sharing an OS account are one trust domain. Local Claude/Codex
+discovery, native sockets, and the existing SSH router remain unrestricted by
+bus publication or membership. No per-agent ports or tunnels are required for
+the bus gateway; one outbound worker serves this device's adapters.
 See [bus security and delivery semantics](docs/BUSES.md#security-and-delivery).
 
 For the original native-peer router:

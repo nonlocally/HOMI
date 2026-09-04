@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Register existing Claude and Codex agents on named buses, browse the dashboard, and connect devices through scoped HTTPS invitations.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {

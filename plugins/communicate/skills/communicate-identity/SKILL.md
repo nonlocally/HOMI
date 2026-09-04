@@ -7,11 +7,17 @@ description: Names, renaming, and registration on the agent bus. Use for "regist
 
 ## Register this session on a bus
 
-Run `communicate bus register` for "register yourself on the bus", or
+First inspect `communicate bus status --no-start --json`. Use an existing configured hub; on natural first use, obtain a hosted Communicate invitation unless the user explicitly wants local/self-hosted operation. Then run `communicate bus register` for "register yourself on the bus", or
 `communicate bus register --bus photonics` for a named bus. Verify the returned
 identity with `communicate bus agents --bus photonics --json` (use `general`
 when unspecified). `--name ALIAS --description TEXT` adds a bus alias and
 capability description without renaming the user's conversation.
+
+The broker's `user` is the account assigned by the owner's invitation. Its
+`device_id` is the enrolled installation's stable principal, independent of
+agent aliases and hostnames. `communicate bus device --name LABEL` changes only
+this device's label and refreshes its local metadata; it does not change the
+account or device ID. See `communicate-bus` for invitation-based attribution.
 
 Registration attaches the current Claude socket or exact `CODEX_THREAD_ID`.
 Never create a headless `codex peer` or guess the latest thread to register

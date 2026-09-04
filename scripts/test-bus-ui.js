@@ -70,10 +70,10 @@ function page({hash='#token=secret', storedToken='', snapshot=fixture(), origin=
 }
 function fixture() {
   const now=Date.now()/1000;
-  const claude={id:'a',name:'research',kind:'claude',device:'lab-mac',status:'live',last_seen:now,description:'Designing the next experiment',buses:['general','photonics']};
-  const codex={id:'b',name:'builder',kind:'codex',device:'workstation',status:'queueable',last_seen:now-30,description:'Reviewing the simulation',buses:['general']};
-  const unsafe={id:'c',name:'<img src=x onerror=alert(1)>',kind:'claude',device:'guest-laptop',status:'offline',last_seen:now-400,description:'<script>bad()</script>',buses:['photonics']};
-  return {ok:true,server_id:'fixture',is_admin:true,buses:[{name:'general',visibility:'open',agents:[claude,codex]},{name:'photonics',visibility:'private',agents:[claude,unsafe]}],principals:[{id:'p1',device:'guest-laptop',buses:['photonics'],revoked:false}]};
+  const claude={id:'a',name:'research',kind:'claude',user:'aadarwal',device:'lab-mac',device_id:'device-a',device_metadata:{hostname:'lab-mac.local',platform:'darwin',tailscale_hostname:'aadarwal-mini',tailscale_dns_name:'aadarwal-mini.example.ts.net'},status:'live',last_seen:now,description:'Designing the next experiment',buses:['general','photonics']};
+  const codex={id:'b',name:'builder',kind:'codex',user:'peer',device:'workstation',device_id:'device-b',device_metadata:{hostname:'linux-workstation',platform:'linux'},status:'queueable',last_seen:now-30,description:'Reviewing the simulation',buses:['general']};
+  const unsafe={id:'c',name:'<img src=x onerror=alert(1)>',kind:'claude',user:null,device:'guest-laptop',device_id:'p1',status:'offline',last_seen:now-400,description:'<script>bad()</script>',buses:['photonics']};
+  return {ok:true,server_id:'fixture',is_admin:true,buses:[{name:'general',visibility:'open',agents:[claude,codex]},{name:'photonics',visibility:'private',agents:[claude,unsafe]}],principals:[{id:'p1',device_id:'p1',user:null,device:'guest-laptop',buses:['photonics'],revoked:false}]};
 }
 
 (async () => {
@@ -186,7 +186,7 @@ function fixture() {
   console.log('ok closing invitation dialog discards in-flight invitation credentials');
 
   const empty=page({snapshot:{...fixture(),buses:[{name:'general',agents:[]}]}});await flush();
-  assert.equal(empty.ids['empty-title'].textContent,'No registered agents');
+  assert.equal(empty.ids['empty-title'].textContent,'No published agents');
   assert.equal(empty.ids['empty-register'].hidden,false);
   const allNamed=page({snapshot:{...fixture(),buses:[{name:'all',agents:[fixture().buses[0].agents[0]]}]}});await flush();
   await allNamed.ids['bus-nav'].children[1].fire('click');
@@ -245,4 +245,114 @@ function fixture() {
   assert.equal(local.ids['login-token'].disabled,false);
   assert.equal(local.ids['login-submit'].hidden,false);
   console.log('ok local broker without browser bootstrap retains token login');
+
+  const identity=page();await flush();
+  const researchRow=identity.ids['agent-rows'].children[0];
+  assert.equal(researchRow.children[1].textContent,'aadarwal','ownership gets its own desktop column');
+  assert.ok(researchRow.children[2].textContent.includes('aadarwal-mini'));
+  const mobileMetadata=researchRow.children[0].children[0].children[1].children.find(child=>child.className==='agent-location');
+  assert.ok(mobileMetadata.textContent.includes('Useraadarwal'));
+  assert.ok(mobileMetadata.textContent.includes('Devicelab-mac'));
+  assert.ok(mobileMetadata.textContent.includes('Tailscale: aadarwal-mini'));
+  identity.ids['user-filter'].value='user:peer';await identity.ids['user-filter'].fire('change');
+  assert.equal(identity.ids['agent-rows'].children.length,1);
+  assert.ok(identity.ids['agent-rows'].textContent.includes('builder'));
+  assert.equal(identity.ids['live-count'].textContent,'0');assert.equal(identity.ids['queueable-count'].textContent,'1');
+  assert.equal(identity.ids['roster-count'].textContent,'1 agent');
+  assert.equal(identity.ids['device-filter'].children.length,2,'device choices follow the selected user');
+  identity.ids['user-filter'].value='';await identity.ids['user-filter'].fire('change');
+  identity.ids['device-filter'].value='device-a';await identity.ids['device-filter'].fire('change');
+  assert.equal(identity.ids['agent-rows'].children.length,1);
+  identity.ids.search.value='example.ts.net';await identity.ids.search.fire('input');
+  assert.equal(identity.ids['agent-rows'].children.length,1,'Tailscale DNS identity is searchable');
+  identity.ids.search.value='';await identity.ids.search.fire('input');
+  identity.ids['user-filter'].value='unassigned:';await identity.ids['user-filter'].fire('change');
+  assert.equal(identity.ids['agent-rows'].children.length,1);
+  assert.equal(identity.ids['agent-rows'].children[0].children[1].textContent,'Unassigned','legacy ownership is never inferred from hostname');
+  console.log('ok user/device columns, mobile identity metadata, owner filters, and Tailscale search');
+
+  const duplicateFixture=fixture();
+  duplicateFixture.buses[0].agents.push({...duplicateFixture.buses[0].agents[0],id:'same-label',name:'second-lab',device_id:'device-distinct',buses:['general']});
+  duplicateFixture.buses[0].agents.push({...duplicateFixture.buses[0].agents[0],id:'same-device',name:'second-session',buses:['general']});
+  const duplicates=page({snapshot:duplicateFixture});await flush();
+  assert.equal(duplicates.ids['device-count'].textContent,'4','count stable device identities, not names or agent sessions');
+  duplicates.ids['user-filter'].value='user:aadarwal';await duplicates.ids['user-filter'].fire('change');
+  assert.equal(duplicates.ids['device-filter'].children.length,3);
+  const labels=duplicates.ids['device-filter'].children.slice(1).map(option=>option.textContent);
+  assert.notEqual(labels[0],labels[1],'identically named devices remain distinguishable');
+  duplicates.ids['device-filter'].value='device-distinct';await duplicates.ids['device-filter'].fire('change');
+  assert.equal(duplicates.ids['agent-rows'].children.length,1);
+  assert.ok(duplicates.ids['agent-rows'].textContent.includes('second-lab'));
+  console.log('ok duplicate device names and multiple sessions retain stable identities');
+
+  const hosted=page({snapshot:{...fixture(),users:[{id:'aadarwal'},{id:'peer'}]}});await flush();
+  await hosted.ids['invite-button'].fire('click');
+  assert.equal(hosted.ids['invite-user-field'].hidden,false);assert.equal(hosted.ids['invite-user'].required,true);
+  hosted.ids['invite-url'].value='https://bus.communicate.sh';await hosted.ids['invite-url'].fire('input');
+  await hosted.ids['invite-form'].fire('submit');
+  assert.ok(hosted.ids['invite-error'].textContent.includes('Choose the user'));
+  assert.equal(hosted.requests.filter(request=>request.op==='invite').length,0);
+  hosted.ids['invite-user'].value='unexpected';await hosted.ids['invite-form'].fire('submit');
+  assert.equal(hosted.requests.filter(request=>request.op==='invite').length,0);
+  hosted.ids['invite-user'].value='peer';
+  hosted.setHandler(request=>request.op==='invite' ? {ok:true,invite:'peer-device-code',expires_at:Date.now()/1000+3600} : fixture());
+  await hosted.ids['invite-form'].fire('submit');
+  assert.equal(hosted.requests.at(-1).user,'peer');
+  assert.ok(hosted.ids['invite-expiry'].textContent.includes('peer · general'));
+  assert.equal(i.ids['invite-user-field'].hidden,true,'standalone invitations retain their existing no-user flow');
+  console.log('ok hosted invitation requires an explicitly configured recipient');
+
+  const enrolledOnly=page({snapshot:{...fixture(),buses:[{name:'general',agents:[]}],principals:[{id:'p-enrolled',user:'peer',device:'workstation',device_id:'p-enrolled',device_metadata:{hostname:'peer-pc',tailscale_hostname:'peer-workstation'},buses:['general'],revoked:false}]}});await flush();
+  assert.ok(enrolledOnly.ids['empty-description'].textContent.includes('1 device is enrolled, but no agents are published here'));
+  assert.ok(enrolledOnly.ids['empty-description'].textContent.includes('Publish only the agents you want others to discover remotely'));
+  assert.equal(enrolledOnly.ids['empty-invite'].hidden,false);
+  await enrolledOnly.ids['devices-button'].fire('click');
+  assert.ok(enrolledOnly.ids['device-list'].textContent.includes('User: peer'));
+  assert.ok(enrolledOnly.ids['device-list'].textContent.includes('Tailscale: peer-workstation'));
+  assert.equal(enrolledOnly.ids['device-count'].textContent,'0','enrolled devices are distinguished from devices with published recipients');
+  console.log('ok empty roster explains enrollment and Devices shows account ownership');
+
+  const emptyUsers=page({snapshot:{...fixture(),users:[{id:'aadarwal'},{id:'peer'}],buses:[{name:'general',agents:[]}],principals:[{id:'air-empty',device_id:'air-empty',user:'aadarwal',device:'Air',buses:['general'],revoked:false}]}});await flush();
+  assert.deepEqual(emptyUsers.ids['user-filter'].children.map(option=>option.textContent),['All users','aadarwal','peer']);
+  emptyUsers.ids['user-filter'].value='user:peer';await emptyUsers.ids['user-filter'].fire('change');
+  assert.equal(emptyUsers.ids['user-filter'].value,'user:peer');
+  assert.equal(emptyUsers.ids['empty-title'].textContent,'No published agents for this user');
+  assert.ok(emptyUsers.ids['empty-description'].textContent.includes('No published agents are visible for peer'));
+  await emptyUsers.ids['empty-invite'].fire('click');assert.equal(emptyUsers.ids['invite-user'].value,'peer');
+  emptyUsers.ids['invite-dialog'].close();
+  emptyUsers.ids['user-filter'].value='user:aadarwal';await emptyUsers.ids['user-filter'].fire('change');
+  assert.ok(emptyUsers.ids['device-filter'].children.some(option=>option.value==='air-empty' && option.textContent.includes('none published')));
+  emptyUsers.ids['device-filter'].value='air-empty';await emptyUsers.ids['device-filter'].fire('change');
+  assert.equal(emptyUsers.ids['empty-title'].textContent,'No published agents on this device');
+  assert.ok(emptyUsers.ids['empty-description'].textContent.includes('1 device is enrolled'));
+  console.log('ok configured users and enrolled devices stay visible without published agents');
+
+  const model=page();await flush();
+  assert.equal(model.ids['roster-title'].textContent,'Published agents');
+  assert.ok(model.ids['directory-note'].textContent.includes('Local Claude and Codex agents remain reachable automatically'));
+  await model.ids['register-button'].fire('click');
+  assert.equal(model.ids['register-phrase'].textContent,'Register yourself on the bus.','preserve the user-facing registration instruction');
+  assert.equal(model.ids['register-output'].textContent,'communicate bus register');
+  assert.ok(model.ids['register-intro'].textContent.includes('already reachable on the same device'));
+  assert.ok(model.ids['register-access'].textContent.includes('without publishing itself'));
+  assert.ok(model.ids['register-access'].textContent.includes('reply within that conversation'));
+  assert.ok(model.ids['register-scope'].textContent.includes('admitted users and enrolled devices'));
+  model.ids['register-dialog'].close();
+  await model.ids['bus-nav'].children[2].fire('click');
+  assert.equal(model.ids['roster-title'].textContent,'Joined agents');
+  await model.ids['register-button'].fire('click');
+  assert.equal(model.ids['register-phrase'].textContent,'Register yourself on the photonics bus.');
+  assert.equal(model.ids['register-output'].textContent,'communicate bus register --bus photonics');
+  assert.ok(model.ids['register-access'].textContent.includes('Both devices need invitations'));
+  assert.ok(model.ids['register-access'].textContent.includes('both agents must explicitly join'));
+  model.ids['register-dialog'].close();
+  await model.ids['invite-button'].fire('click');
+  assert.ok(model.ids['invite-access'].textContent.includes('both agents must explicitly join'));
+  model.ids['invite-bus'].value='general';await model.ids['invite-bus'].fire('change');
+  assert.ok(model.ids['invite-access'].textContent.includes('without publishing themselves'));
+  const emptyPrivate=page({snapshot:{...fixture(),buses:[{name:'photonics',agents:[]}]}});await flush();
+  await emptyPrivate.ids['bus-nav'].children[1].fire('click');
+  assert.equal(emptyPrivate.ids['empty-title'].textContent,'No joined agents');
+  assert.ok(emptyPrivate.ids['empty-description'].textContent.includes('both agents explicitly join this private bus'));
+  console.log('ok automatic local reachability, general recipient publication, and explicit private membership copy');
 })().catch(error=>{console.error(error);process.exitCode=1;});
