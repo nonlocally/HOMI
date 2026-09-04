@@ -1,8 +1,20 @@
 {
   "name": "communicate",
-  "version": "0.1.0",
-  "description": "Agent-to-agent communication: route messages to any Claude or Codex agent by name, rename sessions, join the bus, bridge devices over ssh, wake agents on triggers.",
-  "author": { "name": "Aadarsh Agarwal", "url": "https://github.com/aadarwal" },
+  "version": "0.2.0",
+  "description": "Register existing Claude and Codex agents on general or named buses, browse the bus interface, message members, and connect devices through scoped HTTPS invitations.",
+  "author": {
+    "name": "Aadarsh Agarwal",
+    "url": "https://github.com/aadarwal"
+  },
   "license": "MIT",
-  "keywords": ["agents", "messaging", "routing", "codex", "cross-session"]
+  "keywords": [
+    "agents",
+    "messaging",
+    "routing",
+    "codex",
+    "cross-session",
+    "bus",
+    "registration",
+    "discovery"
+  ]
 }

@@ -1,11 +1,19 @@
 ---
 name: communicate-codex
-description: Talking to Codex agents and sessions — three lanes. Use when asked to message, ask, queue a turn into, or stand up a Codex agent (OpenAI Codex CLI/app), including reaching an existing named Codex session, getting a synchronous headless Codex answer, or presenting Codex as a Claude peer.
+description: Register this Codex session on a bus, or talk to Codex agents through the existing-session queue and headless lanes. Use for Codex bus registration, messaging, queueing into an open session, synchronous headless answers, or presenting a separate Codex peer.
 ---
 
 # communicate-codex — the three Codex lanes
 
-Codex has no peer socket, so communicate offers three honest primitives. Choose
+To register **this Codex session**, run `communicate bus register` (or
+`--bus photonics`). It attaches the exact `CODEX_THREAD_ID`; use the session
+shell if MCP lacks that environment. `CODEX_SESSION_ID` may differ and is not
+the queue target. Verify the returned ID in `communicate bus agents --json`.
+Its status is queueable, not proof that the app is actively processing a turn.
+Read `communicate-bus` for the dashboard and membership-scoped sending.
+Never start a `codex peer` or `codex ask` to satisfy "register yourself".
+
+For the legacy socket/SSH lane, communicate offers three primitives. Choose
 by where you want the conversation to live.
 
 ## Lane 1 — `codex queue`: into an EXISTING session (async)

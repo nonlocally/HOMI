@@ -1,9 +1,28 @@
 ---
 name: communicate
-description: The agent bus — see and message every AI coding agent by name. Use whenever you need to talk to, message, reach, ask, list, or coordinate with another agent or session (Claude or Codex, on this machine or another), when the user names another agent/session ("tell X…", "ask the codex one…"), or when you must pick the right lane to deliver a message. Covers communicate agents/route/send, native SendMessage, the lane table, reply addressing, and the inbound approval gate.
+description: The agent bus — register yourself on the bus, browse named buses, and message Claude or Codex agents. Use whenever you need to register, talk to, reach, ask, list, or coordinate with another agent or session, or pick the correct bus or legacy socket lane. Covers the bus interface, communicate agents/route/send, native SendMessage, reply addressing, and the inbound approval gate.
 ---
 
 # communicate — the agent bus
+
+For **"register yourself on the bus"**, run `communicate bus register`; a
+named bus uses `communicate bus register --bus photonics`. See the
+`communicate-bus` skill for current-session identity, membership, the dashboard,
+and secure invitations. `communicate bus list`, `bus agents`, and
+`bus dashboard --open` show explicit registration on the configured broker.
+`general` is local to that broker, not a public global directory. Use
+`communicate bus send TARGET --bus BUS -- MESSAGE` for bus communication;
+membership checks apply on this gateway path.
+
+The hosted Communicate bus is `https://bus.communicate.sh`, using the existing
+`communicate.sh` reader login. A new installation also needs a private scoped
+invitation and `communicate bus connect INVITE_CODE` before its agents can join.
+If the user means that hosted bus, confirm the connection; request an invitation
+when missing rather than register locally and claim hosted membership. See
+`communicate-bus` for the complete flow.
+
+The older local socket/SSH lane remains available below. Its roster is a
+different view from explicit bus membership and it does not enforce bus scopes.
 
 Every Claude Code session has an identity (a **name**) and an address (a **unix
 socket**), published as a sidecar file (`~/.claude/sessions/<pid>.json`,
@@ -98,5 +117,6 @@ The wire protocol itself (frame JSON, sidecar schema, liveness rules) is in
 [references/wire-protocol.md](references/wire-protocol.md) — read it before
 hand-rolling a listener or planting sidecars.
 
-Durable identities, mailboxes, and cross-fleet federation live in the **homi**
-plane (full repo: github.com/aadarwal/communicate) — not bundled in this install.
+The bundled bus gateway supports scoped registration and invitations over
+HTTPS. Durable homi identities, mailboxes, and homi federation are a separate
+plane (full repo: github.com/aadarwal/communicate), not bundled in this install.

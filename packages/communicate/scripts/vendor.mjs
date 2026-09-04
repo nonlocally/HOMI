@@ -16,7 +16,8 @@ mkdirSync(path.join(vendor, "lib"), { recursive: true });
 
 cpSync(path.join(repo, "bin", "communicate"), path.join(vendor, "bin", "communicate"));
 for (const f of readdirSync(path.join(repo, "lib"))) {
-  const keep = (f.endsWith(".sh") && !/homi/.test(f)) || f === "cc_peer.py";
+  const keep = (f.endsWith(".sh") && !/homi/.test(f)) ||
+    ["cc_peer.py", "bus.py", "bus_broker.py", "bus_ui.html"].includes(f);
   if (!keep) continue;
   if (/homi/.test(f)) throw new Error(`homi file escaped the filter: ${f}`);
   cpSync(path.join(repo, "lib", f), path.join(vendor, "lib", f));

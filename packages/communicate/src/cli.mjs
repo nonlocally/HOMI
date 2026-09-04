@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 // @aadarwal/communicate — node verbs (setup/doctor/serve/version) + bash passthrough.
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
+import { pkgDir, communicateCli } from "./paths.mjs";
 
-const pkgDir = fileURLToPath(new URL("..", import.meta.url));
-const vendorCli = path.join(pkgDir, "vendor", "bin", "communicate");
 const [cmd, ...rest] = process.argv.slice(2);
 
 const version = () => {
@@ -22,7 +20,7 @@ switch (cmd) {
   case "--help":
     version();
     console.log("verbs: setup [--claude|--codex|--dry-run|--uninstall|--purge|-y] | doctor | serve | version");
-    console.log("       any communicate CLI verb (agents, route, send, codex ..., claude ..., wake ...)");
+    console.log("       any communicate CLI verb (bus ..., agents, route, send, codex ..., claude ..., wake ...)");
     break;
   case "version":
   case "--version":
@@ -38,11 +36,11 @@ switch (cmd) {
     await (await import("./serve.mjs")).runServe();
     break;
   default: {
-    if (!existsSync(vendorCli)) {
+    if (!existsSync(communicateCli)) {
       console.error("communicate: payload missing — reinstall @aadarwal/communicate (or run: npm run vendor)");
       process.exit(127);
     }
-    const r = spawnSync(vendorCli, [cmd, ...rest], { stdio: "inherit" });
+    const r = spawnSync(communicateCli, [cmd, ...rest], { stdio: "inherit" });
     process.exit(r.status ?? 1);
   }
 }

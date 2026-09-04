@@ -1,16 +1,31 @@
 ---
 name: communicate-identity
-description: Names, renaming, and joining the agent bus. Use when asked to rename yourself or another agent/session, name a session so it can be messaged, make an agent addressable/discoverable, or explain how an agent becomes part of the bus. Covers /rename as the namespace, sidecar mechanics, dormant-transcript retitling, and the join-the-bus contract.
+description: Names, renaming, and registration on the agent bus. Use for "register yourself on the bus", registration on named buses, renaming yourself or another session, and making this agent discoverable. Covers current-session attachment, bus aliases, /rename for legacy sockets, and session identity.
 ---
 
 # communicate-identity — names and joining the bus
 
-## A name is a sidecar entry
+## Register this session on a bus
+
+Run `communicate bus register` for "register yourself on the bus", or
+`communicate bus register --bus photonics` for a named bus. Verify the returned
+identity with `communicate bus agents --bus photonics --json` (use `general`
+when unspecified). `--name ALIAS --description TEXT` adds a bus alias and
+capability description without renaming the user's conversation.
+
+Registration attaches the current Claude socket or exact `CODEX_THREAD_ID`.
+Never create a headless `codex peer` or guess the latest thread to register
+yourself. An MCP process may lack the current thread environment: use the CLI
+inside this session's shell then. The `communicate-bus` skill covers membership,
+dashboard access, and invitations across devices.
+
+## A legacy socket name is a sidecar entry
 
 Claude Code writes `~/.claude/sessions/<pid>.json` with `name` and
 `messagingSocketPath`. That file IS the identity: whatever it says is what
 `ListAgents`, `communicate agents`, and `route` resolve. There is no separate
-registry — **the session's `/rename` name is the whole namespace**.
+registry for this legacy socket route. **The session's `/rename` name is its
+socket address label**; explicit bus aliases and memberships are separate.
 
 ## Rename yourself
 
@@ -35,7 +50,11 @@ So renaming someone else means driving their composer:
   — the name is carried when it resumes. The full repo automates this as
   `homi retitle` (not bundled here).
 
-## Cards — describe yourself so others can choose you
+## Cards — describe yourself in the legacy socket roster
+
+For explicit bus membership, set the description with
+`communicate bus register --bus BUS --description TEXT`. The card commands
+below resolve Claude sidecar identities, including `self` by its Claude socket.
 
 A card says what you ARE and what to ASK YOU FOR. It beats the chat title in
 the roster and — because it is keyed by sessionId — survives resumes and hex
@@ -58,9 +77,9 @@ Codex sessions carry a native thread name in `~/.codex/session_index.jsonl`
 queue` addresses exactly that name. Renaming a Codex session happens in its
 own UI; latest name wins in the index.
 
-## Joining the bus — the whole contract
+## Custom adapters on the legacy socket lane
 
-An agent (any process — not just Claude) is ON the bus when three things hold:
+An adapter appears in legacy `communicate agents` when three things hold:
 
 1. **A sidecar** in the sessions dir whose filename is NUMERIC (`<pid>.json` —
    discovery lists only pid-shaped filenames) and whose `pid` field is a live

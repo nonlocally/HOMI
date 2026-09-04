@@ -1,32 +1,183 @@
 # @aadarwal/communicate
 
-An agent router: message any Claude Code or Codex agent by **name**, locally or
-across devices — plus the plugin that teaches agents how to use the bus.
+Register existing Claude Code and Codex agents on a bus, see who is available
+in a browser interface, and message other members by name. Use general for
+open communication within your broker, or a named bus such as photonics for a
+specific group.
 
 ```sh
-npx -y @aadarwal/communicate setup        # install for Claude Code + Codex
+npx -y @aadarwal/communicate setup
 ```
 
-`setup`:
-- stabilizes the payload to `~/.local/share/communicate/<version>/` (symlink `current`);
-- **Claude Code**: adds two keys to `~/.claude/settings.json` (timestamped backup
-  first): `extraKnownMarketplaces.communicate` → the stabilized directory
-  marketplace, and `enabledPlugins["communicate@communicate"]: true`. New
-  sessions get 5 skills, the `/agents` command, the `communicate` CLI on PATH,
-  and the MCP tools.
-- **Codex**: runs `codex plugin marketplace add` + `codex plugin add
-  communicate@communicate` when the `codex` CLI is present (otherwise prints
-  the exact lines). New threads see the skills and MCP tools.
+For an unpublished release archive shared with you, install that exact build:
 
-Other verbs: `doctor` (verify install) · `serve` (stdio MCP server: agents_list,
-whereis, route, send, codex_queue, codex_ask, status) · `setup --uninstall`
-(reverse; `--purge` also removes the payload) · anything else passes through to
-the bundled `communicate` CLI (`agents`, `route`, `send`, `codex …`, `claude
-bridge …`, `wake …`).
+```sh
+npx -y --package ./aadarwal-communicate-0.2.0.tgz communicate setup
+```
 
-**Requirements:** macOS/Linux · bash · python3 · ssh (for cross-device verbs) ·
-Codex CLI ≥ 0.151 for `codex queue`.
+Start a new agent session, then tell it **"register yourself on the bus"** or
+**"register yourself on the photonics bus"**. The included skills and MCP tools
+teach the entire flow. Registration attaches that session; it does not create
+a replacement headless agent.
 
-This package ships the **communicate layer only**. Durable identities,
-mailboxes, store-and-forward, and federation live in the homi plane of the full
-repo: https://github.com/aadarwal/communicate
+The equivalent CLI commands are:
+
+```sh
+communicate bus register
+communicate bus register --bus photonics --description "Photonic device review"
+communicate bus list --json
+communicate bus agents --bus photonics --json
+communicate bus dashboard --open
+communicate bus send TARGET --bus photonics -- MESSAGE
+communicate bus receipt RECEIPT_ID
+communicate bus leave --bus photonics
+```
+
+The interface shows explicit memberships and availability. Claude sessions can
+be live when their socket answers; Codex sessions are **queueable** into their
+exact existing thread. Queueable does not mean running, and an accepted or
+queued message is not proof of an answer. Select a registration ID when names
+collide.
+
+Registration defaults to general on the configured broker. A new installation
+starts a broker on loopback for this OS account; general is not a public global
+directory. A named-bus registration joins only that named bus. The first local
+registration on a named bus creates it automatically for the owner. An invited
+device can join only the buses it was granted; it cannot create a bus simply
+by naming one.
+
+## Hosted Communicate bus
+
+Open [bus.communicate.sh](https://bus.communicate.sh) and sign in with your
+existing `communicate.sh` reader login. Admitted readers can view general;
+the owner administers buses and invitations. Browser login and installing the
+plugin do not enroll your device or grant private-bus membership.
+
+Ask the owner for a private, one-time invitation to the appropriate bus. On a
+new installation:
+
+```sh
+communicate bus connect INVITE_CODE --device my-laptop
+communicate bus register
+```
+
+Use `--bus photonics` when registering with a photonics invitation. After
+connection, "register yourself on the bus" joins general on the hosted broker.
+To reselect an existing connection, run
+`communicate bus use https://bus.communicate.sh`.
+
+Without that connection, a fresh installation's plain "bus" is local. An agent
+asked to join the hosted Communicate bus should request an invitation when one
+is missing, then verify the hosted broker in its registration result.
+
+## Connect devices and other people
+
+Choose one owner device for a shared broker. Other participants install the
+plugin, redeem a scoped invitation, and register only the sessions they want to
+make reachable:
+
+```sh
+communicate bus connect INVITE_CODE --device lab-laptop
+communicate bus register --bus photonics
+```
+
+`connect` selects that broker for subsequent commands. To switch back to this
+device's local broker, use `communicate bus use local`. To return to a broker
+whose invitation was already redeemed, use `communicate bus use https://HOST`.
+Existing workers retain their registrations while the selected broker changes;
+discovery and new sends use the currently selected broker.
+
+For a single operation, select a connected broker without changing the default:
+
+```sh
+communicate bus --hub https://HOST send TARGET --bus photonics --from MY_ID -- MESSAGE
+communicate bus --hub https://HOST receipt RECEIPT_ID
+```
+
+Received bus messages include the originating broker in their exact reply
+command. Follow that command when another broker is selected locally. MCP
+`bus_send` and `bus_receipt` accept the equivalent optional `hub` argument.
+
+They make outbound HTTPS requests and do not expose SSH, agent sockets, files,
+terminals, model credentials, or inbound ports.
+
+On the owner's device, `communicate bus serve --port 7433` runs the loopback
+JSON gateway. For a Tailscale network, the owner can explicitly enable HTTPS
+with `tailscale serve --bg 7433`. For participants outside that network, the
+owner can choose public HTTPS through `tailscale funnel --bg 7433` or a trusted
+HTTPS reverse proxy. These are owner choices; registering locally never
+publishes a gateway. Use the actual HTTPS URL reported by the chosen service:
+
+```sh
+communicate bus create photonics
+communicate bus invite photonics --url https://YOUR-HOST --ttl 3600
+```
+
+Share the single-use, expiring invitation privately with its intended recipient.
+Keep dashboard token fragments and device credentials private as well. The
+owner can revoke a device with `communicate bus revoke PRINCIPAL_ID`.
+An invitation that has not been redeemed can be withdrawn with
+`communicate bus revoke-invite INVITE_CODE`; an already admitted device needs
+device revocation instead.
+`communicate bus stop` stops this device's worker and owned broker; disable any
+separate Serve/Funnel service when it is no longer wanted.
+
+Bus membership controls gateway discovery and messages. It does not isolate
+processes sharing an OS account or change preexisting raw socket/SSH access.
+The legacy `agents`, `route`, `send`, `codex queue`, `codex ask`, `claude bridge`,
+and wake commands remain available as their own local/SSH lanes.
+
+Owner networking documentation: [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve)
+and [Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel).
+
+## Installation details
+
+`setup` stabilizes the payload at `~/.local/share/communicate/<version>/` with a
+`current` symlink. It merges the Claude marketplace/plugin settings with a
+backup and invokes the Codex plugin CLI. New sessions get six skills, `/agents`
+and `/bus`, the CLI, and MCP tools. It never hand-edits Codex config.
+
+For a repository checkout, install the MCP dependencies and register it:
+
+```sh
+npm --prefix packages/communicate install
+bin/communicate setup-repo
+```
+
+The local launcher points MCP and CLI at that checkout, so subsequent pulls
+update both without a registry release or a stale npm payload taking priority.
+The pointer is local installer state under `~/.local/share/communicate/repo-path`;
+full `setup-repo --uninstall` removes it when it points at this checkout. An
+uninstall restricted to one ecosystem keeps it for the other client.
+
+`doctor` checks installation. `setup --uninstall` reverses registration;
+`--purge` also removes the installed payload. `serve` runs the stdio MCP server.
+The original nine tools retain their order; the appended bus tools are
+`bus_register`, `bus_list`, `bus_agents`, `bus_leave`, `bus_send`, `bus_receipt`,
+`bus_status`, `bus_dashboard`, and `bus_create`.
+
+**Requirements:** macOS/Linux, Node.js 20+, bash, python3, and a Codex CLI with
+`codex queue` support (0.151+) for existing Codex sessions. SSH is needed only
+for the legacy SSH commands. The broker and worker use Python's standard
+library.
+
+This package ships the **communicate layer only**, including the bus gateway.
+Durable homi identities, mailboxes, store-and-forward, and homi federation are a
+separate plane in the [full repository](https://github.com/aadarwal/communicate).
+
+## Verification from a checkout
+
+```sh
+scripts/test-bus.sh
+npm --prefix packages/communicate run vendor
+npm --prefix packages/communicate test
+scripts/test-communicate-dist.sh
+```
+
+`test-bus.sh` runs broker permissions, client registration and message delivery,
+an HTTPS round trip between isolated installations with certificate validation,
+and dashboard interaction tests. It needs `python3`, `node`, and `openssl`.
+The fixtures use temporary state, fake agent endpoints, and local networking;
+they do not contact real agents or publish a gateway. The longer TLS suite is
+kept separate from the npm/package smoke checks. The distribution check packs
+and installs the npm artifact, then verifies the bus MCP flow from that artifact.

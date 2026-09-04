@@ -1,9 +1,10 @@
 # communicate
 
-**An agent router.** Give every AI coding agent an identity (a name) and an
-address (a unix socket), then route messages between them across machines over
-**Tailscale + SSH** — nothing else. Agents supported: **Claude Code** and
-**Codex**. That's the whole scope, on purpose.
+**An agent router with explicit shared buses.** Register a Claude Code or Codex
+session, discover it in a live dashboard, and exchange messages with other
+members of its buses. Local delivery uses existing session sockets and Codex
+queues. Remote bus participants connect outward over **HTTPS**; the original
+native-peer router also supports **Tailscale + SSH**.
 
 The core realization: Claude Code already discovers sibling sessions as
 messageable *peers* by reading small sidecar files (`~/.claude/sessions/*.json`)
@@ -17,8 +18,9 @@ routing table. `communicate` extends it across devices and across agent kinds:
   so it *also* shows up as a native peer; messaging it runs `codex exec` on that
   device and streams the answer back.
 
-No cloud relay, no account coupling, no tmux, no vendor bridge. Just
-`name → socket`, mounted across an SSH tunnel.
+The original native-peer mode needs no cloud relay, account coupling, tmux, or
+vendor bridge: `name → socket`, mounted across an SSH tunnel. Explicit buses
+add an operator-hosted gateway with membership and admission controls.
 
 > Sibling design note: this deliberately reuses Claude Code's own peer-messaging
 > wire protocol rather than inventing one. See [`docs/MECHANISM.md`](docs/MECHANISM.md)
@@ -40,11 +42,13 @@ backs it with `codex exec`.
 
 ## Requirements
 
-- `ssh` reachability between devices (Tailscale MagicDNS names work great).
-- `python3` (the wire protocol + adapter are Python).
+- `python3` (the broker, wire protocol and adapters use only the standard library).
+- Remote explicit buses need a reachable HTTPS hub; the native SSH router needs
+  SSH reachability between devices (Tailscale MagicDNS names work great).
 - For the Claude bridge: run it **from inside a Claude Code session** (it needs
   your own `$CLAUDE_CODE_MESSAGING_SOCKET` as the return address).
-- For Codex features: `codex` (Codex CLI ≥ 0.147) installed on the target device.
+- For existing Codex session registration/queue delivery: Codex CLI ≥ 0.151
+  installed on the agent's device. The older headless `codex ask` lane supports ≥ 0.147.
 
 ## Install
 
@@ -57,7 +61,7 @@ npx -y @aadarwal/communicate setup     # both ecosystems; --claude / --codex to 
 Stabilizes the payload to `~/.local/share/communicate/`, adds two keys to
 `~/.claude/settings.json` (backup written first), and registers the Codex
 plugin via the `codex` CLI. New Claude sessions and Codex threads then have the
-skills, the `/agents` command, `communicate` on PATH, and the MCP tools.
+six skills, `/agents` and `/bus` commands, `communicate` on PATH, and the MCP tools.
 `npx -y @aadarwal/communicate doctor` verifies; `setup --uninstall` reverses.
 The package ships the communicate layer only (no homi plane).
 
@@ -66,15 +70,81 @@ The package ships the communicate layer only (no homi plane).
 ```sh
 git clone git@github.com:aadarwal/communicate.git
 export PATH="$PWD/communicate/bin:$PATH"   # or symlink bin/communicate onto your PATH
+npm --prefix communicate/packages/communicate install  # local MCP dependencies
 communicate setup-repo                      # register THIS checkout as the Claude+Codex plugin
 ```
 
-`setup-repo` needs no npm and makes no copies: it points both ecosystems at the
-checkout itself, so `git pull` IS the upgrade. Reverse with
-`communicate setup-repo --uninstall`. (The MCP face rides the published npm
-package; until it is published, use the npx-mode setup for MCP.)
+`setup-repo` points both ecosystems at the checkout itself, so `git pull` is the
+upgrade. The CLI uses source directly; the MCP launcher also uses this checkout
+once its npm dependencies are installed. Reverse with
+`communicate setup-repo --uninstall`.
 
 ## Try it in 5 minutes
+
+### Register yourself on the bus
+
+With the plugin installed, tell your agent **“Register yourself on the bus.”**
+For a project bus, say **“Register yourself on the photonics bus.”** The plugin
+attaches that exact session; it never creates a substitute headless Codex agent.
+
+```sh
+communicate bus register                       # this session → general
+communicate bus register --bus photonics       # this session → photonics only
+communicate bus dashboard --open               # buses, agents, status, owner controls
+communicate bus agents --bus photonics --json
+communicate bus send AGENT_ID --bus photonics -- "Review the coupler geometry"
+communicate bus receipt MESSAGE_ID
+communicate bus leave --bus photonics
+```
+
+The first local registration starts a loopback broker and an outbound delivery
+worker. A named bus is created automatically for the local owner. Repeating
+registration updates the same session and can add another membership. An agent
+on both general and photonics is reachable on both; keep it off general if it
+should only be reachable by photonics members.
+
+The dashboard shows every bus the connected device is authorized to see, with
+search, per-bus rosters, enrollment and revocation controls. **Live** means a
+Claude socket answered a probe. **Queueable** means an existing Codex thread has
+a queue adapter; it does not establish that the thread is running. A missed
+heartbeat expires within 45 seconds and displays **offline**. Registration is
+persistent; after restarting the computer, register again to resume the worker.
+
+`general` is the default bus on your configured **hub**, not a global public
+directory. To put agents on different machines on the same bus, connect them
+to the same hub. [The bus guide](docs/BUSES.md) covers the three connection scopes,
+the exact security boundary, receipts, and recovery.
+
+### Connect devices or another person
+
+The owner runs one broker behind HTTPS. For a tailnet, explicitly enable
+[Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve):
+
+```sh
+communicate bus list                           # starts the local broker, port 7433
+tailscale serve --bg 7433                      # owner chooses tailnet exposure
+communicate bus create photonics
+communicate bus invite photonics --url https://OWNER.TAILNET.ts.net
+```
+
+Use the actual HTTPS URL Tailscale reports, and share the resulting one-use
+invitation privately. On the joining machine:
+
+```sh
+communicate bus connect INVITE_CODE --device lab-laptop
+communicate bus register --bus photonics
+```
+
+For someone outside the tailnet, the owner can explicitly expose the same gateway
+through public HTTPS, for example
+[Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel)
+(`tailscale funnel --bg 7433`), and use that URL in the invite. The joining person
+needs no inbound ports or SSH access. The gateway exposes only authenticated
+bus operations; native sockets, terminals and files stay local. Each invitation
+admits one installation to one bus. Revoke it in the dashboard or with
+`communicate bus revoke PRINCIPAL_ID`.
+
+### Original native-peer mode
 
 **A. One machine, no SSH — turn Codex into a Claude peer.**
 Run this from inside a Claude Code session (so `SendMessage`/`ListAgents` exist):
@@ -184,8 +254,10 @@ and owns its own stored `codex exec` threads.
 
 ## homi — durable identity + store-and-forward (v0.3)
 
-Everything above is rendezvous: both ends must be alive at the same moment, and
-a "name" is whatever a sidecar file says right now. **homi** (named for the
+The original native-peer mode is rendezvous: both ends must be alive at the same
+moment, and a "name" is whatever a sidecar file says right now. Explicit buses
+add opted-in membership and queued messages for existing session adapters.
+**homi** (named for the
 HOMI-engine lineage; its role is the device's postmaster) is the per-device
 daemon that fixes both:
 
@@ -388,6 +460,17 @@ Tests (315 checks, all green): `test-homi-core.sh` 49 · `test-homi-ask.sh` 10 �
 `test-homi-persist.sh` 6, container/launchd).
 
 ## Safety model
+
+Explicit buses enforce authorization at the gateway. Credentials determine the
+sender; both endpoints must be members of the addressed bus. Membership is
+checked again before queued mail is leased. Invitations expire, are single-use,
+and grant one bus; device revocation also cancels pending mail. The gateway
+operator is trusted with message content and membership administration. Local
+processes sharing an OS account are one trust domain; private buses do not
+remove their preexisting access through native sockets or the SSH router.
+See [bus security and delivery semantics](docs/BUSES.md#security-and-delivery).
+
+For the original native-peer router:
 
 - Transport is strictly SSH over a network you own. A forwarded socket is only
   as reachable as the SSH login that carries it.

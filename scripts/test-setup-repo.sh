@@ -15,7 +15,7 @@ echo "$@" >> "${CODEX_LOG:?}"
 exit 0
 STUB
 chmod +x "$FH/bin/codex"
-run() { HOME="$FH" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" "$CLI" setup-repo "$@" 2>&1; }
+run() { HOME="$FH" COMMUNICATE_DATA="$FH/data" COMM_STATE="$FH/state" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" "$CLI" setup-repo "$@" 2>&1; }
 fails=0; ok(){ echo "  ok  $*"; }; fail(){ echo "  FAIL $*"; fails=$((fails+1)); }
 jqs() { python3 -c "import json,sys;d=json.load(open('$SP'));print(eval(sys.argv[1]))" "$1" 2>/dev/null; }
 
@@ -25,6 +25,7 @@ echo "$out" | grep -q "\[dry-run\] would point marketplace" || fail "dry-run did
 echo "$out" | grep -q "\[dry-run\] would run: codex plugin marketplace add" || fail "dry-run did not narrate codex"
 [ -z "$(jqs "d.get('extraKnownMarketplaces')")" ] || [ "$(jqs "d.get('extraKnownMarketplaces')")" = "None" ] && ok "settings untouched" || fail "dry-run edited settings"
 [ -f "$FH/codex.log" ] && fail "dry-run invoked codex" || ok "codex not invoked"
+[ ! -e "$FH/data/repo-path" ] && ok "dry-run did not register MCP path" || fail "dry-run wrote MCP path"
 
 echo "2) install registers this checkout"
 run >/dev/null || fail "setup-repo errored"
@@ -33,6 +34,7 @@ run >/dev/null || fail "setup-repo errored"
 [ "$(jqs "d['sentinel']")" = "keep-me" ] && [ "$(jqs "d['enabledPlugins']['existing@mkt']")" = "True" ] && ok "merge preserved existing keys" || fail "merge clobbered"
 ls "$FH/.claude/"settings.json.communicate-backup-* >/dev/null 2>&1 && ok "backup written" || fail "no backup"
 grep -q "plugin marketplace add $ROOT" "$FH/codex.log" && grep -q "plugin add communicate@communicate" "$FH/codex.log" && ok "codex registered via CLI" || fail "codex commands wrong: $(cat "$FH/codex.log" 2>/dev/null)"
+[ "$(cat "$FH/data/repo-path" 2>/dev/null)" = "$ROOT" ] && ok "MCP launcher -> checkout" || fail "MCP path wrong"
 
 echo "2b) marketplace conflict: remove-and-retry completes the switch"
 cat > "$FH/bin/codex" <<'STUB'
@@ -45,15 +47,21 @@ exit 0
 STUB
 chmod +x "$FH/bin/codex"
 : > "$FH/codex.log"; touch "$FH/conflict.flag"
-HOME="$FH" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" CODEX_CONFLICT="$FH/conflict.flag" "$CLI" setup-repo --codex >/dev/null 2>&1
+HOME="$FH" COMMUNICATE_DATA="$FH/data" COMM_STATE="$FH/state" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" CODEX_CONFLICT="$FH/conflict.flag" "$CLI" setup-repo --codex >/dev/null 2>&1
 seq="$(grep -c "plugin marketplace add" "$FH/codex.log")"
 [ "$seq" = 2 ] && grep -q "plugin marketplace remove communicate" "$FH/codex.log" && grep -q "plugin add communicate@communicate" "$FH/codex.log" \
   && ok "conflict -> remove -> retry -> install" || fail "conflict sequence wrong: $(cat "$FH/codex.log")"
 
-echo "3) uninstall restores"
+echo "3) removing one ecosystem preserves the shared MCP launcher"
+run --claude --uninstall >/dev/null || fail "partial uninstall errored"
+[ "$(cat "$FH/data/repo-path" 2>/dev/null)" = "$ROOT" ] && ok "MCP pointer retained for remaining client" || fail "partial uninstall broke remaining MCP client"
+run --claude >/dev/null || fail "Claude registration restore errored"
+
+echo "4) full uninstall restores"
 run --uninstall >/dev/null || fail "uninstall errored"
 [ "$(jqs "d.get('extraKnownMarketplaces',{}).get('communicate')")" = "None" ] && [ "$(jqs "d.get('enabledPlugins',{}).get('communicate@communicate')")" = "None" ] && ok "keys removed" || fail "keys remain"
 [ "$(jqs "d['sentinel']")" = "keep-me" ] && ok "unrelated keys intact" || fail "uninstall damaged settings"
 grep -q "plugin remove communicate@communicate" "$FH/codex.log" && ok "codex remove issued" || fail "codex remove missing"
+[ ! -e "$FH/data/repo-path" ] && ok "MCP pointer removed" || fail "MCP pointer remains"
 
 [ "$fails" -eq 0 ] && echo "PASS: setup-repo registers/unregisters this checkout cleanly" || { echo "FAIL: $fails"; exit 1; }
