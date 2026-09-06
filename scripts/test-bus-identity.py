@@ -97,7 +97,7 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(polled["messages"][0]["sender"]["device_id"], left["device_id"])
 
     def test_browser_mapping_preserves_login_and_never_creates_an_enrolled_device(self):
-        reader_hash = hashlib.sha256(b"password-fixture").hexdigest()
+        reader_hash = hashlib.sha256(b"github-identity-fixture").hexdigest()
         token = self.b.browser_session("aadarsh", reader_hash)["token"]
         snap = self.b.handle(token, {"op": "snapshot"}, reader="aadarsh", reader_hash=reader_hash)
         self.assertTrue(snap["is_admin"])
@@ -106,6 +106,60 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual([p["id"] for p in snap["principals"]], ["admin"])
         denied = self.b.handle(token, {"op": "redeem", "invite": self.invite()}, reader="aadarsh", reader_hash=reader_hash)
         self.assertEqual(denied["code"], "forbidden")
+
+    def test_github_identity_rotation_replaces_browser_credential_without_changing_ownership(self):
+        self.call("create", bus="photonics")
+        for reader, login, user, is_admin in (("aadarsh", "aadarwal", "aadarwal", True),
+                                              ("peer", "peer-handle", "peer", False)):
+            with self.subTest(login=login):
+                device = self.enroll(user)
+                self.call("redeem", token=device["token"], invite=self.invite(user, "photonics"))
+                agent = self.call("register", token=device["token"], session_key="existing", name=login,
+                                  bus="photonics")
+                before_device = self.call("snapshot", token=device["token"])
+
+                # The gateway attests an immutable GitHub ID plus the allowlist
+                # mapping. A changed identity digest must replace only web auth.
+                def identity_hash(github_id):
+                    material = "communicate/github-identity/v1\0%d\0%s\0%s" % (github_id, login, reader)
+                    return hashlib.sha256(material.encode()).hexdigest()
+
+                previous_hash, current_hash = identity_hash(123), identity_hash(456)
+                previous_token = self.b.browser_session(reader, previous_hash)["token"]
+                previous = self.b.handle(previous_token, {"op": "snapshot"}, reader=reader, reader_hash=previous_hash)
+                self.assertTrue(previous["ok"], previous)
+                self.assertEqual(previous["user"], user)
+                self.assertEqual(previous["is_admin"], is_admin)
+                self.assertEqual(self.b.handle(previous_token, {"op": "snapshot"}, reader=reader,
+                                              reader_hash=current_hash)["code"], "unauthorized")
+
+                current_token = self.b.browser_session(reader, current_hash)["token"]
+                self.assertNotEqual(current_token, previous_token)
+                current = self.b.handle(current_token, {"op": "snapshot"}, reader=reader, reader_hash=current_hash)
+                self.assertTrue(current["ok"], current)
+                self.assertEqual(current["principal"], previous["principal"])
+                self.assertEqual(current["user"], user)
+                self.assertEqual(current["is_admin"], is_admin)
+                for context_hash in (previous_hash, current_hash):
+                    self.assertEqual(self.b.handle(previous_token, {"op": "snapshot"}, reader=reader,
+                                                  reader_hash=context_hash)["code"], "unauthorized")
+                self.assertEqual(self.b.handle(current_token, {"op": "snapshot"})["code"], "unauthorized")
+                if not is_admin:
+                    self.assertEqual([bus["name"] for bus in current["buses"]], ["general"])
+                    self.assertEqual(self.b.handle(current_token, {"op": "create", "bus": "forbidden"},
+                                                  reader=reader, reader_hash=current_hash)["code"], "forbidden")
+
+                # Existing machine credentials still work without web context;
+                # GitHub identity changes cannot transfer or erase enrollment.
+                after_device = self.call("snapshot", token=device["token"])
+                for field in ("principal", "device_id", "device", "device_metadata", "user", "is_admin", "buses"):
+                    self.assertEqual(after_device[field], before_device[field])
+                self.assertEqual(after_device["device_id"], device["device_id"])
+                self.assertEqual(after_device["user"], user)
+                self.assertEqual([bus["name"] for bus in after_device["buses"]], ["general", "photonics"])
+                self.assertIn(agent["id"], [row["id"] for row in after_device["buses"][1]["agents"]])
+                admin_devices = self.call("snapshot")["principals"]
+                self.assertNotIn(current["principal"], [entry["id"] for entry in admin_devices])
 
     def test_old_database_preserves_tokens_and_requires_explicit_owner_assignment(self):
         with tempfile.TemporaryDirectory(prefix="bus-old-identity-") as old:
@@ -142,7 +196,7 @@ class IdentityTests(unittest.TestCase):
     def test_user_mapping_changes_do_not_admit_unmapped_readers_or_old_invites(self):
         invitation = self.invite("peer")
         with self.assertRaisesRegex(BusError, "no configured bus user"):
-            self.b.browser_session("unmapped", hashlib.sha256(b"password").hexdigest())
+            self.b.browser_session("unmapped", hashlib.sha256(b"github-identity").hexdigest())
         with mock.patch.dict(os.environ, {**self.env, "BUS_READER_USERS": json.dumps({"aadarsh": "aadarwal"})}):
             reopened = Broker(self.tmp.name)
         denied = reopened.handle(None, {"op": "redeem", "invite": invitation})

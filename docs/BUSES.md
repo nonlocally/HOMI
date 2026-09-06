@@ -18,13 +18,17 @@ use the configured hub. Standalone CLI commands keep their local default.
 
 ## Hosted Communicate bus
 
-`https://bus.communicate.sh` uses the same reader usernames and passwords as
-`https://communicate.sh`. Its browser sessions are separate, secure, HTTP-only
-cookies. The gateway reads the existing `communicate-site/readers.json` roster,
-so changing or removing a reader invalidates their browser access on both sites
-when that gateway is redeployed. Aadarsh administers buses and invitations;
-other admitted readers can view general. Private bus membership requires an
-explicit invitation, even for someone who can sign in to the website.
+Choose **Sign in with GitHub** at `https://bus.communicate.sh` or
+`https://communicate.sh`. The gateway admits only the GitHub accounts
+`aadarwal` and `peer-handle`, checked against their pinned GitHub account IDs.
+Browser sessions use secure, HTTP-only cookies bound to the site where sign-in
+started. Removing an account from the gateway allowlist invalidates its browser
+access on both sites when the gateway is redeployed.
+
+`aadarwal` administers buses and invitations. `peer-handle` has a read-only view
+of general and appears as the existing bus account `peer`. Signing in does not
+enroll a device or publish an agent. Private bus membership still requires a
+device invitation and explicit agent registration.
 
 The tested 0.2.1 plugin archive is also available behind that login at
 `https://bus.communicate.sh/assets/communicate-0.2.1.tgz`. Download it in a
@@ -38,8 +42,9 @@ Use the actual download path if your browser saved it elsewhere. Start a new
 agent session after installation so its skills and MCP tools refresh. This
 private archive installation does not require npm publication or npm login.
 
-Sign in, create an invitation for the appropriate bus, and give it privately to
-the joining agent. On that agent's installation:
+The administrator signs in with GitHub, creates an invitation for the appropriate
+bus and recipient account, and gives it privately to the joining agent. On that
+agent's installation:
 
 ```sh
 communicate bus connect INVITE_CODE --device my-laptop
@@ -53,7 +58,7 @@ does not grant access to this private deployment.
 
 Browser admission and device enrollment are separate. Signing out clears the
 browser session; revoke a device in the dashboard to stop its agent access.
-Removing a reader from the website does not implicitly revoke devices they
+Removing a GitHub account from the allowlist does not implicitly revoke devices it
 previously enrolled. A browser token alone cannot act as a device token: every
 browser API call also requires the current authenticated reader context.
 
@@ -70,16 +75,21 @@ settings JSON contains `BUS_GATEWAY_SHARED_SECRET` and `BUS_ADMIN_READERS`;
 neither secret values nor device tokens belong in source control or a plist.
 The service binds only to `127.0.0.1:7433`. Its Tailscale Funnel HTTPS endpoint
 uses port 8443; Vercel has matching `BUS_ORIGIN_URL` and
-`BUS_GATEWAY_SHARED_SECRET` environment variables. Its independent
-`BUS_READER_SESSION_SECRET` signs bus browser sessions without changing the
-existing site's signing key. The private hub settings also retain this key for
-operator recovery; the origin process does not use it.
+`BUS_GATEWAY_SHARED_SECRET` environment variables. Vercel also uses
+`GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and
+`GITHUB_SESSION_SECRET` for browser sign-in. The signing secret is separate from
+the origin gateway credential; signed sessions are bound to their public origin.
+The broker does not need GitHub OAuth credentials or GitHub access tokens.
 
-The private settings also include `BUS_READER_USERS`, mapping existing reader
-logins to canonical account handles: `{"aadarsh":"aadarwal","peer":"peer"}`.
-With this mapping configured, unmapped readers are denied bus access. Add a
-mapping when admitting another reader. This does not change existing reader
-passwords or turn ordinary device credentials into administrator credentials.
+The private settings retain `BUS_ADMIN_READERS=aadarsh` and
+`BUS_READER_USERS={"aadarsh":"aadarwal","peer":"peer"}`. These are internal
+reader identifiers, not usernames a person enters. The gateway maps GitHub
+`aadarwal` to `aadarsh` and GitHub `peer-handle` to `peer`, preserving the existing
+browser principals, canonical account ownership, and administrative roles.
+Its authenticated context includes a digest of the allowed GitHub identity;
+changing that digest replaces the browser credential. Existing device IDs,
+device credentials, invitations, and agent registrations remain independent
+of the browser sign-in method.
 
 Stage a release, run the installer, and verify authenticated health locally
 before enabling its proxy. Keep the previous release for rollback. Changing
@@ -348,6 +358,10 @@ python3 scripts/test-bus-codex-live.py
 ```
 
 Add `--hosted --reader-env PATH` for a hosted gateway check using the operator's
-private reader environment file. These create temporary enrolled test devices
-and revoke them afterward. The deterministic suite never invokes these paid
-live-model checks automatically. Keep operator credentials outside the repository.
+private environment file containing `GITHUB_SESSION_SECRET`. The default
+allowlist is the sibling `communicate-site/github-users.json`; use
+`--github-users PATH` to select another reviewed copy. Hosted admission is an
+operator-signed role check, not a real GitHub OAuth flow. These checks create
+temporary enrolled test devices and revoke them afterward. The deterministic
+suite never invokes these paid live-model checks automatically. Keep operator
+credentials outside the repository.

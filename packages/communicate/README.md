@@ -80,10 +80,11 @@ help to set attribution.
 
 ## Hosted Communicate bus
 
-Open [bus.communicate.sh](https://bus.communicate.sh) and sign in with your
-existing `communicate.sh` reader login. Admitted readers can view general;
-the owner administers buses and invitations. Browser login and installing the
-plugin do not enroll your device or grant private-bus membership.
+Open [bus.communicate.sh](https://bus.communicate.sh) and choose **Sign in with
+GitHub**, as on `communicate.sh`. Only `aadarwal` and `peer-handle` are admitted.
+`aadarwal` administers buses and invitations; `peer-handle` views general under
+the existing bus account `peer`. Browser sign-in and installing the plugin do
+not enroll your device, publish an agent, or grant private-bus membership.
 
 Ask the owner for a private, one-time invitation to the appropriate bus. On a
 new installation:

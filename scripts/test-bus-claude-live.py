@@ -102,31 +102,46 @@ def remote_sender(host, payload, cleanup_principals):
     return participant, delivered["identity"], delivered["sent"]
 
 
-def hosted_owner(env_file, readers_file):
-    """Mint short-lived browser admission in memory; never need passwords."""
+def hosted_github_cookie(secret, identity):
+    """Operator-signed role fixture; this does not perform GitHub OAuth."""
+    origin = "https://bus.communicate.sh"
+    expires = int(time.time()) + 120
+    material = "communicate/github-identity/v1\0%d\0aadarwal\0%s" % (identity["id"], identity["reader"])
+    credential_hash = hashlib.sha256(material.encode()).hexdigest()
+    payload = {"v": "gh1", "origin": origin, "iat": expires - 43200, "exp": expires,
+               "login": "aadarwal", "id": identity["id"], "reader": identity["reader"],
+               "credentialHash": credential_hash}
+    def encoded(data):
+        return base64.urlsafe_b64encode(data).decode().rstrip("=")
+    value = encoded(json.dumps(payload, separators=(",", ":")).encode())
+    signature = encoded(hmac.new(secret.encode(), ("communicate/github/gh1/v1\0%s\0%s" % (origin, value)).encode(),
+                                hashlib.sha256).digest())
+    return "__Host-communicate_github=gh1.%s.%s" % (value, signature)
+
+
+def hosted_owner(env_file, github_users_file):
+    """Mint short-lived GitHub admission in memory, independently of OAuth."""
     secret = None
     for line in env_file.read_text().splitlines():
         name, separator, value = line.partition("=")
-        if separator and name.strip() == "BUS_READER_SESSION_SECRET":
+        if separator and name.strip() == "GITHUB_SESSION_SECRET":
             value = value.strip()
             secret = json.loads(value) if value.startswith('"') else value.strip("'")
-    if not isinstance(secret, str) or not 32 <= len(secret) <= 512:
-        raise RuntimeError("valid protected bus reader secret required for hosted mode")
-    digest = str(json.loads(readers_file.read_text())["aadarsh"]).lower()
+    if (not isinstance(secret, str) or not 32 <= len(secret) <= 512
+            or not all(33 <= ord(character) <= 126 for character in secret)):
+        raise RuntimeError("valid protected GitHub-session signing secret required for hosted mode")
+    users = json.loads(github_users_file.read_text())
+    identity = users.get("aadarwal") if isinstance(users, dict) else None
+    if (not isinstance(identity, dict) or type(identity.get("id")) is not int
+            or identity["id"] <= 0 or identity.get("reader") != "aadarsh"):
+        raise RuntimeError("reviewed owner GitHub identity required for hosted mode")
     origin = "https://bus.communicate.sh"
-    def encoded(data):
-        return base64.urlsafe_b64encode(data).decode().rstrip("=")
-    def cookie():
-        expires = int(time.time()) + 120
-        payload = "bus.communicate.sh/reader-session/v1\0aadarsh\0%d\0%s" % (expires, digest)
-        signature = encoded(hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest())
-        return "__Host-communicate_reader=v1.%s.%d.%s" % (encoded(b"aadarsh"), expires, signature)
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
     def request(path, token=None, body=None):
-        headers = {"Cookie": cookie(), "Origin": origin}
+        headers = {"Cookie": hosted_github_cookie(secret, identity), "Origin": origin}
         if token:
             headers["Authorization"] = "Bearer " + token
         data = None
@@ -148,7 +163,7 @@ def hosted_owner(env_file, readers_file):
     bootstrap = request("/_bus/session")
     def owner_api(op, **payload):
         return request("/v1", bootstrap["token"], dict(payload, op=op))
-    require(owner_api("snapshot").get("is_admin"), "hosted owner fixture admission")
+    require(owner_api("snapshot").get("is_admin"), "hosted signed-session owner role (not real GitHub OAuth)")
     return origin, owner_api
 
 
@@ -168,15 +183,17 @@ def roster():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hosted", action="store_true", help="use bus.communicate.sh instead of an isolated local broker")
-    parser.add_argument("--reader-env", type=Path, help="protected BUS_READER_SESSION_SECRET file for hosted fixture invitations")
-    parser.add_argument("--readers", type=Path, default=ROOT.parent / "communicate-site/readers.json")
+    parser.add_argument("--reader-env", type=Path, help="protected GITHUB_SESSION_SECRET file for hosted signing-role fixtures")
+    parser.add_argument("--github-users", "--readers", dest="github_users", type=Path,
+                        default=ROOT.parent / "communicate-site/github-users.json",
+                        help="reviewed GitHub allowlist; --readers is a compatibility alias")
     parser.add_argument("--sender-host", help="existing authorized SSH alias for a second-device HTTPS API sender fixture")
     args = parser.parse_args()
     if args.hosted and args.reader_env is None:
         parser.error("--hosted requires --reader-env")
     if args.sender_host and (not args.hosted or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@-]*", args.sender_host)):
         parser.error("--sender-host requires --hosted and a plain SSH host alias")
-    owner_url, owner_api = hosted_owner(args.reader_env, args.readers) if args.hosted else (None, None)
+    owner_url, owner_api = hosted_owner(args.reader_env, args.github_users) if args.hosted else (None, None)
     cleanup_principals, cleanup_invites = [], []
     remote_device_label = None
     if not shutil.which("claude"):

@@ -30,14 +30,16 @@ require = helpers.require
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hosted", action="store_true")
-    parser.add_argument("--reader-env", type=Path)
-    parser.add_argument("--readers", type=Path, default=ROOT.parent / "communicate-site/readers.json")
+    parser.add_argument("--reader-env", type=Path, help="protected GITHUB_SESSION_SECRET file for hosted signing-role fixtures")
+    parser.add_argument("--github-users", "--readers", dest="github_users", type=Path,
+                        default=ROOT.parent / "communicate-site/github-users.json",
+                        help="reviewed GitHub allowlist; --readers is a compatibility alias")
     args = parser.parse_args()
     if args.hosted and args.reader_env is None:
         parser.error("--hosted requires --reader-env")
     if not shutil.which("codex"):
         raise RuntimeError("authenticated local Codex CLI required")
-    origin, owner_api = helpers.hosted_owner(args.reader_env, args.readers) if args.hosted else (None, None)
+    origin, owner_api = helpers.hosted_owner(args.reader_env, args.github_users) if args.hosted else (None, None)
     temp = Path(tempfile.mkdtemp(prefix="bus-codex-live-"))
     temp.chmod(0o700)
     env = dict(os.environ, COMM_STATE=str(temp / "state"), COMM_BUS_PORT="0")
