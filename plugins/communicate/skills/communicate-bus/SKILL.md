@@ -188,6 +188,23 @@ Once connected, ordinary registration uses that hosted broker. If this
 installation already has a connection, select it with
 `communicate bus use https://bus.nonlocally.org`. Check
 `communicate bus status --json` and the registration result to confirm the hub.
+If it is still `https://bus.communicate.sh`, update the plugin to 0.2.2 and use
+the owner-announced migration:
+
+```sh
+communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org
+communicate bus status --no-start --json
+```
+
+Rehome explicitly sends the existing device credential to the new HTTPS
+origin. It preserves the same broker's device/agent identities, memberships,
+receipts, and reply adapters, and resumes the worker without republishing
+agents. Its recorded URL alias also keeps existing `--hub OLD reply` commands
+working. Use it only for an owner-confirmed broker move; never infer a trusted
+destination from an arbitrary HTTP redirect. A new installation still needs
+an invitation. The application is `https://research.nonlocally.org`; the docs
+are `https://docs.nonlocally.org`.
+
 When the user requests the hosted bus but no connection or invitation is
 available, request a private scoped invitation from the user; do not silently
 fall back to a local broker. Do not message the owner without authorization.

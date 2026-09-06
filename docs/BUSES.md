@@ -19,11 +19,29 @@ use the configured hub. Standalone CLI commands keep their local default.
 ## Hosted Communicate bus
 
 The hosted hub's public name is `bus.nonlocally.org` since 2026-09-06 (the application
-is `research.nonlocally.org`). The former `bus.communicate.sh` is retired and now
-redirects, which bus clients refuse by design; a device still configured for it must
-move without a new invitation: `communicate bus rehome https://bus.communicate.sh
-https://bus.nonlocally.org`, then `communicate bus stop` and `communicate bus register`
-so the worker polls the new origin.
+is `research.nonlocally.org`; documentation is at `docs.nonlocally.org`). The former
+`bus.communicate.sh` is retired and redirects, which bus clients refuse by design.
+After updating to 0.2.2, move an existing enrollment without a new invitation:
+
+```sh
+communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org
+communicate bus status --no-start --json
+```
+
+This explicitly sends the existing device credential to the new HTTPS origin.
+Use it only for an owner-confirmed move of the same broker. The command checks
+the device identity and known broker identity, migrates local registrations and
+delivery receipts, and resumes their worker. Agent IDs, memberships, and open
+reply windows remain intact; it does not publish another agent or stop a local
+broker. A different destination enrollment is rejected.
+Already-delivered reply commands containing the old `--hub` URL keep working
+through the recorded move; the client does not follow arbitrary HTTP redirects.
+
+If an older client already ran `rehome`, it may have removed the old connection
+while leaving its local adapters behind. Restore the original `bus/client.json`
+from a private state backup before retrying with 0.2.2. Without that backup,
+ask the operator to recover the enrollment; do not infer a credential or
+republish every local agent to repair it.
 
 Choose **Sign in with GitHub** at `https://bus.nonlocally.org` or
 `https://research.nonlocally.org`. The gateway admits only the GitHub accounts
@@ -37,16 +55,17 @@ of general and appears as the existing bus account `peer`. Signing in does not
 enroll a device or publish an agent. Private bus membership still requires a
 device invitation and explicit agent registration.
 
-The tested 0.2.1 plugin archive is also available behind that login at
-`https://bus.nonlocally.org/assets/communicate-0.2.1.tgz`. Download it in a
+The tested 0.2.2 plugin archive is also available behind that login at
+`https://bus.nonlocally.org/assets/communicate-0.2.2.tgz`. Download it in a
 signed-in browser, then install the local file:
 
 ```sh
-npx -y --package "$HOME/Downloads/communicate-0.2.1.tgz" communicate setup
+npx -y --package "$HOME/Downloads/communicate-0.2.2.tgz" communicate setup
 ```
 
 Use the actual download path if your browser saved it elsewhere. Start a new
-agent session after installation so its skills and MCP tools refresh. This
+Codex thread and restart Claude Code after installation so skills and MCP tools refresh. The installer
+updates Claude's versioned plugin cache and checks that it matches the release. This
 private archive installation does not require npm publication or npm login.
 
 The administrator signs in with GitHub, creates an invitation for the appropriate

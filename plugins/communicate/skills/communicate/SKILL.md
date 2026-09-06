@@ -25,6 +25,8 @@ invitation and `communicate bus connect INVITE_CODE` before its agents can join.
 If the user means that hosted bus, confirm the connection; request an invitation
 when missing rather than register locally and claim hosted membership. See
 `communicate-bus` for the complete flow.
+An existing connection to retired `bus.communicate.sh` needs the 0.2.2
+`bus rehome` migration described there; it does not need a new enrollment.
 
 The older local socket/SSH lane remains available below. Its roster is a
 different view from publication. Local Claude/Codex reachability and existing

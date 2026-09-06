@@ -15,7 +15,23 @@ echo "$@" >> "${CODEX_LOG:?}"
 exit 0
 STUB
 chmod +x "$FH/bin/codex"
-run() { HOME="$FH" COMMUNICATE_DATA="$FH/data" COMM_STATE="$FH/state" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" "$CLI" setup-repo "$@" 2>&1; }
+cat > "$FH/bin/claude" <<'STUB'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(os.environ['HOME'])
+with (root / 'claude.log').open('a') as f: f.write(json.dumps(args) + '\n')
+cached = root / 'claude-cached-version'
+if args[:2] == ['plugin', 'update'] and not cached.exists(): sys.exit(1)
+if args[:2] in (['plugin', 'update'], ['plugin', 'install']):
+    if (root / 'claude-fail-refresh').exists(): sys.exit(1)
+    cached.write_text(os.environ['CLAUDE_TEST_VERSION'])
+if args == ['plugin', 'list', '--json']:
+    print(json.dumps([{'id': 'communicate@communicate', 'scope': 'user', 'version': cached.read_text()}]))
+STUB
+chmod +x "$FH/bin/claude"
+PLUGIN_VERSION="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$ROOT/plugins/communicate/.claude-plugin/plugin.json")"
+run() { HOME="$FH" CLAUDE_CONFIG_DIR="$FH/.claude" CLAUDE_TEST_VERSION="$PLUGIN_VERSION" COMMUNICATE_DATA="$FH/data" COMM_STATE="$FH/state" PATH="$FH/bin:$PATH" CODEX_LOG="$FH/codex.log" "$CLI" setup-repo "$@" 2>&1; }
 fails=0; ok(){ echo "  ok  $*"; }; fail(){ echo "  FAIL $*"; fails=$((fails+1)); }
 jqs() { python3 -c "import json,sys;d=json.load(open('$SP'));print(eval(sys.argv[1]))" "$1" 2>/dev/null; }
 
@@ -25,6 +41,7 @@ echo "$out" | grep -q "\[dry-run\] would point marketplace" || fail "dry-run did
 echo "$out" | grep -q "\[dry-run\] would run: codex plugin marketplace add" || fail "dry-run did not narrate codex"
 [ -z "$(jqs "d.get('extraKnownMarketplaces')")" ] || [ "$(jqs "d.get('extraKnownMarketplaces')")" = "None" ] && ok "settings untouched" || fail "dry-run edited settings"
 [ -f "$FH/codex.log" ] && fail "dry-run invoked codex" || ok "codex not invoked"
+[ -f "$FH/claude.log" ] && fail "dry-run invoked claude" || ok "claude not invoked"
 [ ! -e "$FH/data/repo-path" ] && ok "dry-run did not register MCP path" || fail "dry-run wrote MCP path"
 
 echo "2) install registers this checkout"
@@ -35,6 +52,13 @@ run >/dev/null || fail "setup-repo errored"
 ls "$FH/.claude/"settings.json.communicate-backup-* >/dev/null 2>&1 && ok "backup written" || fail "no backup"
 grep -q "plugin marketplace add $ROOT" "$FH/codex.log" && grep -q "plugin add communicate@communicate" "$FH/codex.log" && ok "codex registered via CLI" || fail "codex commands wrong: $(cat "$FH/codex.log" 2>/dev/null)"
 [ "$(cat "$FH/data/repo-path" 2>/dev/null)" = "$ROOT" ] && ok "MCP launcher -> checkout" || fail "MCP path wrong"
+[ "$(cat "$FH/claude-cached-version" 2>/dev/null)" = "$PLUGIN_VERSION" ] && ok "Claude installed via CLI at source version" || fail "Claude cache was not installed"
+printf '0.1.0' > "$FH/claude-cached-version"
+run --claude >/dev/null || fail "Claude cache refresh errored"
+[ "$(cat "$FH/claude-cached-version")" = "$PLUGIN_VERSION" ] && ok "stale Claude cache refreshed" || fail "Claude cache stayed stale"
+touch "$FH/claude-fail-refresh"
+run --claude >/dev/null && fail "failed Claude refresh reported success" || ok "Claude refresh failure is reported"
+rm "$FH/claude-fail-refresh"
 
 echo "2b) marketplace conflict: remove-and-retry completes the switch"
 cat > "$FH/bin/codex" <<'STUB'

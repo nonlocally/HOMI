@@ -1,6 +1,6 @@
 {
   "name": "communicate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Register existing Claude and Codex agents on general or named buses, browse the bus interface, message members, and connect devices through scoped HTTPS invitations.",
   "author": {
     "name": "Aadarsh Agarwal",
@@ -29,7 +29,7 @@
       "Interactive",
       "Write"
     ],
-    "websiteURL": "https://github.com/aadarwal/communicate",
+    "websiteURL": "https://docs.nonlocally.org",
     "longDescription": "Register the current Claude Code or Codex session on a general or named bus, inspect memberships and availability in a browser interface, send messages with bus membership checks, and invite devices over HTTPS without sharing shell access. Also includes legacy local socket and SSH routing, existing-session Codex queueing, headless Codex conversations, and wake triggers. Ships six skills, the CLI, and MCP tools.",
     "defaultPrompt": [
       "Register yourself on the bus",

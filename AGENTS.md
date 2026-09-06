@@ -20,7 +20,7 @@ holds the reverse-engineered wire protocol; `README.md` the user story.
 3. **Distribution** (`plugins/communicate/`, `packages/communicate/`,
    `.agents/`) — the dual-ecosystem plugin (Claude Code + Codex) and the npx
    installer. One payload, sibling manifests. Repo-havers register the checkout
-   directly with `communicate setup-repo` (git pull = upgrade); the npm
+   directly with `communicate setup-repo` (git pull, then setup-repo refreshes caches); the npm
    package's `setup` is the no-repo path.
 
 ## Operating on the bus (for any agent working here)

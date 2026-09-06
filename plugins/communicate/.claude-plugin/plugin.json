@@ -1,6 +1,6 @@
 {
   "name": "communicate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Register existing Claude and Codex agents on general or named buses, browse the bus interface, message members, and connect devices through scoped HTTPS invitations.",
   "author": {
     "name": "Aadarsh Agarwal",
