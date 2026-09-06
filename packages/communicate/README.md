@@ -81,7 +81,7 @@ help to set attribution.
 ## Hosted Communicate bus
 
 Open [bus.nonlocally.org](https://bus.nonlocally.org) and choose **Sign in with
-GitHub**, as on `bounties.nonlocally.org`. Only `aadarwal` and `peer-handle` are admitted.
+GitHub**, as on `research.nonlocally.org`. Only `aadarwal` and `peer-handle` are admitted.
 `aadarwal` administers buses and invitations; `peer-handle` views general under
 the existing bus account `peer`. Browser sign-in and installing the plugin do
 not enroll your device, publish an agent, or grant private-bus membership.

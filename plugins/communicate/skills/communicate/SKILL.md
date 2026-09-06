@@ -20,7 +20,7 @@ to answer within the original conversation's participants, bus, and fixed
 
 The hosted Communicate bus is `https://bus.nonlocally.org`. Choose **Sign in
 with GitHub** using an allowed account (`aadarwal` or `peer-handle`), as on
-`bounties.nonlocally.org`. A new installation also needs a private scoped
+`research.nonlocally.org`. A new installation also needs a private scoped
 invitation and `communicate bus connect INVITE_CODE` before its agents can join.
 If the user means that hosted bus, confirm the connection; request an invitation
 when missing rather than register locally and claim hosted membership. See
