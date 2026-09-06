@@ -1,10 +1,11 @@
 # shellcheck shell=bash
 # communicate :: setup-repo — register THIS checkout as the plugin for
 # Claude Code and Codex. The repo-haver's install: no npm, no vendor, no
-# frozen copy; `git pull` is the upgrade. The npm package's `setup` remains
+# frozen CLI copy; after `git pull`, rerun setup-repo to refresh plugin caches.
+# The npm package's `setup` remains
 # the no-repo/npx path (frozen payload + MCP deps).
 
-_sr_settings() { printf '%s/.claude/settings.json' "$HOME"; }
+_sr_settings() { printf '%s/settings.json' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
 
 # A shared launcher pointer avoids relying on different plugin-root expansion
 # syntaxes in Claude and Codex. It is local installer state, not plugin source.
@@ -77,6 +78,45 @@ _sr_run_codex() { # <args...> -> ok/fail, logged
   else return 1; fi
 }
 
+# Enabled settings alone do not refresh Claude's versioned plugin cache. Let
+# its CLI own installation state, including upgrades from a packaged payload.
+_sr_claude_refresh() {
+  python3 - "$1" "$COMM_HOME/plugins" <<'PY'
+import json, pathlib, shutil, subprocess, sys
+dry, root = sys.argv[1:]
+commands = [["plugin", "marketplace", "add", root],
+            ["plugin", "update", "communicate@communicate", "--scope", "user"]]
+if dry == "1":
+    for args in commands:
+        print("[dry-run] would run: claude " + " ".join(args))
+    sys.exit(0)
+if not shutil.which("claude"):
+    print("Claude CLI not found; after installing it, run communicate setup-repo --claude again.")
+    sys.exit(0)
+def run(args):
+    try:
+        return subprocess.run(["claude", *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+if not run(commands[0]):
+    sys.exit("Claude marketplace registration failed; run communicate setup-repo --claude again.")
+if not run(commands[1]) and not run(["plugin", "install", "communicate@communicate", "--scope", "user"]):
+    sys.exit("Claude plugin refresh failed; run claude plugin update communicate@communicate --scope user.")
+try:
+    expected = json.loads((pathlib.Path(root) / "communicate/.claude-plugin/plugin.json").read_text())["version"]
+    result = subprocess.run(["claude", "plugin", "list", "--json"], capture_output=True,
+                            stdin=subprocess.DEVNULL, timeout=30, check=True)
+    installed = json.loads(result.stdout)
+    if not any(p.get("id") == "communicate@communicate" and p.get("scope") == "user" and
+               p.get("version") == expected for p in installed):
+        raise ValueError("cached plugin does not match source")
+except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+    sys.exit("Claude plugin version verification failed; run claude plugin update communicate@communicate --scope user.")
+print("Claude plugin installed/refreshed via CLI; restart Claude Code to load it.")
+PY
+}
+
 _sr_codex() {
   local mode="$1" dry="$2"
   local -a cmds
@@ -133,7 +173,10 @@ setup_repo() {
   [ -f "$COMM_HOME/plugins/.claude-plugin/marketplace.json" ] || \
     die "no plugin payload at $COMM_HOME/plugins — is this a communicate checkout?"
   local mode=install; [ "$uninstall" = 1 ] && mode=uninstall
-  [ "$claude" = 1 ] && { _sr_claude "$mode" "$dry" || die "claude registration failed"; }
+  if [ "$claude" = 1 ]; then
+    _sr_claude "$mode" "$dry" || die "claude registration failed"
+    [ "$mode" != install ] || _sr_claude_refresh "$dry" || die "claude plugin refresh failed"
+  fi
   [ "$codex" = 1 ] && _sr_codex "$mode" "$dry"
   local pointer_mode="$mode"
   if [ "$mode" = uninstall ] && { [ "$claude" != 1 ] || [ "$codex" != 1 ]; }; then
@@ -141,7 +184,7 @@ setup_repo() {
   fi
   _sr_repo_pointer "$pointer_mode" "$dry" || die "checkout MCP path registration failed"
   if [ "$mode" = install ] && [ "$dry" != 1 ]; then
-    ok "this checkout is registered — new Claude sessions load skills + /agents + bin; git pull = upgrade"
+    ok "this checkout is registered — after git pull, rerun setup-repo to refresh cached plugins"
     log "MCP uses this checkout too. Install its Node dependencies once:"
     log "  npm --prefix \"$COMM_HOME/packages/communicate\" install"
   fi

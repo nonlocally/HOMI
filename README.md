@@ -52,17 +52,24 @@ backs it with `codex exec`.
 
 ## Install
 
-**npx (Claude Code + Codex plugin, CLI, MCP):**
+**Current private release (Claude Code + Codex plugin, CLI, MCP):**
+
+Sign in with GitHub at [bus.nonlocally.org](https://bus.nonlocally.org), then
+[download the 0.2.2 archive](https://bus.nonlocally.org/assets/communicate-0.2.2.tgz).
+Install that local file, using your browser's actual download path:
 
 ```sh
-npx -y @aadarwal/communicate setup     # both ecosystems; --claude / --codex to narrow
+npx -y --package "$HOME/Downloads/communicate-0.2.2.tgz" communicate setup
 ```
 
-Stabilizes the payload to `~/.local/share/communicate/`, adds two keys to
+This installs both ecosystems; use `--claude` or `--codex` to select one. The
+current release is distributed through this private archive, without npm
+publication or an npm login.
+The installer stabilizes the payload to `~/.local/share/communicate/`, adds two keys to
 `~/.claude/settings.json` (backup written first), and registers the Codex
-plugin via the `codex` CLI. New Claude sessions and Codex threads then have the
+plugin via the `codex` CLI. Restart Claude Code and start a new Codex thread for the
 six skills, `/agents` and `/bus` commands, `communicate` on PATH, and the MCP tools.
-`npx -y @aadarwal/communicate doctor` verifies; `setup --uninstall` reverses.
+Run the same archive command with `doctor` to verify or `setup --uninstall` to reverse.
 The package ships the communicate layer only (no homi plane).
 
 **From source (repo-havers — full CLI including homi):**
@@ -74,9 +81,12 @@ npm --prefix communicate/packages/communicate install  # local MCP dependencies
 communicate setup-repo                      # register THIS checkout as the Claude+Codex plugin
 ```
 
-`setup-repo` points both ecosystems at the checkout itself, so `git pull` is the
-upgrade. The CLI uses source directly; the MCP launcher also uses this checkout
-once its npm dependencies are installed. Reverse with
+`setup-repo` points both ecosystems at the checkout. After `git pull`, rerun
+`communicate setup-repo` to refresh their cached plugins; the installer uses
+the Claude CLI and verifies its installed version. Restart Claude Code and
+start a new Codex thread to load updated skills and MCP tools. The CLI uses
+source directly; the MCP launcher also uses this checkout once its npm
+dependencies are installed. Reverse with
 `communicate setup-repo --uninstall`.
 
 ## Try it in 5 minutes
@@ -131,6 +141,11 @@ GitHub** for the allowed accounts `aadarwal` and `peer-handle`. Aadarsh manages
 invitations; peer views general under the existing bus account `peer`. Browser
 sign-in does not enroll a device: new installations still need a private,
 one-time invitation and `communicate bus connect INVITE_CODE`.
+The application is at [research.nonlocally.org](https://research.nonlocally.org),
+and documentation at [docs.nonlocally.org](https://docs.nonlocally.org).
+Devices still configured for the retired `bus.communicate.sh` should update
+to 0.2.2 and run `communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org`.
+This preserves their existing enrollment and local agent adapters.
 
 `general` is the default bus on your configured **hub**, not a global public
 directory. To put agents on different machines on the same bus, connect them

@@ -13,7 +13,7 @@ const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
 const home = () => process.env.HOME || os.homedir();
 const dataRoot = () => process.env.COMMUNICATE_DATA || path.join(home(), ".local", "share", "communicate");
 const currentLink = () => path.join(dataRoot(), "current");
-const settingsPath = () => path.join(home(), ".claude", "settings.json");
+const settingsPath = () => path.join(process.env.CLAUDE_CONFIG_DIR || path.join(home(), ".claude"), "settings.json");
 const MARKET_ID = "communicate";
 const PLUGIN_ID = "communicate@communicate";
 
@@ -88,7 +88,27 @@ function claudeInstall(dry) {
   s.extraKnownMarketplaces = { ...(s.extraKnownMarketplaces || {}), [MARKET_ID]: { source: { source: "directory", path: marketRoot } } };
   s.enabledPlugins = { ...(s.enabledPlugins || {}), [PLUGIN_ID]: true };
   writeSettings(s, dry, `add extraKnownMarketplaces.${MARKET_ID} + enabledPlugins["${PLUGIN_ID}"]`);
-  log("Claude Code: new sessions load the plugin (six skills, /agents, /bus, CLI on PATH, MCP tools).");
+  const commands = [["plugin", "marketplace", "add", marketRoot], ["plugin", "update", PLUGIN_ID, "--scope", "user"]];
+  if (dry) {
+    for (const args of commands) log(`[dry-run] would run: claude ${args.join(" ")}`);
+    return;
+  }
+  const probe = spawnSync("claude", ["--version"], {stdio: "ignore", timeout: 30000});
+  if (probe.error?.code === "ENOENT") {
+    log("Claude CLI not found; after installing it, rerun this archive's communicate setup --claude.");
+    return;
+  }
+  const run = (args) => spawnSync("claude", args, {encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30000}).status === 0;
+  if (!run(commands[0])) throw new Error("Claude marketplace registration failed; rerun this archive's communicate setup --claude.");
+  if (!run(commands[1]) && !run(["plugin", "install", PLUGIN_ID, "--scope", "user"]))
+    throw new Error(`Claude plugin refresh failed; run claude plugin update ${PLUGIN_ID} --scope user.`);
+  const expected = JSON.parse(readFileSync(path.join(marketRoot, "communicate", ".claude-plugin", "plugin.json"), "utf8")).version;
+  const listed = spawnSync("claude", ["plugin", "list", "--json"], {encoding: "utf8", timeout: 30000});
+  let installed;
+  try { installed = listed.status === 0 ? JSON.parse(listed.stdout) : []; } catch { installed = []; }
+  if (!Array.isArray(installed) || !installed.some((p) => p.id === PLUGIN_ID && p.scope === "user" && p.version === expected))
+    throw new Error(`Claude plugin version verification failed; run claude plugin update ${PLUGIN_ID} --scope user.`);
+  log("Claude plugin installed/refreshed via CLI. Restart Claude Code to load the six skills, /agents, /bus, CLI, and MCP tools.");
 }
 
 function claudeUninstall(dry) {
@@ -104,7 +124,7 @@ function codexInstall(dry) {
   if (!hasCodex()) {
     log("codex CLI not found — run these once it is installed:");
     for (const c of cmds) log(`  codex ${c.join(" ")}`);
-    log(`  # or MCP only: codex mcp add communicate -- npx -y @aadarwal/communicate serve`);
+    log("After installing Codex, rerun this archive's communicate setup --codex to register its local MCP payload.");
     return;
   }
   for (const c of cmds) {
@@ -139,7 +159,7 @@ export async function runSetup(argv) {
   stabilize(f.dryRun);
   if (f.claude) claudeInstall(f.dryRun);
   if (f.codex) codexInstall(f.dryRun);
-  if (!f.dryRun) log("done — run `communicate doctor` (or: npx -y @aadarwal/communicate doctor) to verify.");
+  if (!f.dryRun) log("done — run the installed communicate doctor command to verify.");
 }
 
 export async function runDoctor() {

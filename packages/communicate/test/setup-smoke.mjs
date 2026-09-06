@@ -12,10 +12,27 @@ const cli = process.env.COMM_SETUP_TEST_ENTRY || path.join(pkgDir, "src", "cli.m
 const fakeHome = mkdtempSync(path.join(os.tmpdir(), "comm-setup-home-"));
 const data = path.join(fakeHome, "data");
 mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
+mkdirSync(path.join(fakeHome, "bin"));
+const pluginVersion = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8")).version;
+writeFileSync(path.join(fakeHome, "bin", "claude"), `#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(os.environ['HOME'])
+with (root / 'claude.log').open('a') as f: f.write(json.dumps(args) + '\\n')
+cached = root / 'claude-cached-version'
+if args[:2] == ['plugin', 'update'] and not cached.exists(): sys.exit(1)
+if args[:2] in (['plugin', 'update'], ['plugin', 'install']):
+    if (root / 'claude-fail-refresh').exists(): sys.exit(1)
+    if not (root / 'claude-keep-stale').exists(): cached.write_text(os.environ['CLAUDE_TEST_VERSION'])
+if args == ['plugin', 'list', '--json']:
+    print(json.dumps([{'id': 'communicate@communicate', 'scope': 'user', 'version': cached.read_text()}]))
+`, {mode: 0o755});
 const sp = path.join(fakeHome, ".claude", "settings.json");
 writeFileSync(sp, JSON.stringify({ sentinel: "keep-me", enabledPlugins: { "existing@mkt": true }, permissions: { allow: ["Read"] } }, null, 2));
 
-const env = { ...process.env, HOME: fakeHome, COMMUNICATE_DATA: data };
+const env = { ...process.env, HOME: fakeHome, CLAUDE_CONFIG_DIR: path.join(fakeHome, ".claude"),
+  CLAUDE_TEST_VERSION: pluginVersion, COMMUNICATE_DATA: data,
+  PATH: path.join(fakeHome, "bin") + path.delimiter + process.env.PATH };
 const runCli = (...args) => spawnSync("node", [cli, ...args], { encoding: "utf8", env });
 const die = (m) => { console.error("FAIL: " + m); rmSync(fakeHome, { recursive: true, force: true }); process.exit(1); };
 
@@ -25,6 +42,7 @@ if (r.status !== 0) die("dry-run exited " + r.status + "\n" + r.stderr);
 if (existsSync(data)) die("dry-run created the data dir");
 if (JSON.parse(readFileSync(sp, "utf8")).extraKnownMarketplaces) die("dry-run edited settings");
 if (!/would copy payload/.test(r.stdout)) die("dry-run did not narrate");
+if (existsSync(path.join(fakeHome, "claude.log"))) die("dry-run invoked Claude CLI");
 
 // 2. real --claude install
 r = runCli("setup", "--claude");
@@ -35,6 +53,7 @@ if (s.extraKnownMarketplaces?.communicate?.source?.source !== "directory") die("
 const marketPath = s.extraKnownMarketplaces.communicate.source.path;
 if (marketPath !== path.join(data, "current", "vendor", "plugins")) die("marketplace path wrong: " + marketPath);
 if (s.enabledPlugins["communicate@communicate"] !== true) die("plugin not enabled");
+if (readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== pluginVersion) die("Claude cache was not installed via CLI");
 if (!readdirSync(path.join(fakeHome, ".claude")).some((f) => f.startsWith("settings.json.communicate-backup-"))) die("no backup written");
 if (!lstatSync(path.join(data, "current")).isSymbolicLink()) die("current is not a symlink");
 if (!existsSync(path.join(data, "current", "vendor", "bin", "communicate"))) die("payload CLI missing");
@@ -54,6 +73,19 @@ const stabilized = spawnSync("node", [path.join(pkgDir, "test", "mcp-smoke.mjs")
   encoding: "utf8", env: { ...env, COMM_MCP_TEST_ENTRY: path.join(data, "current", "src", "cli.mjs") }, timeout: 45000,
 });
 if (stabilized.status !== 0) die("stabilized MCP/bus failed: " + stabilized.stdout + stabilized.stderr);
+
+// A versioned cache can remain stale even when enabledPlugins is true.
+writeFileSync(path.join(fakeHome, "claude-cached-version"), "0.1.0");
+r = runCli("setup", "--claude");
+if (r.status !== 0 || readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== pluginVersion)
+  die("setup did not refresh stale Claude cache");
+writeFileSync(path.join(fakeHome, "claude-fail-refresh"), "");
+if (runCli("setup", "--claude").status === 0) die("failed Claude refresh reported success");
+rmSync(path.join(fakeHome, "claude-fail-refresh"));
+writeFileSync(path.join(fakeHome, "claude-cached-version"), "0.1.0");
+writeFileSync(path.join(fakeHome, "claude-keep-stale"), "");
+if (runCli("setup", "--claude").status === 0) die("stale Claude cache reported a successful refresh");
+rmSync(path.join(fakeHome, "claude-keep-stale"));
 
 // 3. uninstall restores
 r = runCli("setup", "--claude", "--uninstall");

@@ -1,6 +1,6 @@
 {
   "name": "@aadarwal/communicate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Register existing Claude and Codex agents on named buses, browse a live interface, and connect devices through scoped HTTPS invitations. Includes CLI, skills, and MCP tools.",
   "type": "module",
   "license": "MIT",
@@ -32,5 +32,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.0"
-  }
+  },
+  "homepage": "https://docs.nonlocally.org"
 }

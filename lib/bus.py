@@ -216,6 +216,27 @@ def config():
     return read_json(state_dir() / "client.json", {"connections": {}, "default": None})
 
 
+def canonical_hub(cfg, url):
+    """Resolve only local aliases explicitly approved by a completed rehome."""
+    aliases = cfg.get("aliases", {})
+    if not isinstance(aliases, dict):
+        raise BusError("invalid local hub aliases")
+    visited = set()
+    while url in aliases:
+        if url in visited:
+            raise BusError("local hub alias loop; repair client.json before continuing")
+        visited.add(url)
+        target = aliases[url]
+        if not isinstance(target, str):
+            raise BusError("invalid local hub alias target")
+        url = validate_url(target)
+        if urllib.parse.urlsplit(url).scheme != "https":
+            raise BusError("local hub aliases require HTTPS targets")
+    if visited and url not in cfg["connections"]:
+        raise BusError("local hub alias points to an unconnected origin")
+    return url
+
+
 def save_connection(connection, select=True):
     with locked("client"):
         cfg = config()
@@ -274,10 +295,11 @@ def local_connection(start=True):
 def connection(start=True, hub=None):
     cfg = config()
     if hub and hub != "local":
-        hub = validate_url(hub)
+        hub = canonical_hub(cfg, validate_url(hub))
         if hub not in cfg["connections"]:
             raise BusError("hub is not connected; redeem its invitation first")
-    current = cfg["connections"].get(hub or cfg.get("default")) if hub != "local" else None
+    selected = hub or cfg.get("default")
+    current = cfg["connections"].get(canonical_hub(cfg, selected)) if selected and hub != "local" else None
     if current and not current.get("local"):
         return current
     current = local_connection(start)
@@ -445,13 +467,18 @@ def active_adapter(record):
 
 def remember_adapter(conn, ident, result, description="", bus=None):
     with locked("registrations"):
+        cfg = config()
+        url = canonical_hub(cfg, conn["url"])
+        if url != conn["url"] and any(cfg["connections"][url].get(field) != conn.get(field)
+                                       for field in ("principal", "token")):
+            raise BusError("enrollment changed while registering; retry with the current connection")
         regs = registrations()
-        key = conn["url"] + "|" + ident["session_key"]
+        key = url + "|" + ident["session_key"]
         previous = regs.get(key, {})
         memberships = result.get("buses")
         if memberships is None:
             memberships = sorted(set(previous.get("buses", []) + ([bus] if bus else [])))
-        ident.update({"id": result["id"], "url": conn["url"], "description": description,
+        ident.update({"id": result["id"], "url": url, "description": description,
                       "buses": memberships, "reply_until": previous.get("reply_until", 0)})
         regs[key] = ident
         write_json(state_dir() / "registrations.json", regs)
@@ -463,10 +490,11 @@ def retain_reply_adapter(record, expires_at):
         return
     expiry = min(expires_at, time.time() + 86400)
     with locked("registrations"):
+        url = canonical_hub(config(), record["url"])
         regs = registrations()
         changed = False
         for row in regs.values():
-            if row["url"] == record["url"] and row["id"] == record["id"] and expiry > row.get("reply_until", 0):
+            if row["url"] == url and row["id"] == record["id"] and expiry > row.get("reply_until", 0):
                 row["reply_until"] = expiry
                 changed = True
         if changed:
@@ -528,7 +556,7 @@ def register(args):
     ident = remember_adapter(conn, ident, result, desc, args.bus)
     start_worker()
     return {**attribution(result), "ok": True, "id": ident["id"], "name": ident["name"], "bus": args.bus,
-            "status": ident["status"], "hub": conn["url"],
+            "status": ident["status"], "hub": ident["url"],
             "note": "Registered existing session. Queueable means messages enter the Codex thread queue, not that it is running."
             if ident["kind"] == "codex" else "Registered existing session; socket connection verified."}
 
@@ -751,6 +779,146 @@ def stop_services():
     return {"ok": True, "status": "stopping", "note": "Workers finish their bounded in-flight request before stopping."}
 
 
+def rehome_connection(old, new):
+    old, new = validate_url(old), validate_url(new)
+    if old == new or any(urllib.parse.urlsplit(url).scheme != "https" for url in (old, new)):
+        raise BusError("rehome requires two different HTTPS origins")
+    existing = config()["connections"].get(old)
+    if not existing:
+        raise BusError("old enrollment is missing; if an earlier rehome already removed it, restore the original client.json from backup before retrying")
+    if existing.get("local") or not existing.get("principal"):
+        raise BusError("old hub is not a connected remote enrollment; nothing to move")
+
+    def check_destination(cfg):
+        destination = cfg["connections"].get(canonical_hub(cfg, new))
+        if destination and (destination.get("local") or any(
+                destination.get(field) != existing.get(field) for field in ("principal", "token"))):
+            raise BusError("new origin already has a different enrollment; not replacing it")
+
+    check_destination(config())
+    moved = {**existing, "url": new}
+    # The operator explicitly authorizes this credential's use at the new
+    # origin. Redirects remain forbidden by request(). Check the enrollment
+    # and every broker identity available before changing local state.
+    after = request(moved, "snapshot")
+    if (after.get("principal") != existing["principal"] or
+            after.get("device_id", existing["principal"]) != existing["principal"] or
+            not isinstance(after.get("server_id"), str) or not after["server_id"]):
+        raise BusError("new origin did not confirm this device's enrollment; not moving")
+    try:
+        before = request(existing, "snapshot")
+    except BusError:
+        before = None
+    cfg = config()
+    destination = cfg["connections"].get(canonical_hub(cfg, new), {})
+    expected_servers = [value for value in (existing.get("server_id"), destination.get("server_id"),
+                                            (before or {}).get("server_id")) if value]
+    if any(server != after["server_id"] for server in expected_servers):
+        raise BusError("the new origin answers as a different broker; not moving")
+    moved["server_id"] = after["server_id"]
+
+    root = state_dir()
+    resume = False
+    try:
+        # Stop only the outbound worker. Holding worker-start excludes new
+        # clients' concurrent starts; owning worker proves its journal closed.
+        with locked("worker-start"), contextlib.ExitStack() as held:
+            stopped_before = (root / "worker.stop").exists()
+            deadline = time.monotonic() + 30
+            try:
+                while True:
+                    guard = locked("worker", blocking=False)
+                    available = guard.__enter__()
+                    if available:
+                        held.callback(guard.__exit__, None, None, None)
+                        break
+                    guard.__exit__(None, None, None)
+                    resume = True
+                    (root / "worker.stop").touch(mode=0o600)
+                    if time.monotonic() >= deadline:
+                        raise BusError("bus worker did not pause within 30 seconds; no hub state was moved")
+                    time.sleep(.05)
+
+                with locked("client"), locked("registrations"):
+                    cfg = config()
+                    if cfg["connections"].get(old) != existing:
+                        raise BusError("old enrollment changed during rehome; retry with its current connection")
+                    check_destination(cfg)
+                    original_regs = registrations()
+                    expanded = dict(original_regs)
+                    for key, record in original_regs.items():
+                        if record["url"] != old:
+                            continue
+                        replacement = {**record, "url": new}
+                        new_key = new + "|" + record["session_key"]
+                        prior = expanded.get(new_key)
+                        if prior:
+                            if prior["id"] != record["id"]:
+                                raise BusError("new origin has a conflicting session adapter; not replacing it")
+                            replacement["buses"] = sorted(set(prior.get("buses", []) + record.get("buses", [])))
+                            replacement["reply_until"] = max(prior.get("reply_until", 0), record.get("reply_until", 0))
+                        expanded[new_key] = replacement
+                    migrated = {key: record for key, record in expanded.items() if record["url"] != old}
+                    updated = {**cfg, "connections": dict(cfg["connections"])}
+                    updated["connections"].pop(old)
+                    updated["connections"][new] = moved
+                    if updated.get("default") in (old, None):
+                        updated["default"] = new
+                    aliases = {}
+                    for source in cfg.get("aliases", {}):
+                        target = canonical_hub(cfg, source)
+                        if source != new:
+                            aliases[source] = new if target == old else target
+                    aliases[old] = new
+                    updated["aliases"] = aliases
+                    journal = None
+                    copied_ids = []
+                    try:
+                        path = root / "receipts.sqlite"
+                        if path.exists():
+                            journal = sqlite3.connect(path)
+                            if journal.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivered'").fetchone():
+                                copied_ids = [row[0] for row in journal.execute(
+                                    "SELECT id FROM delivered WHERE hub=? AND id NOT IN (SELECT id FROM delivered WHERE hub=?)",
+                                    (old, new))]
+                                journal.execute("INSERT OR IGNORE INTO delivered SELECT ?,id,status,detail,at FROM delivered WHERE hub=?",
+                                                (new, old))
+                                journal.commit()
+                            else:
+                                journal.close()
+                                journal = None
+                        # Every durable prefix remains usable after a crash:
+                        # copy dedup first, retain adapters for both origins
+                        # until client.json switches. Old receipt entries remain
+                        # for the normal two-day expiry, so rollback and late
+                        # acknowledgment handling retain their original dedup.
+                        write_json(root / "registrations.json", expanded)
+                        write_json(root / "client.json", updated)
+                        write_json(root / "registrations.json", migrated)
+                    except BaseException:
+                        if journal is not None:
+                            journal.rollback()
+                        write_json(root / "registrations.json", expanded)
+                        write_json(root / "client.json", cfg)
+                        write_json(root / "registrations.json", original_regs)
+                        if journal is not None:
+                            journal.executemany("DELETE FROM delivered WHERE hub=? AND id=?", [(new, mid) for mid in copied_ids])
+                            journal.commit()
+                        raise
+                    finally:
+                        if journal is not None:
+                            journal.close()
+                    resume = resume or any(active_adapter(row) for row in migrated.values() if row["url"] == new)
+            finally:
+                if not stopped_before and not resume:
+                    (root / "worker.stop").unlink(missing_ok=True)
+    finally:
+        if resume:
+            start_worker()
+    return {**attribution(after), "ok": True, "hub": new, "moved_from": old, "server_id": after["server_id"],
+            "note": "Connection, session adapters, and delivery receipts moved; existing memberships and reply windows retained."}
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--hub", help="use a connected HTTPS origin or local for this command only")
@@ -835,7 +1003,10 @@ def run(args):
             invite = card["invite"]
         except (ValueError, KeyError, TypeError):
             raise BusError("invalid invitation code") from None
-        existing = config()["connections"].get(url, {"url": url})
+        cfg = config()
+        if canonical_hub(cfg, url) != url:
+            raise BusError("invitation uses a moved hub origin; ask for an invitation from the current hub origin")
+        existing = cfg["connections"].get(url, {"url": url})
         metadata = device_metadata()
         dns_label = metadata.get("tailscale_dns_name", "").split(".", 1)[0]
         inferred_name = dns_label or metadata.get("tailscale_hostname") or metadata.get("hostname")
@@ -856,38 +1027,18 @@ def run(args):
                 regs = {key: row for key, row in registrations().items() if row["url"] != url}
                 write_json(state_dir() / "registrations.json", regs)
         save_connection({"url": url, "token": result["token"], "principal": result["principal"],
-                         "local": bool(existing.get("local"))})
+                         "local": bool(existing.get("local")),
+                         **({"server_id": result["server_id"]} if result.get("server_id") else {})})
         return {**attribution(result), "ok": True, "hub": url, "buses": result["buses"],
                 "note": "Connected. Run communicate bus register --bus <bus> in each agent session."}
     if cmd == "rehome":
-        old, new = validate_url(args.old), validate_url(args.new)
-        existing = config()["connections"].get(old)
-        if not existing or existing.get("local"):
-            raise BusError("old hub is not a connected remote hub; nothing to move")
-        moved = {**existing, "url": new}
-        # The credential is the broker's, not the hostname's: prove the new origin answers as the
-        # same broker with this device's token before anything is written.
-        after = request(moved, "snapshot")
-        try:
-            before = request(existing, "snapshot")
-        except BusError:
-            before = None
-        if before and before.get("server_id") != after.get("server_id"):
-            raise BusError("the new origin answers as a different broker; not moving")
-        with locked("client"):
-            cfg = config()
-            cfg["connections"].pop(old, None)
-            cfg["connections"][new] = moved
-            if cfg.get("default") in (old, None):
-                cfg["default"] = new
-            write_json(state_dir() / "client.json", cfg)
-        return {**attribution(after), "ok": True, "hub": new, "moved_from": old, "server_id": after.get("server_id"),
-                "note": "Restart the worker so it polls the new origin: communicate bus stop, then bus register."}
+        return rehome_connection(args.old, args.new)
     if cmd == "use":
         if args.hub == "local":
             conn = local_connection()
         else:
-            conn = config()["connections"].get(validate_url(args.hub))
+            cfg = config()
+            conn = cfg["connections"].get(canonical_hub(cfg, validate_url(args.hub)))
             if not conn:
                 raise BusError("hub is not connected; redeem its invitation first")
         save_connection(conn)
@@ -897,7 +1048,8 @@ def run(args):
         if args.hub == "local":
             selected = next((conn for conn in cfg["connections"].values() if conn.get("local")), None)
         else:
-            selected = cfg["connections"].get(validate_url(args.hub) if args.hub else cfg.get("default"))
+            url = validate_url(args.hub) if args.hub else cfg.get("default")
+            selected = cfg["connections"].get(canonical_hub(cfg, url)) if url else None
         info = read_json(state_dir() / "worker.json", {})
         result = {"ok": True, "configured": selected is not None, "hub": selected["url"] if selected else None,
                   "worker": info, "worker_recent": info.get("state") == "running" and time.time() - info.get("heartbeat_at", 0) < 15}
@@ -932,9 +1084,10 @@ def run(args):
         record = local_agent(conn, args.target)
         result = request(conn, "leave", agent=record["id"], bus=args.bus)
         with locked("registrations"):
+            url = canonical_hub(config(), conn["url"])
             regs = registrations()
             for row in regs.values():
-                if row["url"] == conn["url"] and row["id"] == record["id"]:
+                if row["url"] == url and row["id"] == record["id"]:
                     row["buses"] = [b for b in row["buses"] if b != args.bus]
             write_json(state_dir() / "registrations.json", regs)
         return result

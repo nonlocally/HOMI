@@ -15,6 +15,16 @@ for f in plugins/.claude-plugin/marketplace.json plugins/communicate/.claude-plu
          plugins/communicate/.codex-plugin/plugin.json .agents/plugins/marketplace.json; do
   jq -e '.name=="communicate"' "$ROOT/$f" >/dev/null 2>&1 && ok "$f" || fail "$f invalid"
 done
+python3 - "$ROOT" <<'PY' && ok "package and plugin release versions agree" || fail "release version mismatch"
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+version = json.loads((root / "packages/communicate/package.json").read_text())["version"]
+for name in (".claude-plugin", ".codex-plugin"):
+    plugin = json.loads((root / "plugins/communicate" / name / "plugin.json").read_text())
+    assert plugin["version"].split("+", 1)[0] == version, name
+market = json.loads((root / "plugins/.claude-plugin/marketplace.json").read_text())
+assert market["metadata"]["version"] == version
+PY
 python3 - "$ROOT" <<'PY' && ok "SKILL.md frontmatter (name+description only, dir==name)" || fail "SKILL.md frontmatter"
 import glob, re, sys
 root = sys.argv[1]; bad = 0
