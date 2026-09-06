@@ -804,6 +804,9 @@ def parser():
     dash.add_argument("--open", action="store_true")
     use = commands.add_parser("use")
     use.add_argument("hub", help="local or a previously connected HTTPS origin")
+    rehome = commands.add_parser("rehome", help="move a connected hub to a new public origin of the same broker, keeping this device's credential")
+    rehome.add_argument("old", help="the connected HTTPS origin, e.g. https://bus.communicate.sh")
+    rehome.add_argument("new", help="the broker's new public origin, e.g. https://bus.nonlocally.org")
     commands.add_parser("stop")
     for name in ("serve", "__serve"):
         service = commands.add_parser(name)
@@ -856,6 +859,30 @@ def run(args):
                          "local": bool(existing.get("local"))})
         return {**attribution(result), "ok": True, "hub": url, "buses": result["buses"],
                 "note": "Connected. Run communicate bus register --bus <bus> in each agent session."}
+    if cmd == "rehome":
+        old, new = validate_url(args.old), validate_url(args.new)
+        existing = config()["connections"].get(old)
+        if not existing or existing.get("local"):
+            raise BusError("old hub is not a connected remote hub; nothing to move")
+        moved = {**existing, "url": new}
+        # The credential is the broker's, not the hostname's: prove the new origin answers as the
+        # same broker with this device's token before anything is written.
+        after = request(moved, "snapshot")
+        try:
+            before = request(existing, "snapshot")
+        except BusError:
+            before = None
+        if before and before.get("server_id") != after.get("server_id"):
+            raise BusError("the new origin answers as a different broker; not moving")
+        with locked("client"):
+            cfg = config()
+            cfg["connections"].pop(old, None)
+            cfg["connections"][new] = moved
+            if cfg.get("default") in (old, None):
+                cfg["default"] = new
+            write_json(state_dir() / "client.json", cfg)
+        return {**attribution(after), "ok": True, "hub": new, "moved_from": old, "server_id": after.get("server_id"),
+                "note": "Restart the worker so it polls the new origin: communicate bus stop, then bus register."}
     if cmd == "use":
         if args.hub == "local":
             conn = local_connection()

@@ -18,8 +18,15 @@ use the configured hub. Standalone CLI commands keep their local default.
 
 ## Hosted Communicate bus
 
-Choose **Sign in with GitHub** at `https://bus.communicate.sh` or
-`https://communicate.sh`. The gateway admits only the GitHub accounts
+The hosted hub's public name is `bus.nonlocally.org` since 2026-09-06 (the application
+is `bounties.nonlocally.org`). The former `bus.communicate.sh` keeps answering for
+devices enrolled before then; move such a device without a new invitation with
+`communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org`, then
+`communicate bus stop` and `communicate bus register` so the worker polls the new
+origin. The old name is retired once every device has moved.
+
+Choose **Sign in with GitHub** at `https://bus.nonlocally.org` or
+`https://bounties.nonlocally.org`. The gateway admits only the GitHub accounts
 `aadarwal` and `peer-handle`, checked against their pinned GitHub account IDs.
 Browser sessions use secure, HTTP-only cookies bound to the site where sign-in
 started. Removing an account from the gateway allowlist invalidates its browser
@@ -31,7 +38,7 @@ enroll a device or publish an agent. Private bus membership still requires a
 device invitation and explicit agent registration.
 
 The tested 0.2.1 plugin archive is also available behind that login at
-`https://bus.communicate.sh/assets/communicate-0.2.1.tgz`. Download it in a
+`https://bus.nonlocally.org/assets/communicate-0.2.1.tgz`. Download it in a
 signed-in browser, then install the local file:
 
 ```sh
@@ -342,7 +349,7 @@ real Unix sockets, and a Codex argv fixture. It tests independent installations
 and delivery without contacting real agents or changing network configuration.
 These deterministic checks do not establish a real collaborator's external
 network reachability. Separate production verification exercised the public
-`bus.communicate.sh` path: both reader roles, anonymous denial, invitation
+`bus.nonlocally.org` path: both reader roles, anonymous denial, invitation
 redemption and replay prevention, independently enrolled devices, authenticated
 message delivery and receipts, forged-header rejection, and device revocation.
 It also queued a nonce through the public hub into a disposable real Codex
