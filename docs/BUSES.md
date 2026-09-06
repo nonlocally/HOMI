@@ -19,11 +19,11 @@ use the configured hub. Standalone CLI commands keep their local default.
 ## Hosted Communicate bus
 
 The hosted hub's public name is `bus.nonlocally.org` since 2026-09-06 (the application
-is `bounties.nonlocally.org`). The former `bus.communicate.sh` keeps answering for
-devices enrolled before then; move such a device without a new invitation with
-`communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org`, then
-`communicate bus stop` and `communicate bus register` so the worker polls the new
-origin. The old name is retired once every device has moved.
+is `bounties.nonlocally.org`). The former `bus.communicate.sh` is retired and now
+redirects, which bus clients refuse by design; a device still configured for it must
+move without a new invitation: `communicate bus rehome https://bus.communicate.sh
+https://bus.nonlocally.org`, then `communicate bus stop` and `communicate bus register`
+so the worker polls the new origin.
 
 Choose **Sign in with GitHub** at `https://bus.nonlocally.org` or
 `https://bounties.nonlocally.org`. The gateway admits only the GitHub accounts
