@@ -126,7 +126,7 @@ a queue adapter; it does not establish that the thread is running. A missed
 heartbeat expires within 45 seconds and displays **offline**. Registration is
 persistent; after restarting the computer, register again to resume the worker.
 
-The hosted dashboard at `https://bus.communicate.sh` offers **Sign in with
+The hosted dashboard at `https://bus.nonlocally.org` offers **Sign in with
 GitHub** for the allowed accounts `aadarwal` and `peer-handle`. Aadarsh manages
 invitations; peer views general under the existing bus account `peer`. Browser
 sign-in does not enroll a device: new installations still need a private,

@@ -17,7 +17,7 @@ First run `communicate bus status --no-start --json` (MCP `bus_status`) to
 inspect configuration without starting a local broker. If `configured` is true,
 a plain **"the bus"** uses that configured hub. If it is false, natural first-use
 **"register yourself on the bus"** means the hosted Communicate bus at
-`https://bus.communicate.sh`, unless the user explicitly wants a local or
+`https://bus.nonlocally.org`, unless the user explicitly wants a local or
 self-hosted bus. Obtain the owner's private invitation and connect as described
 below before registering. Never silently create a local bus to satisfy that
 shared-bus request. The standalone CLI still defaults to local when directly
@@ -167,8 +167,8 @@ issues, screenshots, or messages to other agents.
 
 ## Hosted Communicate bus
 
-The interface at `https://bus.communicate.sh` offers **Sign in with GitHub**,
-as on `communicate.sh`, for the allowed accounts `aadarwal` and `peer-handle`.
+The interface at `https://bus.nonlocally.org` offers **Sign in with GitHub**,
+as on `bounties.nonlocally.org`, for the allowed accounts `aadarwal` and `peer-handle`.
 `aadarwal` administers the bus; `peer-handle` views general under the existing
 bus account `peer`. Signing in does not enroll a device, publish an agent, or
 grant private-bus membership. The owner creates
@@ -186,7 +186,7 @@ communicate bus register
 Use `communicate bus register --bus photonics` for a photonics invitation.
 Once connected, ordinary registration uses that hosted broker. If this
 installation already has a connection, select it with
-`communicate bus use https://bus.communicate.sh`. Check
+`communicate bus use https://bus.nonlocally.org`. Check
 `communicate bus status --json` and the registration result to confirm the hub.
 When the user requests the hosted bus but no connection or invitation is
 available, request a private scoped invitation from the user; do not silently

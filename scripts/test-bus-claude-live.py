@@ -40,7 +40,7 @@ def request(op, token=None, **payload):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = "Bearer " + token
-    req = urllib.request.Request("https://bus.communicate.sh/v1", headers=headers,
+    req = urllib.request.Request("https://bus.nonlocally.org/v1", headers=headers,
         data=json.dumps(dict(payload, op=op)).encode())
     with opener.open(req, timeout=20) as response:
         raw = response.read(2 * 1024 * 1024 + 1)
@@ -104,7 +104,7 @@ def remote_sender(host, payload, cleanup_principals):
 
 def hosted_github_cookie(secret, identity):
     """Operator-signed role fixture; this does not perform GitHub OAuth."""
-    origin = "https://bus.communicate.sh"
+    origin = "https://bus.nonlocally.org"
     expires = int(time.time()) + 120
     material = "communicate/github-identity/v1\0%d\0aadarwal\0%s" % (identity["id"], identity["reader"])
     credential_hash = hashlib.sha256(material.encode()).hexdigest()
@@ -135,7 +135,7 @@ def hosted_owner(env_file, github_users_file):
     if (not isinstance(identity, dict) or type(identity.get("id")) is not int
             or identity["id"] <= 0 or identity.get("reader") != "aadarsh"):
         raise RuntimeError("reviewed owner GitHub identity required for hosted mode")
-    origin = "https://bus.communicate.sh"
+    origin = "https://bus.nonlocally.org"
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
@@ -182,7 +182,7 @@ def roster():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hosted", action="store_true", help="use bus.communicate.sh instead of an isolated local broker")
+    parser.add_argument("--hosted", action="store_true", help="use bus.nonlocally.org instead of an isolated local broker")
     parser.add_argument("--reader-env", type=Path, help="protected GITHUB_SESSION_SECRET file for hosted signing-role fixtures")
     parser.add_argument("--github-users", "--readers", dest="github_users", type=Path,
                         default=ROOT.parent / "communicate-site/github-users.json",

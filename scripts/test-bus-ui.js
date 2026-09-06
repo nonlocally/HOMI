@@ -288,7 +288,7 @@ function fixture() {
   const hosted=page({snapshot:{...fixture(),users:[{id:'aadarwal'},{id:'peer'}]}});await flush();
   await hosted.ids['invite-button'].fire('click');
   assert.equal(hosted.ids['invite-user-field'].hidden,false);assert.equal(hosted.ids['invite-user'].required,true);
-  hosted.ids['invite-url'].value='https://bus.communicate.sh';await hosted.ids['invite-url'].fire('input');
+  hosted.ids['invite-url'].value='https://bus.nonlocally.org';await hosted.ids['invite-url'].fire('input');
   await hosted.ids['invite-form'].fire('submit');
   assert.ok(hosted.ids['invite-error'].textContent.includes('Choose the user'));
   assert.equal(hosted.requests.filter(request=>request.op==='invite').length,0);
