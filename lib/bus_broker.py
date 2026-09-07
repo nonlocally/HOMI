@@ -971,7 +971,7 @@ def handler_factory(broker, assets_dir=None):
                 return self._respond(200, result)
             if path == "/health":
                 return self._respond(200, {"ok": True})
-            if path in ("/", "/index.html"):
+            if path in ("/", "/index.html", "/graph", "/graph/"):
                 candidate = asset_root / "bus_ui.html"
             elif path.startswith("/assets/"):
                 candidate = (asset_root / path.lstrip("/")).resolve()

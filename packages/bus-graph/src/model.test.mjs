@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {snapshotModel, layoutNodes, decorate, agentDetails, agentNodeId} from './model.mjs';
+import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId} from './model.mjs';
 
 const agent = (id, extra = {}) => ({id, name: id, user: 'aadarwal', kind: 'codex', device: 'mini', device_id: 'device-one', status: 'queueable', buses: ['qit-wilde'], ...extra});
 const message = (source, target, extra = {}) => ({source, target, message_count: 1, last_sent_at: 100, status_counts: {delivered: 1}, ...extra});
@@ -91,4 +91,30 @@ test('agent-controlled ids cannot collide with structural device nodes', () => {
   const nodes = layoutNodes(result);
   assert.equal(new Set(nodes.map(node => node.id)).size, nodes.length);
   assert.equal(result.connections.length, 1);
+});
+
+test('drag refresh may defer added agents and updated traffic but never removals or revoked bus scope', () => {
+  const agents = [agent('a'), agent('b')];
+  const current = snapshotModel(snapshot(agents, [message('a', 'b')]));
+  assert.equal(canDeferRefresh(current, snapshotModel(snapshot([
+    agent('a', {status: 'offline'}), agent('b'), agent('c'),
+  ], [message('a', 'b', {message_count: 2})]))), true);
+  assert.equal(canDeferRefresh(current, snapshotModel(snapshot([agent('a')], []))), false);
+  assert.equal(canDeferRefresh(current, snapshotModel(snapshot(agents, []))), false);
+  assert.equal(canDeferRefresh(current, snapshotModel(snapshot([
+    agent('a', {device_id: 'different-device'}), agent('b'),
+  ], [message('a', 'b')]))), false);
+  assert.equal(canDeferRefresh(current, snapshotModel(snapshot([
+    agent('a', {buses: []}), agent('b'),
+  ], [message('a', 'b')]))), false);
+});
+
+test('drag refresh cannot retain a removed source bus even when the same agents and link remain elsewhere', () => {
+  const agents = [agent('a'), agent('b')];
+  const shared = snapshot(agents, [message('a', 'b')]);
+  shared.buses.push({name: 'general', agents, graph: {basis: 'retained_bus_messages', edges: [message('a', 'b')]}});
+  const current = snapshotModel(shared);
+  const narrowed = snapshotModel({...shared, buses: shared.buses.slice(1)});
+  assert.equal(current.connections.length, narrowed.connections.length);
+  assert.equal(canDeferRefresh(current, narrowed), false);
 });

@@ -82,6 +82,7 @@
     .roster-title { display: flex; align-items: baseline; gap: 12px; }
     .roster-heading-actions { display: flex; align-items: center; gap: 20px; }
     .view-switch { display: inline-flex; gap: 2px; }
+    a.filter { text-decoration: none; }
     .view-switch .filter { border: 1px solid transparent; }
     .view-switch .filter[aria-pressed="true"] { background: var(--surface); border-color: #373733; }
     .graph-panel { min-height: 560px; margin-top: 4px; }
@@ -247,6 +248,42 @@
       .agent-location .device-details { margin-top: 1px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
       .identity-filters { flex-wrap: wrap; }
     }
+    .graph-topbar { display: flex; align-items: center; gap: 18px; padding: 10px 18px; min-height: 58px; border-bottom: 1px solid var(--line); flex: none; }
+    .graph-back { color: var(--muted); text-decoration: none; font-size: 12px; white-space: nowrap; }
+    .graph-back:hover { color: var(--ink); }
+    .graph-topbar select { max-width: 220px; background: transparent; color: var(--ink); border: 0; font-weight: 500; padding: 6px; }
+    #graph-search-slot { margin-left: auto; }
+    .graph-topbar .search { display: block; width: 230px; padding: 6px 10px; }
+    .graph-connection { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .graph-filter-panel { position: absolute; right: 18px; top: 62px; z-index: 30; padding: 18px; background: #151514; border: 1px solid #3a3a34; border-radius: 6px; box-shadow: 0 12px 36px #0008; }
+    .graph-filter-panel .identity-filters { display: grid; gap: 12px; margin: 16px 0 0; }
+    .graph-filter-panel .select-filter { justify-content: space-between; }
+    .graph-filter-panel select { max-width: 240px; }
+    .app[data-page="graph"] { max-width: none; width: 100%; height: 100dvh; min-height: 0; padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .app[data-page="graph"] > .sidebar,
+    .app[data-page="graph"] .page-heading,
+    .app[data-page="graph"] .stats,
+    .app[data-page="graph"] .roster-heading,
+    .app[data-page="graph"] .directory-note,
+    .app[data-page="graph"] .roster-tools,
+    .app[data-page="graph"] .roster > .identity-filters,
+    .app[data-page="graph"] .roster-foot,
+    .app[data-page="graph"] .onboard,
+    .app[data-page="graph"] .footer { display: none; }
+    .app[data-page="graph"] .main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .app[data-page="graph"] .roster { flex: 1; min-height: 0; position: relative; }
+    .app[data-page="graph"] .graph-panel { position: absolute; inset: 0; min-height: 0; height: 100%; margin: 0; }
+    .app[data-page="graph"] .notice { flex: none; margin: 0; border-left: 0; border-bottom: 1px solid var(--line); padding: 8px 18px; }
+    .app[data-page="graph"][data-view="list"] .roster { overflow: auto; padding: 20px; }
+    @media (max-width: 700px) {
+      .graph-topbar { gap: 10px; padding: 8px 12px; flex-wrap: wrap; }
+      .graph-topbar select { max-width: 180px; }
+      #graph-search-slot { order: 2; width: 100%; margin: 0; }
+      .graph-topbar .search { width: 100%; }
+      .graph-connection, #graph-signout { display: none; }
+      #graph-filter-toggle { margin-left: auto; }
+      .graph-filter-panel { top: 100px; right: 12px; max-width: calc(100vw - 24px); }
+    }
   </style>
 </head>
 <body>
@@ -263,6 +300,16 @@
     </form>
   </section>
   <div id="app" class="app" hidden>
+    <header id="graph-topbar" class="graph-topbar" hidden>
+      <a id="graph-back" class="graph-back" href="/">← Directory</a>
+      <select id="graph-bus" aria-label="Choose bus"></select>
+      <div id="graph-search-slot"></div>
+      <button id="graph-filter-toggle" class="text-button" aria-expanded="false" aria-controls="graph-filter-panel">Filters</button>
+      <span id="graph-connection" class="graph-connection" role="status">Connecting…</span>
+      <button id="graph-refresh" class="text-button">Refresh</button>
+      <button id="graph-signout" class="text-button">Sign out</button>
+    </header>
+    <section id="graph-filter-panel" class="graph-filter-panel" aria-label="Graph filters" hidden></section>
     <header class="sidebar">
       <div class="sidebar-top">
         <div class="brand">Agent bus</div>
@@ -278,10 +325,10 @@
       <div class="stats"><div class="stat"><p class="stat-label">Live</p><p class="stat-value" id="live-count">0</p></div><div class="stat"><p class="stat-label">Queueable</p><p class="stat-value" id="queueable-count">0</p></div><div class="stat"><p class="stat-label">Publishing devices</p><p class="stat-value" id="device-count">0</p></div></div>
       <p id="stale-notice" class="notice" role="status" hidden></p>
       <section class="roster" aria-labelledby="roster-title">
-        <div class="roster-heading"><div class="roster-title"><h2 id="roster-title">Published agents</h2><span id="roster-count" class="count-label">0 agents</span></div><div class="roster-heading-actions"><div id="view-switch" class="view-switch" role="group" aria-label="Agent view" hidden><button id="view-graph" class="filter" aria-pressed="false">Graph</button><button id="view-list" class="filter" aria-pressed="true">List</button></div><button id="refresh" class="text-button">Refresh</button></div></div>
+        <div class="roster-heading"><div class="roster-title"><h2 id="roster-title">Published agents</h2><span id="roster-count" class="count-label">0 agents</span></div><div class="roster-heading-actions"><div id="view-switch" class="view-switch" role="group" aria-label="Agent view"><a id="view-graph" class="filter" href="/graph">Open graph ↗</a><a id="view-list" class="filter" href="/" aria-current="page">List</a></div><button id="refresh" class="text-button">Refresh</button></div></div>
         <p id="directory-note" class="directory-note">Agents listed for remote messages. Local Claude and Codex agents remain reachable automatically.</p>
-        <div class="roster-tools"><div class="filters" role="group" aria-label="Filter by agent status"><button class="filter" data-status="all" aria-pressed="true">All</button><button class="filter" data-status="live" aria-pressed="false">Live</button><button class="filter" data-status="queueable" aria-pressed="false">Queueable</button><button class="filter" data-status="offline" aria-pressed="false">Offline</button></div><label class="search"><input id="search" type="search" aria-label="Search agents, users, or devices" placeholder="Search agents, users, or devices" autocomplete="off"></label></div>
-        <div class="identity-filters"><label class="select-filter" for="user-filter"><span>User</span><select id="user-filter" aria-label="Filter by user"><option value="">All users</option></select></label><label class="select-filter" for="device-filter"><span>Device</span><select id="device-filter" aria-label="Filter by device"><option value="">All devices</option></select></label></div>
+        <div class="roster-tools"><div id="status-filters" class="filters" role="group" aria-label="Filter by agent status"><button class="filter" data-status="all" aria-pressed="true">All</button><button class="filter" data-status="live" aria-pressed="false">Live</button><button class="filter" data-status="queueable" aria-pressed="false">Queueable</button><button class="filter" data-status="offline" aria-pressed="false">Offline</button></div><label id="search-control" class="search"><input id="search" type="search" aria-label="Search agents, users, or devices" placeholder="Search agents, users, or devices" autocomplete="off"></label></div>
+        <div id="identity-filters" class="identity-filters"><label class="select-filter" for="user-filter"><span>User</span><select id="user-filter" aria-label="Filter by user"><option value="">All users</option></select></label><label class="select-filter" for="device-filter"><span>Device</span><select id="device-filter" aria-label="Filter by device"><option value="">All devices</option></select></label></div>
         <p id="graph-unavailable" class="graph-unavailable" hidden>Graph unavailable. The agent list is still available; refresh to retry.</p>
         <div id="graph-panel" class="graph-panel" aria-label="Agent connection graph" hidden></div>
         <div id="table-wrap" class="table-wrap"><table><thead><tr><th scope="col">Agent</th><th scope="col" class="user-col">User</th><th scope="col" class="device-col">Device</th><th scope="col" class="membership-col">Buses</th><th scope="col">Status</th><th scope="col" class="last-seen-col">Last seen</th><th scope="col" id="actions-heading" hidden>Manage</th></tr></thead><tbody id="agent-rows"></tbody></table></div>
@@ -308,8 +355,17 @@
     'use strict';
     const $ = id => document.getElementById(id);
     const TOKEN_KEY = 'communicate.bus.dashboard.token';
-    const state = {token:'',data:null,bus:null,status:'all',user:'',device:'',query:'',updated:0,pending:false,epoch:0,browserSession:false,view:'graph'};
+    const graphPage = ['/graph','/graph/'].includes(location.pathname);
+    const requestedBus = new URLSearchParams(location.search).get('bus');
+    const initialBus = requestedBus && /^[a-z0-9][a-z0-9._-]{0,62}$/.test(requestedBus) ? requestedBus : null;
+    const state = {token:'',data:null,bus:initialBus,status:'all',user:'',device:'',query:'',updated:0,pending:false,epoch:0,browserSession:false,view:graphPage ? 'graph' : 'list'};
     let graph=null;
+    $('app').dataset.page=graphPage ? 'graph' : 'directory';
+    if (graphPage) {
+      $('graph-topbar').hidden=false;
+      $('graph-search-slot').append($('search-control'));
+      $('graph-filter-panel').append($('status-filters'),$('identity-filters'));
+    }
     let toastTimer, activeInvite='', inviteEpoch=0;
     function getToken() {
       const fragment = new URLSearchParams(location.hash.slice(1));
@@ -383,6 +439,7 @@
         catch (_) {try {graph.destroy();} catch (_) {} graph=null;$('graph-panel').replaceChildren();}
       }
       $('graph-panel').hidden=true;
+      $('graph-filter-panel').hidden=true;$('graph-filter-toggle').setAttribute('aria-expanded','false');
       try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
       for (const dialog of document.querySelectorAll('dialog')) if (dialog.open) dialog.close();
       resetInvite();
@@ -507,10 +564,11 @@
         return (state.status === 'all' || agentStatus(agent) === state.status) && searchable.includes(state.query);
       });
       filtered.sort((a,b) => ({live:0,queueable:1,offline:2}[agentStatus(a)] - {live:0,queueable:1,offline:2}[agentStatus(b)]) || String(a.name).localeCompare(String(b.name)));
+      renderGraph(filtered);
       const rows = $('agent-rows'); rows.replaceChildren();
       const canRemove = Boolean(state.data && state.data.is_admin && state.bus !== null);
       $('actions-heading').hidden = !canRemove;
-      for (const agent of filtered) {
+      for (const agent of state.view === 'list' ? filtered : []) {
         const row = node('tr');
         const cell = node('td'), info = node('div','agent-info'), text = node('div','agent-text');
         const isCodex = String(agent.kind).toLowerCase().includes('codex');
@@ -551,7 +609,6 @@
       }
       $('roster-count').textContent=identityAgents.length + (identityAgents.length === 1 ? ' agent' : ' agents');
       $('shown-count').textContent='Showing ' + filtered.length + ' of ' + identityAgents.length + ' agents';
-      renderGraph(filtered);
       $('table-wrap').hidden=state.view === 'graph' || !filtered.length;
       $('empty').hidden=state.view === 'graph' || Boolean(filtered.length);
       const filteredOut=Boolean(identityAgents.length);
@@ -566,7 +623,13 @@
       $('empty-invite').hidden=filteredOut || !state.data.is_admin;
     }
     function renderGraph(agents) {
+      const query=state.bus === null ? '' : '?bus=' + encodeURIComponent(state.bus);
+      $('view-graph').setAttribute('href','/graph' + query);
+      $('view-list').setAttribute('href','/' + query);
+      $('graph-back').setAttribute('href','/' + query);
+      if (!graphPage) {state.view='list';$('graph-panel').hidden=true;return;}
       try {
+        state.view='graph';
         if (!graph && typeof CommunicateGraph !== 'undefined') graph=CommunicateGraph.mount($('graph-panel'));
         if (!graph) throw new Error('Graph assets unavailable');
         $('view-switch').hidden=false;$('graph-unavailable').hidden=true;
@@ -574,20 +637,26 @@
         // Pass only this reader's visible snapshot, never credentials or admin records.
         // Clear scope when identity or bus admission changes, even if IDs overlap.
         const visible=buses().filter(bus => state.bus === null || bus.name === state.bus);
-        graph.update({scope:JSON.stringify([state.data.server_id,state.data.principal,state.bus,buses().map(bus => bus.name).sort()]),agents,buses:visible});
+        graph.update({scope:JSON.stringify([state.data.server_id,state.data.principal,state.bus,buses().map(bus => bus.name).sort()]),agents,buses:visible,standalone:true});
       } catch (_) {
         if (graph) {try {graph.destroy();} catch (_) {} graph=null;}
         $('graph-panel').replaceChildren();
         state.view='list';$('graph-panel').hidden=true;$('view-switch').hidden=true;$('graph-unavailable').hidden=false;
       }
-      $('view-graph').setAttribute('aria-pressed',String(state.view === 'graph'));
-      $('view-list').setAttribute('aria-pressed',String(state.view === 'list'));
+      $('view-graph').setAttribute('aria-current',state.view === 'graph' ? 'page' : 'false');
+      $('view-list').setAttribute('aria-current',state.view === 'list' ? 'page' : 'false');
       $('app').dataset.view=state.view;
     }
     function render() {
       if (!state.data) return;
       if (state.bus !== null && !buses().some(bus => bus.name === state.bus)) state.bus=null;
       const admin=Boolean(state.data.is_admin);
+      if (graphPage) {
+        setFilterOptions('graph-bus',buses().map(bus => [bus.name,bus.name]),state.bus || '', 'All buses');
+        const path='/graph' + (state.bus === null ? '' : '?bus=' + encodeURIComponent(state.bus));
+        history.replaceState(null,'',path);
+        document.title=(state.bus || 'All buses') + ' · Agent graph';
+      }
       for (const element of document.querySelectorAll('.admin')) element.hidden=!admin;
       const readerName=state.data.browser_session ? state.data.display_name || state.data.user || '' : '';
       $('current-user').textContent=readerName;$('current-user').title=readerName;$('current-user').hidden=!readerName;
@@ -614,6 +683,7 @@
         if (data.browser_session) browserMode(true);
         $('login').hidden=true;$('app').hidden=false;$('login-error').hidden=true;$('login-token').value='';
         $('stale-notice').hidden=true;$('connection-dot').className='dot live';$('connection-text').textContent='Connected to broker';
+        $('graph-connection').textContent='Connected';
         $('updated-at').textContent='Updated just now';render();
       } catch(error) {
         if (epoch !== state.epoch) return;
@@ -624,6 +694,7 @@
         } else if (state.data) {
           $('stale-notice').textContent='Updates paused: ' + error.message + ' Showing the last successful roster; agent status may be stale.';
           $('stale-notice').hidden=false;$('connection-dot').className='dot stale';$('connection-text').textContent='Connection interrupted';
+          $('graph-connection').textContent='Updates paused';
           $('updated-at').textContent='Last updated ' + ago(state.updated/1000);
         } else {$('login-error').textContent=error.message;$('login-error').hidden=false;}
       } finally {state.pending=false;$('refresh').disabled=false;$('login-submit').disabled=false;}
@@ -703,8 +774,16 @@
     $('disconnect').addEventListener('click',signOut);
     if ($('reader-reconnect')) $('reader-reconnect').addEventListener('click',signOut);
     $('refresh').addEventListener('click',() => refresh());
-    $('view-graph').addEventListener('click',() => {state.view='graph';renderRows();});
-    $('view-list').addEventListener('click',() => {state.view='list';renderRows();});
+    $('graph-refresh').addEventListener('click',() => refresh());
+    $('graph-signout').addEventListener('click',signOut);
+    $('graph-bus').addEventListener('change',event => {state.bus=event.target.value || null;render();});
+    $('graph-filter-toggle').addEventListener('click',() => {
+      $('graph-filter-panel').hidden=!$('graph-filter-panel').hidden;
+      $('graph-filter-toggle').setAttribute('aria-expanded',String(!$('graph-filter-panel').hidden));
+    });
+    document.addEventListener('keydown',event => {
+      if (event.key === 'Escape') {$('graph-filter-panel').hidden=true;$('graph-filter-toggle').setAttribute('aria-expanded','false');}
+    });
     $('search').addEventListener('input',event => {state.query=event.target.value.trim().toLowerCase();renderRows();});
     $('user-filter').addEventListener('change',event => {state.user=event.target.value;state.device='';renderIdentityFilters();renderRows();});
     $('device-filter').addEventListener('change',event => {state.device=event.target.value;renderRows();});

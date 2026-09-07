@@ -6,8 +6,11 @@ widget makes no requests and stores nothing in cookies or browser storage.
 
 The initial layout groups agents by owner and enrolled device, with a balanced
 three-column grid for larger devices. Nodes can be moved freely, and the viewport
-supports pan, zoom, fit, and a minimap. Expand gives the canvas the viewport;
-Escape collapses it and returns focus to its toolbar button. Selecting an agent shows its identity,
+supports pan, zoom, fit, and a minimap. The standalone graph page fills its host
+without a surrounding box. The embedded view retains Expand; Escape collapses
+it and returns focus to its toolbar button. Drag the background or scroll with
+two fingers to pan. Pinch, or hold Ctrl/Command while scrolling, to zoom.
+Selecting an agent opens an overlay without resizing or moving the canvas. It shows its identity,
 device, current status, and incoming/outgoing counts, while highlighting its
 neighbors. These are visual operations only; they do not issue agent commands,
 change bus membership, or create message edges.
@@ -41,7 +44,7 @@ Mount into an empty element inside the dashboard's graph view:
 
 ```js
 const graph = window.CommunicateGraph.mount(element);
-graph.update({scope: `${serverId}:${selectedBus}`, agents, buses});
+graph.update({scope: `${serverId}:${selectedBus}`, agents, buses, standalone: true});
 graph.clear();
 graph.destroy();
 ```
@@ -63,6 +66,14 @@ graph.destroy();
   refresh. Use a different scope for another broker/bus selection. Removed
   agents lose positions and inspector state immediately; no out-of-view cache
   is kept. Device reassignment also resets that agent's position.
+- `standalone: true` fills the mount element's explicitly sized height, removes
+  the border and Expand control, and uses compact controls. Omit it for the
+  embedded dashboard view. The inspector overlays the right edge, or the bottom
+  on narrow screens, without changing the canvas dimensions.
+- During a node drag, routine refreshes wait for pointer release and only the
+  latest sanitized snapshot is kept. Any scope change, removed agent or message
+  link, narrower bus membership, device reassignment, or `clear()` applies
+  immediately and cancels the drag; a pending snapshot cannot restore it.
 - A changed `scope` resets the layout, selection, and viewport. Call `clear()`
   whenever authorization is lost or the session is being replaced; it removes
   nodes, edges, details, and in-memory visual state synchronously.

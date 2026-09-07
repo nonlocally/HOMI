@@ -1,0 +1,5 @@
+# The minifier may emit literal whitespace inside template strings. Preserve it;
+# source and reproducible-build checks cover this generated runtime.
+lib/assets/bus-graph.js linguist-generated=true -whitespace
+lib/assets/bus-graph.css linguist-generated=true
+lib/assets/bus-graph.LICENSES.txt linguist-generated=true

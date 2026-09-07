@@ -68,7 +68,7 @@ class GatewayTests(unittest.TestCase):
         return result["token"]
 
     def test_entire_origin_requires_gateway_secret_even_static_health_and_other_methods(self):
-        for method, path in (("GET", "/"), ("GET", "/health"), ("GET", "/assets/x.js"),
+        for method, path in (("GET", "/"), ("GET", "/graph?bus=qit-wilde"), ("GET", "/graph/"), ("GET", "/health"), ("GET", "/assets/x.js"),
                              ("GET", "/_bus/session"), ("POST", "/v1"), ("HEAD", "/"),
                              ("OPTIONS", "/v1"), ("DELETE", "/unknown")):
             with self.subTest(method=method, path=path):
@@ -76,6 +76,8 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.request("/health", "GET", gateway="wrong")[0], 401)
         self.assertEqual(self.request("/health", "GET")[0], 200)
         self.assertEqual(self.request("/", "GET")[0], 200)
+        self.assertEqual(self.request("/graph?bus=qit-wilde", "GET")[0], 200)
+        self.assertEqual(self.request("/graph/", "GET")[0], 200)
         self.assertEqual(self.request("/_bus/session", "GET")[0], 401)
         self.assertEqual(self.request("/_bus/session", "GET", reader="aadarsh", digest=HASH_A, gateway=None)[0], 401)
         self.assertEqual(self.request("/_bus/session", "GET", reader="aadarsh", digest="spoofed")[0], 401)
