@@ -27,7 +27,7 @@ function element(tag) {
   };
 }
 const flush = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
-function page({hash='#token=secret', storedToken='', snapshot=fixture(), origin='http://127.0.0.1:7331', bootstrap=null}={}) {
+function page({hash='#token=secret', storedToken='', snapshot=fixture(), origin='http://127.0.0.1:7331', bootstrap=null, graphRenderer=null}={}) {
   const ids={},nodes=[],requests=[],copies=[],storage=new Map(),history=[],timers=[],navigations=[];
   let handler = request => request.url === '/_bus/session' ? (bootstrap || {ok:false,status:404}) : ({ok:true,...(request.op === 'snapshot' ? snapshot : {})});
   if (storedToken) storage.set('communicate.bus.dashboard.token',storedToken);
@@ -51,6 +51,7 @@ function page({hash='#token=secret', storedToken='', snapshot=fixture(), origin=
     return nodes.filter(node=>Object.hasOwn(node.attrs,selector.slice(1,-1)));
   }};
   const context={
+    CommunicateGraph:graphRenderer,
     document,URL,URLSearchParams,TextEncoder,AbortController,Map,Set,Date,
     location:{hash,pathname:'/',search:'',origin,assign:url=>navigations.push(url)},
     history:{replaceState(_state,_title,url){history.push(url);context.location.hash='';}},
@@ -368,4 +369,41 @@ function fixture() {
   assert.equal(emptyPrivate.ids['empty-title'].textContent,'No joined agents');
   assert.ok(emptyPrivate.ids['empty-description'].textContent.includes('both agents explicitly join this private bus'));
   console.log('ok automatic local reachability, general recipient publication, and explicit private membership copy');
+
+  const graphCalls=[];
+  let graphClears=0;
+  const graphPage=page({graphRenderer:{mount:()=>({update:data=>graphCalls.push(data),clear:()=>graphClears++,destroy(){}})}});await flush();
+  assert.equal(graphPage.ids['graph-panel'].hidden,false);
+  assert.equal(graphPage.ids['table-wrap'].hidden,true);
+  assert.equal(graphPage.ids['view-graph'].attrs['aria-pressed'],'true');
+  assert.equal(graphCalls.at(-1).agents.length,3);
+  assert.deepEqual(Object.keys(graphCalls.at(-1)).sort(),['agents','buses','scope']);
+  assert.ok(!JSON.stringify(graphCalls).includes('secret'),'graph gets no browser token');
+  await graphPage.ids['bus-nav'].children[2].fire('click');
+  assert.equal(graphCalls.at(-1).buses.length,1);
+  assert.equal(graphCalls.at(-1).buses[0].name,'photonics');
+  assert.equal(graphCalls.at(-1).agents.length,2);
+  graphPage.ids.search.value='guest';await graphPage.ids.search.fire('input');
+  assert.equal(graphCalls.at(-1).agents.length,1);
+  await graphPage.ids['view-list'].fire('click');
+  assert.equal(graphPage.ids['graph-panel'].hidden,true);
+  assert.equal(graphPage.ids['table-wrap'].hidden,false);
+  await graphPage.ids['view-graph'].fire('click');
+  const graphScope=graphCalls.at(-1).scope;
+  graphPage.setHandler(()=>({ok:true,...fixture(),buses:[fixture().buses[0]]}));
+  await graphPage.ids.refresh.fire('click');
+  assert.notEqual(graphCalls.at(-1).scope,graphScope,'admission changes reset graph scope');
+  assert.equal(graphCalls.at(-1).buses[0].name,'general');
+  graphPage.setHandler(()=>({ok:false,status:401,error:'Revoked'}));
+  await graphPage.ids.refresh.fire('click');
+  assert.ok(graphClears>0,'revocation clears graph memory');
+  assert.equal(graphPage.ids['graph-panel'].hidden,true);
+  assert.equal(graphPage.ids.app.hidden,true);
+  assert.equal(p.ids['graph-unavailable'].hidden,false,'missing graph assets retain functional list');
+  const brokenGraph=page({graphRenderer:{mount:()=>({update(){},clear(){throw new Error('fixture');},destroy(){throw new Error('fixture');}})}});await flush();
+  brokenGraph.setHandler(()=>({ok:false,status:401,error:'Revoked'}));
+  await brokenGraph.ids.refresh.fire('click');
+  assert.equal(brokenGraph.ids.app.hidden,true,'widget errors must not interrupt access revocation');
+  assert.equal(brokenGraph.ids['graph-panel'].children.length,0);
+  console.log('ok graph/list integration, scoped filters, no credentials, revocation clear and asset fallback');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>Agent bus</title>
+  <link rel="stylesheet" href="/assets/bus-graph.css">
   <style>
     :root {
       color-scheme: dark;
@@ -79,6 +80,19 @@
     .roster { min-width: 0; }
     .roster-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 18px; }
     .roster-title { display: flex; align-items: baseline; gap: 12px; }
+    .roster-heading-actions { display: flex; align-items: center; gap: 20px; }
+    .view-switch { display: inline-flex; gap: 2px; }
+    .view-switch .filter { border: 1px solid transparent; }
+    .view-switch .filter[aria-pressed="true"] { background: var(--surface); border-color: #373733; }
+    .graph-panel { min-height: 560px; margin-top: 4px; }
+    .graph-unavailable { margin-bottom: 16px; color: var(--muted); font-size: 12px; }
+    .app[data-view="graph"] .page-heading { margin: 24px 0 20px; }
+    .app[data-view="graph"] .stats { gap: 34px; margin-bottom: 26px; }
+    .app[data-view="graph"] .stat { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    .app[data-view="graph"] .stat-label { margin-bottom: 0; }
+    .app[data-view="graph"] .stat-value { font-size: 22px; }
+    .app[data-view="graph"] .roster-heading { margin-bottom: 10px; }
+    .app[data-view="graph"] .roster-tools, .app[data-view="graph"] .identity-filters { margin-bottom: 12px; }
     h2 { font-size: 15px; font-weight: 500; letter-spacing: -.015em; }
     .directory-note { color: var(--muted); font-size: 12px; line-height: 1.65; max-width: 760px; margin: 0 0 18px; }
     .count-label { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -190,6 +204,8 @@
       .command { justify-content: space-between; }
     }
     @media (max-width: 520px) {
+      .roster-heading { flex-wrap: wrap; gap: 10px; }
+      .app[data-view="graph"] .stats { flex-wrap: wrap; gap: 14px 24px; }
       .app { padding: 22px 18px 36px; }
       .sidebar-top { gap: 18px; flex-wrap: wrap; padding-bottom: 18px; }
       .brand { font-size: 26px; }
@@ -262,10 +278,12 @@
       <div class="stats"><div class="stat"><p class="stat-label">Live</p><p class="stat-value" id="live-count">0</p></div><div class="stat"><p class="stat-label">Queueable</p><p class="stat-value" id="queueable-count">0</p></div><div class="stat"><p class="stat-label">Publishing devices</p><p class="stat-value" id="device-count">0</p></div></div>
       <p id="stale-notice" class="notice" role="status" hidden></p>
       <section class="roster" aria-labelledby="roster-title">
-        <div class="roster-heading"><div class="roster-title"><h2 id="roster-title">Published agents</h2><span id="roster-count" class="count-label">0 agents</span></div><button id="refresh" class="text-button">Refresh</button></div>
+        <div class="roster-heading"><div class="roster-title"><h2 id="roster-title">Published agents</h2><span id="roster-count" class="count-label">0 agents</span></div><div class="roster-heading-actions"><div id="view-switch" class="view-switch" role="group" aria-label="Agent view" hidden><button id="view-graph" class="filter" aria-pressed="false">Graph</button><button id="view-list" class="filter" aria-pressed="true">List</button></div><button id="refresh" class="text-button">Refresh</button></div></div>
         <p id="directory-note" class="directory-note">Agents listed for remote messages. Local Claude and Codex agents remain reachable automatically.</p>
         <div class="roster-tools"><div class="filters" role="group" aria-label="Filter by agent status"><button class="filter" data-status="all" aria-pressed="true">All</button><button class="filter" data-status="live" aria-pressed="false">Live</button><button class="filter" data-status="queueable" aria-pressed="false">Queueable</button><button class="filter" data-status="offline" aria-pressed="false">Offline</button></div><label class="search"><input id="search" type="search" aria-label="Search agents, users, or devices" placeholder="Search agents, users, or devices" autocomplete="off"></label></div>
         <div class="identity-filters"><label class="select-filter" for="user-filter"><span>User</span><select id="user-filter" aria-label="Filter by user"><option value="">All users</option></select></label><label class="select-filter" for="device-filter"><span>Device</span><select id="device-filter" aria-label="Filter by device"><option value="">All devices</option></select></label></div>
+        <p id="graph-unavailable" class="graph-unavailable" hidden>Graph unavailable. The agent list is still available; refresh to retry.</p>
+        <div id="graph-panel" class="graph-panel" aria-label="Agent connection graph" hidden></div>
         <div id="table-wrap" class="table-wrap"><table><thead><tr><th scope="col">Agent</th><th scope="col" class="user-col">User</th><th scope="col" class="device-col">Device</th><th scope="col" class="membership-col">Buses</th><th scope="col">Status</th><th scope="col" class="last-seen-col">Last seen</th><th scope="col" id="actions-heading" hidden>Manage</th></tr></thead><tbody id="agent-rows"></tbody></table></div>
         <div id="empty" class="empty" hidden><h3 id="empty-title">No published agents</h3><p id="empty-description">Enrolling a device does not list its agents here. Publish only the agents you want others to discover remotely.</p><div class="empty-actions"><button id="empty-invite" class="button admin" hidden>Invite device</button><button id="empty-register" class="button">Publish agent</button></div></div>
         <div class="roster-foot"><span id="shown-count">Showing 0 agents</span><span id="updated-at">Waiting for an update</span></div>
@@ -284,12 +302,14 @@
   <dialog id="devices-dialog" class="dialog" aria-labelledby="devices-title"><div class="dialog-heading"><h2 id="devices-title">Devices</h2><button class="icon-button" data-close="devices-dialog" aria-label="Close">×</button></div><p>These devices have bus access. Their local agents are reachable automatically; only chosen agents are published in this directory. Devices enrolled on general can contact its published recipients without publishing the sender. Private buses also require both agents to join. Revoking a device removes its bus access.</p><div id="device-list" class="device-list"></div><div class="dialog-actions"><button class="button" data-close="devices-dialog">Done</button></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 
+  <script src="/assets/bus-graph.js"></script>
   <script>
   (() => {
     'use strict';
     const $ = id => document.getElementById(id);
     const TOKEN_KEY = 'communicate.bus.dashboard.token';
-    const state = {token:'',data:null,bus:null,status:'all',user:'',device:'',query:'',updated:0,pending:false,epoch:0,browserSession:false};
+    const state = {token:'',data:null,bus:null,status:'all',user:'',device:'',query:'',updated:0,pending:false,epoch:0,browserSession:false,view:'graph'};
+    let graph=null;
     let toastTimer, activeInvite='', inviteEpoch=0;
     function getToken() {
       const fragment = new URLSearchParams(location.hash.slice(1));
@@ -358,6 +378,11 @@
     }
     function disconnect(message='', preserveBrowser=false) {
       state.epoch++; state.token = ''; state.data = null;
+      if (graph) {
+        try {graph.clear();}
+        catch (_) {try {graph.destroy();} catch (_) {} graph=null;$('graph-panel').replaceChildren();}
+      }
+      $('graph-panel').hidden=true;
       try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
       for (const dialog of document.querySelectorAll('dialog')) if (dialog.open) dialog.close();
       resetInvite();
@@ -526,7 +551,9 @@
       }
       $('roster-count').textContent=identityAgents.length + (identityAgents.length === 1 ? ' agent' : ' agents');
       $('shown-count').textContent='Showing ' + filtered.length + ' of ' + identityAgents.length + ' agents';
-      $('table-wrap').hidden=!filtered.length; $('empty').hidden=Boolean(filtered.length);
+      renderGraph(filtered);
+      $('table-wrap').hidden=state.view === 'graph' || !filtered.length;
+      $('empty').hidden=state.view === 'graph' || Boolean(filtered.length);
       const filteredOut=Boolean(identityAgents.length);
       const privateBus=state.bus !== null && state.bus !== 'general', participation=privateBus ? 'joined' : 'published';
       $('empty-title').textContent=filteredOut ? 'No agents match this view.' : state.device ? 'No ' + participation + ' agents on this device' : state.user ? 'No ' + participation + ' agents for this user' : 'No ' + participation + ' agents';
@@ -537,6 +564,25 @@
       $('empty-description').textContent=filteredOut ? 'Try a different user, device, name, or status filter.' : accountNote + enrollmentNote + (privateBus ? 'Invite the devices and have both agents explicitly join this private bus.' : 'Local reachability is automatic. Agents on enrolled general devices can send without appearing here. Publish only the agents you want others to discover remotely.');
       $('empty-register').hidden=filteredOut;
       $('empty-invite').hidden=filteredOut || !state.data.is_admin;
+    }
+    function renderGraph(agents) {
+      try {
+        if (!graph && typeof CommunicateGraph !== 'undefined') graph=CommunicateGraph.mount($('graph-panel'));
+        if (!graph) throw new Error('Graph assets unavailable');
+        $('view-switch').hidden=false;$('graph-unavailable').hidden=true;
+        $('graph-panel').hidden=state.view !== 'graph';
+        // Pass only this reader's visible snapshot, never credentials or admin records.
+        // Clear scope when identity or bus admission changes, even if IDs overlap.
+        const visible=buses().filter(bus => state.bus === null || bus.name === state.bus);
+        graph.update({scope:JSON.stringify([state.data.server_id,state.data.principal,state.bus,buses().map(bus => bus.name).sort()]),agents,buses:visible});
+      } catch (_) {
+        if (graph) {try {graph.destroy();} catch (_) {} graph=null;}
+        $('graph-panel').replaceChildren();
+        state.view='list';$('graph-panel').hidden=true;$('view-switch').hidden=true;$('graph-unavailable').hidden=false;
+      }
+      $('view-graph').setAttribute('aria-pressed',String(state.view === 'graph'));
+      $('view-list').setAttribute('aria-pressed',String(state.view === 'list'));
+      $('app').dataset.view=state.view;
     }
     function render() {
       if (!state.data) return;
@@ -657,6 +703,8 @@
     $('disconnect').addEventListener('click',signOut);
     if ($('reader-reconnect')) $('reader-reconnect').addEventListener('click',signOut);
     $('refresh').addEventListener('click',() => refresh());
+    $('view-graph').addEventListener('click',() => {state.view='graph';renderRows();});
+    $('view-list').addEventListener('click',() => {state.view='list';renderRows();});
     $('search').addEventListener('input',event => {state.query=event.target.value.trim().toLowerCase();renderRows();});
     $('user-filter').addEventListener('change',event => {state.user=event.target.value;state.device='';renderIdentityFilters();renderRows();});
     $('device-filter').addEventListener('change',event => {state.device=event.target.value;renderRows();});

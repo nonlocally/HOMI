@@ -158,6 +158,35 @@ state backup with the previous release: rolling back to 0.2.0 requires restoring
 that backup before starting the old broker, whose schema writes cannot use the
 new database directly.
 
+## Agent graph
+
+The dashboard opens in **Graph** view; **List** keeps the agent table available.
+Select a bus, then filter by user, device, status, or search. Both views use the
+same permitted roster. Device labels and account names appear on each node;
+immutable agent and device IDs distinguish duplicate names.
+
+Drag nodes to arrange the canvas, pan and zoom, or select an agent to inspect
+its identity and connections. Positions stay in this page's memory across
+refreshes. Changing bus or signing out clears that layout. These controls are
+visual: they do not send messages, move conversations, or change membership.
+
+Arrows show directed messages recorded by this broker between agents currently
+visible on that bus. Counts aggregate retained messages, including unsuccessful
+delivery attempts; they do not prove an agent read, answered, or completed a
+task. The inspector breaks counts down by delivery status. No message text,
+receipt capabilities, or conversation transcripts are exposed. A shared bus
+alone does not create an arrow. Local socket/SSH traffic that bypasses this
+broker and unpublished general-bus senders are absent from the graph.
+
+This is retained activity rather than a complete history. Terminal receipts
+remain for seven days after their last update, then their counts disappear.
+Leaving a bus, device revocation, and viewer access changes also remove the
+affected nodes and edges. Group viewers keep their existing read-only scope.
+
+The canvas uses [Svelte Flow](https://svelteflow.dev/learn) with locally bundled
+assets. See [the graph package](../packages/bus-graph/README.md) for rebuilding
+those assets and [SWARM-CONTROLS.md](SWARM-CONTROLS.md) for proposed task controls.
+
 ## Accounts and devices
 
 An agent belongs to an enrolled device, and that device belongs to the account
