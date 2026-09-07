@@ -163,6 +163,10 @@ export function spectralNodes(model, analysis, previous = []) {
   });
 }
 
+export function flowNodes(model, flow, previous = []) {
+  return spectralNodes(model, {positions: flow?.positions || new Map()}, previous);
+}
+
 // A person may choose one visible card to sit above the others. This is a
 // drawing preference only: no role inference, routing, or community changes.
 export function placeConductor(nodes, conductorId, pinned = new Set(), connections = []) {
@@ -179,24 +183,49 @@ export function placeConductor(nodes, conductorId, pinned = new Set(), connectio
   return nodes.map(node => node === conductor ? {...node, position} : node);
 }
 
+// A collapsed community starts at its members' centroid. In a layered view that
+// centroid can land on another branch or a visible root. Preserve its flow-axis
+// coordinate, moving only the automatic aggregate by the nearest legal cross-axis
+// gap. Existing aggregate positions are deliberate/stable drawing preferences.
+function separateFlowAggregates(nodes, aggregatePositions, direction) {
+  const axis = direction === 'DOWN' ? 'x' : 'y';
+  const cross = axis === 'x' ? 'y' : 'x';
+  const size = (node, key) => key === 'x' ? node.width || NODE_WIDTH : node.height || 120;
+  const gap = 34;
+  const occupied = nodes.filter(node => node.type === 'agent' || node.type === 'community' && aggregatePositions.has(node.id));
+  for (const node of nodes) {
+    if (node.type !== 'community' || aggregatePositions.has(node.id)) continue;
+    const origin = node.position[axis];
+    const blocked = occupied.filter(other => node.position[cross] < other.position[cross] + size(other, cross) + gap && node.position[cross] + size(node, cross) + gap > other.position[cross])
+      .map(other => [other.position[axis] - size(node, axis) - gap, other.position[axis] + size(other, axis) + gap]);
+    const legal = value => blocked.every(([start, end]) => value <= start || value >= end);
+    if (!legal(origin)) {
+      const candidates = blocked.flat().filter(legal).sort((a, b) => Math.abs(a - origin) - Math.abs(b - origin) || b - a);
+      node.position = {...node.position, [axis]: candidates[0]};
+    }
+    occupied.push(node);
+  }
+}
+
 export function graphPresentation(model, baseNodes, analysis, options = {}) {
-  const {collapsed = new Set(), aggregatePositions = new Map(), pinned = new Set(), showCommunities = true, selectedId = null, focusedCommunity = null, conductorId = null} = options;
+  const {collapsed = new Set(), aggregatePositions = new Map(), pinned = new Set(), showCommunities = true, selectedId = null, focusedCommunity = null, conductorId = null, flowRootId = null, flowDirection = null} = options;
   const visible = new Set(model.agents.map(agent => agent.id));
+  const placementRoot = flowRootId || conductorId;
   const visibleConductor = typeof conductorId === 'string' && visible.has(conductorId);
   // Even a caller holding an old analysis cannot render a removed identity.
   const communities = (analysis?.communities || []).filter(group => group.members.length && group.members.every(id => visible.has(id))); // IDs encode membership: discard a stale group whole.
   const byAgent = new Map(communities.flatMap(group => group.members.map(id => [id, group])));
-  const collapsedGroups = new Map(communities.filter(group => showCommunities && collapsed.has(group.id) && group.members.some(id => id !== conductorId)).map(group => [group.id, group]));
-  const destination = id => id !== conductorId && collapsedGroups.has(byAgent.get(id)?.id) ? communityNodeId(byAgent.get(id).id) : agentNodeId(id);
+  const collapsedGroups = new Map(communities.filter(group => showCommunities && collapsed.has(group.id) && group.members.some(id => id !== placementRoot)).map(group => [group.id, group]));
+  const destination = id => id !== placementRoot && collapsedGroups.has(byAgent.get(id)?.id) ? communityNodeId(byAgent.get(id).id) : agentNodeId(id);
   const aggregates = new Map();
   const existing = new Map(baseNodes.filter(node => node.type === 'agent').map(node => [node.data.agent.id, node]));
-  const rendered = baseNodes.filter(node => node.type === 'device' ? model.groups.some(group => node.id === `device:${group.key}`) : node.type === 'agent' && visible.has(node.data.agent.id) && (node.data.agent.id === conductorId || !collapsedGroups.has(byAgent.get(node.data.agent.id)?.id))).map(node => {
+  const rendered = baseNodes.filter(node => node.type === 'device' ? model.groups.some(group => node.id === `device:${group.key}`) : node.type === 'agent' && visible.has(node.data.agent.id) && (node.data.agent.id === placementRoot || !collapsedGroups.has(byAgent.get(node.data.agent.id)?.id))).map(node => {
     if (node.type !== 'agent') return node;
     const community = showCommunities ? byAgent.get(node.data.agent.id) : null;
-    return {...node, data: {...node.data, community, pinned: pinned.has(node.data.agent.id), conductor: node.data.agent.id === conductorId}};
+    return {...node, data: {...node.data, community, pinned: pinned.has(node.data.agent.id), conductor: node.data.agent.id === conductorId, flowRoot: node.data.agent.id === flowRootId}};
   });
   for (const group of collapsedGroups.values()) {
-    const members = group.members.filter(id => id !== conductorId).map(id => existing.get(id)).filter(Boolean);
+    const members = group.members.filter(id => id !== placementRoot).map(id => existing.get(id)).filter(Boolean);
     if (!members.length) continue;
     const id = communityNodeId(group.id);
     const position = aggregatePositions.get(id) || {x: members.reduce((sum, node) => sum + node.position.x, 0) / members.length, y: members.reduce((sum, node) => sum + node.position.y, 0) / members.length};
@@ -204,6 +233,7 @@ export function graphPresentation(model, baseNodes, analysis, options = {}) {
     aggregates.set(id, data);
     rendered.push({id, type: 'community', position: {...position}, width: NODE_WIDTH, height: 120, data, connectable: false, deletable: false, ariaLabel: `${group.label}, ${members.length} agents, collapsed community`});
   }
+  if (flowDirection === 'RIGHT' || flowDirection === 'DOWN') separateFlowAggregates(rendered, aggregatePositions, flowDirection);
   const links = new Map();
   for (const edge of model.connections) {
     if (!visible.has(edge.source) || !visible.has(edge.target)) continue;

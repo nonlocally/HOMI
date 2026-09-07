@@ -58,6 +58,7 @@ async def main():
         await page.add_script_tag(content=(ROOT / "lib/assets/bus-graph.js").read_text())
         await page.evaluate("s=>{window.graph=CommunicateGraph.mount(document.getElementById('graph'));window.graph.update(s)}", data)
         await page.locator(".svelte-flow__node-agent").nth(8).wait_for(state="visible")
+        await page.get_by_role("combobox", name="Graph layout").select_option("spectral")
         await settle(page)
         assert await page.locator("[data-conductor=true]").count() == 0  # Never infer from a name.
         initial = await positions(page)

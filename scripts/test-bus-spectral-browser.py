@@ -84,6 +84,8 @@ def main():
                 expect(graph).to_be_visible()
                 nodes = graph.locator(".svelte-flow__node-agent")
                 expect(nodes).to_have_count(10)
+                graph.get_by_role("combobox", name="Graph layout").select_option("spectral")
+                page.wait_for_timeout(250)
                 expect(graph.locator(".svelte-flow__edge")).to_have_count(20)
 
                 def refresh():

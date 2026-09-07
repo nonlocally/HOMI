@@ -167,16 +167,25 @@ switches buses, searches agents, and opens the user/device/status filters.
 permitted roster; a URL never grants bus access. Device labels and account names
 appear on each node, with immutable IDs to distinguish duplicate names.
 
-The default **Spectral** layout uses the communication graph to place agents,
-then refines their spacing using connection strength and weighted graph distances.
-**Devices** keeps the owner/device directory arrangement available. The
+The default **Flow** layout organizes the whole network into branches and levels.
+Choose **Left → right** or **Top → bottom**. It suggests a root from visible
+connections and places local branch hubs before their connected members. Direct
+root-to-worker messages and return traffic remain visible without flattening
+the branch hierarchy. Select an agent to **Use as flow root**, or change its
+**Layout parent** to a connected agent. **Automatic** resets that correction;
+choices that would create a cycle are refused. These are visual suggestions,
+not assigned authority or task dependencies.
+
+**Spectral** uses the communication graph's eigenmodes, then refines their spacing
+using connection strength and weighted graph distances. **Devices** keeps the
+owner/device directory arrangement available. The
 **Communities** layer groups agents by their observed traffic using Leiden;
 open a group to inspect its members or collapse it to see traffic between groups.
 These inferred groups are view controls, separate from bus membership and access.
 The **Analysis** panel explains the weighting, spectrum, and community objective.
 See [Graph analysis](GRAPH-ANALYSIS.md) for the mathematical model and its limits.
 
-To distinguish a coordinator visually, select that agent and choose **Set apart
+In Spectral or Devices, to distinguish a coordinator visually, select that agent and choose **Set apart
 as conductor**. It gets a separate position above the network and stays visible
 when its community is collapsed. This is a viewer choice, not a role inferred
 from message volume. It creates no new edges and changes no agent behavior.
@@ -185,7 +194,8 @@ Drag nodes to arrange them; drag the background to pan. Scroll with the mouse
 wheel or two fingers, or pinch, to zoom around the pointer. Selecting an agent
 opens its details over the canvas without moving or shrinking it. Routine polls
 wait for an active node drag to finish; access removal still applies immediately.
-Positions stay in this page's memory across polling updates. Changing bus,
+Positions, root choices, and parent corrections stay in this page's memory
+across polling updates. Changing bus,
 leaving/reloading the page, or signing out clears that layout. These controls are
 visual: they do not send messages, move conversations, or change membership.
 
