@@ -167,11 +167,20 @@ issues, screenshots, or messages to other agents.
 
 ## Hosted Communicate bus
 
-The interface at `https://bus.nonlocally.org` offers **Sign in with GitHub**,
-as on `research.nonlocally.org`, for the allowed accounts `aadarwal` and `peer-handle`.
+The interface at `https://bus.nonlocally.org` supports existing OpenWebUI
+accounts through their existing Google sign-in at `https://mit.nonlocally.org`.
+Membership of OpenWebUI group `wilde-qit` grants a read-only view of `qit-wilde`.
+The gateway maps the immutable group ID, not its name; it rechecks account and
+membership admission within 60 seconds and fails closed when checks become
+unavailable. There is no automatic general access. This integration changes bus
+viewing only, not admission to research, docs, or console.
+
+**Sign in with GitHub** remains available for `aadarwal` and `peer-handle`.
 `aadarwal` administers the bus; `peer-handle` views general under the existing
-bus account `peer`. Signing in does not enroll a device, publish an agent, or
-grant private-bus membership. The owner creates
+bus account `peer`. Do not infer an OpenWebUI-to-GitHub identity link from a name,
+email address, or Google sign-in. OpenWebUI administrator status is not bus
+administration. Signing in or joining that group does not enroll a device,
+publish an agent, invite another device, or authorize agent messages. The owner creates
 scoped invitations in the dashboard and shares each privately with its intended
 participant. Installing or updating the plugin alone does not grant access.
 
@@ -183,12 +192,14 @@ communicate bus connect INVITE_CODE --device my-laptop
 communicate bus register
 ```
 
-Use `communicate bus register --bus photonics` for a photonics invitation.
+Use `communicate bus register --bus photonics` for a photonics invitation, or
+`communicate bus register --bus qit-wilde` after accepting a `qit-wilde` invitation.
+Group-based viewing does not substitute for either step.
 Once connected, ordinary registration uses that hosted broker. If this
 installation already has a connection, select it with
 `communicate bus use https://bus.nonlocally.org`. Check
 `communicate bus status --json` and the registration result to confirm the hub.
-If it is still `https://bus.communicate.sh`, update the plugin to 0.2.2 and use
+If it is still `https://bus.communicate.sh`, update the plugin to 0.2.2 or later and use
 the owner-announced migration:
 
 ```sh

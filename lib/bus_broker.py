@@ -20,6 +20,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import unicodedata
 from urllib.parse import urlsplit
 import uuid
 
@@ -33,6 +34,8 @@ MAX_PRINCIPALS = 1024
 MAX_BUSES = 256
 MAX_INVITES = 4096
 MAX_RECORDS = 20000
+MAX_SSO_REPLAYS = 4096
+MAX_VIEW_HEADER = 8192
 MESSAGE_TTL = 86400
 LIVE_TTL = 45
 LEASE_TTL = 60
@@ -79,6 +82,26 @@ def _device_metadata(value):
     return {key: _text(text, key, DEVICE_FIELDS[key]) for key, text in value.items()}
 
 
+def _unique_object(pairs):
+    """Reject duplicate JSON fields at the gateway's authorization boundary."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+def _canonical_uuid(value, version=None):
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+        return str(parsed) == value and (version is None or parsed.version == version)
+    except ValueError:
+        return False
+
+
 class Broker:
     """One durable broker; SQLite transactions serialize enrollment and leases."""
 
@@ -88,6 +111,7 @@ class Broker:
             raise ValueError("BUS_GATEWAY_SHARED_SECRET must contain at least 32 characters")
         self.admin_readers = frozenset(reader.strip() for reader in os.environ.get("BUS_ADMIN_READERS", "").split(",")
                                       if reader.strip())
+        self.openwebui_readers = os.environ.get("BUS_OPENWEBUI_READERS") == "1"
         try:
             self.reader_users = json.loads(os.environ.get("BUS_READER_USERS", "{}"))
             if (not isinstance(self.reader_users, dict) or len(self.reader_users) > MAX_PRINCIPALS
@@ -142,6 +166,8 @@ class Broker:
                 CREATE TABLE IF NOT EXISTS browser_credentials(
                   digest TEXT PRIMARY KEY REFERENCES tokens(digest) ON DELETE CASCADE,
                   reader TEXT NOT NULL, reader_hash TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS sso_replays(jti TEXT PRIMARY KEY, expires_at REAL NOT NULL);
+                CREATE INDEX IF NOT EXISTS sso_replay_expiry ON sso_replays(expires_at);
                 CREATE TABLE IF NOT EXISTS buses(name TEXT PRIMARY KEY, visibility TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS grants(
                   principal TEXT NOT NULL REFERENCES principals(id),
@@ -204,11 +230,12 @@ class Broker:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
-    def browser_session(self, reader, reader_hash):
+    def browser_session(self, reader, reader_hash, view=None):
         """Bootstrap only from the HTTP handler's authenticated gateway context."""
         if self.gateway_shared_secret is None:
             raise BusError("browser gateway is not configured", "not_found")
         self._reader_context(reader, reader_hash)
+        view = self._view_assertion(reader, reader_hash, view, self.clock())
         principal = "web_" + _digest(reader)
         material = json.dumps(["communicate-browser-v1", self.server_id, reader, reader_hash],
                               separators=(",", ":")).encode("utf-8")
@@ -220,30 +247,78 @@ class Broker:
             try:
                 with db:
                     db.execute("BEGIN IMMEDIATE")
+                    view = self._view_assertion(reader, reader_hash, view, self.clock())
+                    self._existing_view_buses(db, view)
                     existing = db.execute("SELECT revoked FROM principals WHERE id=?", (principal,)).fetchone()
                     if existing is not None and existing["revoked"]:
                         raise BusError("browser access was revoked", "forbidden")
                     if existing is None and db.execute("SELECT COUNT(*) FROM principals").fetchone()[0] >= MAX_PRINCIPALS:
                         raise BusError("device enrollment limit reached", "limit")
-                    admin = reader in self.admin_readers
+                    admin = self._browser_admin(reader)
                     user = self._reader_user(reader)
                     db.execute("""INSERT INTO principals(id,device,created_at,is_admin,user) VALUES(?,?,?,?,?)
                                   ON CONFLICT(id) DO UPDATE SET device=excluded.device,is_admin=excluded.is_admin,user=excluded.user""",
                                (principal, "browser:" + reader, self.clock(), admin, user))
                     db.execute("DELETE FROM grants WHERE principal=?", (principal,))
-                    db.execute("INSERT INTO grants VALUES(?,'general')", (principal,))
+                    if view is None:
+                        db.execute("INSERT INTO grants VALUES(?,'general')", (principal,))
                     # Password changes replace the credential, without changing the reader's identity.
                     db.execute("DELETE FROM tokens WHERE principal=? AND digest<>?", (principal, digest))
                     db.execute("INSERT OR IGNORE INTO tokens VALUES(?,?)", (digest, principal))
                     db.execute("INSERT OR REPLACE INTO browser_credentials VALUES(?,?,?)", (digest, reader, reader_hash))
             finally:
                 db.close()
-        return {"ok": True, "token": token, "user": user, "browser_session": True, "logout_url": "/_gateway/logout"}
+        result = {"ok": True, "token": token, "user": user, "browser_session": True, "logout_url": "/_gateway/logout"}
+        if view is not None and "display_name" in view:
+            result["display_name"] = view["display_name"]
+        return result
+
+    def _browser_admin(self, reader):
+        # Even a mistaken admin-reader setting cannot promote an OWUI viewer.
+        return not reader.startswith("owui.") and reader in self.admin_readers
 
     def _reader_user(self, reader):
+        if reader.startswith("owui."):
+            if not self.openwebui_readers or not _canonical_uuid(reader[5:]):
+                raise BusError("OpenWebUI browser reader is not enabled or valid", "forbidden")
+            return reader
         if self.reader_users and reader not in self.reader_users:
             raise BusError("reader has no configured bus user", "forbidden")
         return _user(self.reader_users.get(reader, reader.lower()))
+
+    def _view_assertion(self, reader, reader_hash, view, now):
+        """Validate request-local directory access, never a device grant."""
+        if view is None and not reader.startswith("owui."):
+            return None
+        try:
+            if (not self.openwebui_readers or not reader.startswith("owui.") or
+                    not _canonical_uuid(reader[5:]) or not isinstance(view, dict) or
+                    set(view) - {"v", "reader", "reader_hash", "iat", "exp", "buses", "display_name"} or
+                    len(json.dumps(view).encode("utf-8")) > MAX_VIEW_HEADER or
+                    type(view.get("v")) is not int or view["v"] != 1 or
+                    view.get("reader") != reader or view.get("reader_hash") != reader_hash or
+                    type(view.get("iat")) is not int or type(view.get("exp")) is not int or
+                    not 1 <= view["exp"] - view["iat"] <= 60 or view["iat"] > now + 5 or view["exp"] <= now):
+                raise ValueError()
+            buses = view.get("buses")
+            if (not isinstance(buses, list) or len(buses) > 64 or
+                    any(not isinstance(bus, str) or not BUS_RE.fullmatch(bus) for bus in buses) or
+                    len(set(buses)) != len(buses)):
+                raise ValueError()
+            if "display_name" in view:
+                label = view["display_name"]
+                if (not isinstance(label, str) or len(label.encode("utf-8")) > 160 or
+                        any(unicodedata.category(char) in ("Cc", "Cf", "Cs") for char in label)):
+                    raise ValueError()
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise BusError("valid current browser view assertion required", "unauthorized") from None
+        return dict(view, buses=list(buses))
+
+    @staticmethod
+    def _existing_view_buses(db, view):
+        if view is not None and any(not db.execute("SELECT 1 FROM buses WHERE name=?", (bus,)).fetchone()
+                                    for bus in view["buses"]):
+            raise BusError("browser view assertion contains an unknown bus", "unauthorized")
 
     @staticmethod
     def _device_info(principal):
@@ -256,7 +331,7 @@ class Broker:
                 or not isinstance(reader_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", reader_hash)):
             raise BusError("authenticated browser reader required", "unauthorized")
 
-    def _auth(self, db, token, reader=None, reader_hash=None):
+    def _auth(self, db, token, reader=None, reader_hash=None, view=None):
         if not isinstance(token, str) or not 32 <= len(token) <= 512:
             raise BusError("authentication required", "unauthorized")
         p = db.execute("""SELECT p.*,b.reader AS browser_reader,b.reader_hash AS browser_hash
@@ -272,12 +347,45 @@ class Broker:
                     or not secrets.compare_digest(reader, p["browser_reader"])
                     or not secrets.compare_digest(reader_hash, p["browser_hash"])):
                 raise BusError("browser reader session does not match", "unauthorized")
-            p["is_admin"] = reader in self.admin_readers
+            view = self._view_assertion(reader, reader_hash, view, self.clock())
+            self._existing_view_buses(db, view)
+            p["is_admin"] = self._browser_admin(reader)
             p["user"] = self._reader_user(reader)
+            if view is not None:
+                p["view_buses"] = view["buses"]
+                if "display_name" in view:
+                    p["display_name"] = view["display_name"]
             db.execute("UPDATE principals SET is_admin=?,user=? WHERE id=?", (p["is_admin"], p["user"], p["id"]))
-            if not p["is_admin"]:
+            if view is None and not p["is_admin"]:
                 db.execute("DELETE FROM grants WHERE principal=? AND bus<>'general'", (p["id"],))
         return p
+
+    def consume_sso(self, request):
+        """Consume a gateway-verified identity handoff once, across restarts."""
+        if self.gateway_shared_secret is None:
+            raise BusError("SSO replay endpoint is not configured", "not_found")
+        now = self.clock()
+        if (not isinstance(request, dict) or set(request) != {"jti", "exp"} or
+                not _canonical_uuid(request.get("jti"), version=4) or type(request.get("exp")) is not int or
+                not now - 30 <= request["exp"] <= now + 90):
+            raise BusError("invalid SSO replay request")
+        with self.lock:
+            db = self._connect()
+            try:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    now = self.clock()
+                    if not now - 30 <= request["exp"] <= now + 90:
+                        raise BusError("invalid SSO replay request")
+                    db.execute("DELETE FROM sso_replays WHERE expires_at < ?", (now,))
+                    if db.execute("SELECT 1 FROM sso_replays WHERE jti=?", (request["jti"],)).fetchone():
+                        raise BusError("SSO handoff already consumed", "conflict")
+                    if db.execute("SELECT COUNT(*) FROM sso_replays").fetchone()[0] >= MAX_SSO_REPLAYS:
+                        raise BusError("SSO replay store is full", "limit")
+                    db.execute("INSERT INTO sso_replays VALUES(?,?)", (request["jti"], request["exp"] + 30))
+            finally:
+                db.close()
+        return {"ok": True}
 
     @staticmethod
     def _admin(p):
@@ -348,7 +456,7 @@ class Broker:
                 db.execute("UPDATE messages SET status='cancelled',detail='membership changed',updated_at=? WHERE id=?",
                            (now, m["id"]))
 
-    def handle(self, token, request, *, reader=None, reader_hash=None):
+    def handle(self, token, request, *, reader=None, reader_hash=None, view=None):
         """Handle one bounded request, returning an ordinary JSON-safe result."""
         try:
             if not isinstance(request, dict) or not isinstance(request.get("op"), str):
@@ -360,7 +468,7 @@ class Broker:
                 try:
                     db.execute("BEGIN IMMEDIATE")
                     now = self.clock()
-                    p = self._auth(db, token, reader, reader_hash) if token else None
+                    p = self._auth(db, token, reader, reader_hash, view) if token else None
                     if p is not None and p["browser_reader"] is not None and not p["is_admin"] and request["op"] != "snapshot":
                         raise BusError("this browser reader has read-only directory access", "forbidden")
                     if request["op"] == "redeem":
@@ -533,7 +641,8 @@ class Broker:
         return {"updated": len(rows), "ts": now}
 
     def _op_snapshot(self, db, p, r, now):
-        allowed = [b[0] for b in db.execute("SELECT name FROM buses ORDER BY name") if self._granted(db, p["id"], b[0])]
+        allowed = (sorted(p["view_buses"]) if "view_buses" in p else
+                   [b[0] for b in db.execute("SELECT name FROM buses ORDER BY name") if self._granted(db, p["id"], b[0])])
         buses = []
         for bus in allowed:
             visibility = db.execute("SELECT visibility FROM buses WHERE name=?", (bus,)).fetchone()[0]
@@ -557,6 +666,8 @@ class Broker:
                   "principal": p["id"], "buses": buses, "ts": now, **self._device_info(p)}
         if p.get("browser_reader") is not None:
             result.update(browser_session=True, read_only=not p["is_admin"], logout_url="/_gateway/logout")
+            if "display_name" in p:
+                result["display_name"] = p["display_name"]
         if p["is_admin"]:
             principals = []
             for ent in db.execute("""SELECT p.* FROM principals p WHERE NOT EXISTS (
@@ -752,18 +863,38 @@ def handler_factory(broker, assets_dir=None):
                     secrets_sent[0].encode("utf-8"), broker.gateway_shared_secret.encode("utf-8"))):
                 self._respond(401, {"ok": False, "error": "trusted gateway required", "code": "unauthorized"})
                 return None
+            if self.path == "/_bus/sso/consume":
+                if any(self.headers.get_all(name) is not None for name in (
+                        "X-Communicate-Bus-Reader", "X-Communicate-Bus-Reader-Hash", "X-Communicate-Bus-View",
+                        "Authorization", "Cookie")):
+                    self._respond(403, {"ok": False, "error": "SSO consume requires gateway-only context", "code": "forbidden"})
+                    return None
+                return {}
             readers = self.headers.get_all("X-Communicate-Bus-Reader", [])
             hashes = self.headers.get_all("X-Communicate-Bus-Reader-Hash", [])
-            if not readers and not hashes:
+            views = self.headers.get_all("X-Communicate-Bus-View", [])
+            if not readers and not hashes and not views:
                 return {}
             try:
-                if len(readers) != 1 or len(hashes) != 1:
+                if len(readers) != 1 or len(hashes) != 1 or len(views) > 1:
                     raise BusError("authenticated browser reader required", "unauthorized")
                 broker._reader_context(readers[0], hashes[0])
-            except BusError:
-                self._respond(401, {"ok": False, "error": "authenticated browser reader required", "code": "unauthorized"})
+                view = None
+                if views:
+                    if len(views[0].encode("utf-8")) > MAX_VIEW_HEADER:
+                        raise ValueError("oversized view assertion")
+                    view = json.loads(views[0], object_pairs_hook=_unique_object)
+                    # A JSON null is not an absent assertion.
+                    if not isinstance(view, dict):
+                        raise ValueError("invalid view assertion")
+                view = broker._view_assertion(readers[0], hashes[0], view, broker.clock())
+            except (BusError, ValueError, UnicodeError, RecursionError):
+                self._respond(401, {"ok": False, "error": "authenticated browser reader and view required", "code": "unauthorized"})
                 return None
-            return {"reader": readers[0], "reader_hash": hashes[0]}
+            context = {"reader": readers[0], "reader_hash": hashes[0]}
+            if view is not None:
+                context["view"] = view
+            return context
 
         def log_message(self, fmt, *args):
             # Tokens, invitation codes, and message text never enter access logs.
@@ -817,8 +948,11 @@ def handler_factory(broker, assets_dir=None):
             self._respond(200, candidate.read_bytes(), mime)
 
         def do_POST(self):
-            if self.path != "/v1":
+            consume = self.path == "/_bus/sso/consume"
+            if self.path != "/v1" and not consume:
                 return self._respond(404, {"ok": False, "error": "not found"})
+            if consume and broker.gateway_shared_secret is None:
+                return self._respond(404, {"ok": False, "error": "not found", "code": "not_found"})
             origin = self.headers.get("Origin")
             if origin:
                 try:
@@ -832,19 +966,23 @@ def handler_factory(broker, assets_dir=None):
             if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json":
                 return self._respond(400, {"ok": False, "error": "application/json body required", "code": "invalid_request"})
             try:
+                if len(self.headers.get_all("Content-Length", [])) != 1 or len(self.headers.get_all("Content-Type", [])) != 1:
+                    raise ValueError("ambiguous body headers")
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= MAX_BODY:
                     return self._respond(413, {"ok": False, "error": "invalid body size", "code": "too_large"})
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     raise ValueError("incomplete body")
-                request = json.loads(raw.decode("utf-8"))
+                request = json.loads(raw.decode("utf-8"), **({"object_pairs_hook": _unique_object} if consume else {}))
             except (ValueError, UnicodeError, OSError, RecursionError):
                 return self._respond(400, {"ok": False, "error": "invalid JSON body", "code": "invalid_request"})
             auth = self.headers.get("Authorization", "")
             token = auth[7:] if auth.startswith("Bearer ") else None
             try:
-                result = broker.handle(token, request, **self.gateway_context)
+                result = broker.consume_sso(request) if consume else broker.handle(token, request, **self.gateway_context)
+            except BusError as exc:
+                result = {"ok": False, "error": str(exc), "code": exc.code}
             except Exception:
                 return self._respond(500, {"ok": False, "error": "broker operation failed", "code": "internal_error"})
             status = 200 if result.get("ok") else {"unauthorized": 401, "forbidden": 403, "not_found": 404,

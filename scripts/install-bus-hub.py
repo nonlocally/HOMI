@@ -31,6 +31,8 @@ def main():
     values = json.loads(settings.read_text())
     if not isinstance(values.get("BUS_GATEWAY_SHARED_SECRET"), str) or len(values["BUS_GATEWAY_SHARED_SECRET"]) < 32:
         p.error("settings must configure an origin authentication secret")
+    if values.get("BUS_OPENWEBUI_READERS") not in (None, "0", "1"):
+        p.error("BUS_OPENWEBUI_READERS must be the string 0 or 1")
     if not 1 <= args.port <= 65535:
         p.error("invalid port")
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -39,7 +41,7 @@ def main():
     runner.write_text("""import json, os, sys
 from pathlib import Path
 config = json.loads(Path(%r).read_text())
-for name in ('BUS_GATEWAY_SHARED_SECRET', 'BUS_ADMIN_READERS'):
+for name in ('BUS_GATEWAY_SHARED_SECRET', 'BUS_ADMIN_READERS', 'BUS_OPENWEBUI_READERS'):
     if name in config:
         os.environ[name] = config[name]
 if 'BUS_READER_USERS' in config:

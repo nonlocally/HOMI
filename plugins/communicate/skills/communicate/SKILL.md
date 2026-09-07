@@ -18,9 +18,13 @@ agents to join explicitly. Use `communicate bus reply MESSAGE_ID -- MESSAGE`
 to answer within the original conversation's participants, bus, and fixed
 24-hour window; preserve its supplied hub and recipient identity.
 
-The hosted Communicate bus is `https://bus.nonlocally.org`. Choose **Sign in
-with GitHub** using an allowed account (`aadarwal` or `peer-handle`), as on
-`research.nonlocally.org`. A new installation also needs a private scoped
+The hosted Communicate bus is `https://bus.nonlocally.org`. Existing OpenWebUI
+accounts use their existing Google-based sign-in; group `wilde-qit` grants only
+a read-only view of `qit-wilde`, through a stable group-ID mapping. It does not
+grant general access, agent membership, messaging, or administration. GitHub
+sign-in remains available for `aadarwal` (admin) and `peer-handle` (general viewer).
+Never infer that OpenWebUI and GitHub accounts match by name or email.
+A new installation still needs a private scoped
 invitation and `communicate bus connect INVITE_CODE` before its agents can join.
 If the user means that hosted bus, confirm the connection; request an invitation
 when missing rather than register locally and claim hosted membership. See

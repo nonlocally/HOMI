@@ -121,6 +121,19 @@ function fixture() {
   assert.equal(member.ids['actions-heading'].hidden,true);
   console.log('ok member view hides administrative actions');
 
+  const readerData={...fixture(),is_admin:false,read_only:true,browser_session:true,user:'owui.00000000-0000-4000-8000-000000000001',display_name:'<img src=x onerror=alert(1)>',principals:undefined};
+  const reader=page({snapshot:readerData});await flush();
+  assert.equal(reader.ids['current-user'].textContent,readerData.display_name,'display labels render as literal text');
+  assert.equal(reader.ids['current-user'].hidden,false);
+  assert.equal(reader.ids.role.textContent,'Directory reader');
+  assert.equal(reader.ids['invite-button'].hidden,true,'a display label never grants administration');
+  assert.ok(!reader.ids['user-filter'].textContent.includes(readerData.display_name),'display labels do not replace account identities');
+  reader.setHandler(()=>({...readerData,display_name:undefined}));await reader.ids.refresh.fire('click');
+  assert.equal(reader.ids['current-user'].textContent,readerData.user,'older browser snapshots use the stable account label');
+  reader.setHandler(()=>fixture());await reader.ids.refresh.fire('click');
+  assert.equal(reader.ids['current-user'].hidden,true,'device-token views do not retain a previous browser identity');
+  console.log('ok browser display name is text-only with stable identity fallback and unchanged roles');
+
   const i=page();await flush();await i.ids['invite-button'].fire('click');
   assert.equal(i.ids['local-only-label'].hidden,false);
   await i.ids['invite-form'].fire('submit');

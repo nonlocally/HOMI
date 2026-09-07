@@ -14,6 +14,8 @@ export PYTHONDONTWRITEBYTECODE=1
 python3 "$ROOT/scripts/test-bus-broker.py"
 python3 "$ROOT/scripts/test-bus-conversations.py"
 python3 "$ROOT/scripts/test-bus-gateway.py"
+python3 "$ROOT/scripts/test-bus-viewers.py"
+python3 "$ROOT/scripts/test-bus-sso.py"
 python3 "$ROOT/scripts/test-bus-identity.py"
 python3 "$ROOT/scripts/test-bus-client.py"
 python3 "$ROOT/scripts/test-bus-rehome.py"

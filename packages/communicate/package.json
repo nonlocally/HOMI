@@ -1,6 +1,6 @@
 {
   "name": "@aadarwal/communicate",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Register existing Claude and Codex agents on named buses, browse a live interface, and connect devices through scoped HTTPS invitations. Includes CLI, skills, and MCP tools.",
   "type": "module",
   "license": "MIT",
