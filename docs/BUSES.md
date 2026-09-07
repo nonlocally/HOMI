@@ -167,8 +167,8 @@ switches buses, searches agents, and opens the user/device/status filters.
 permitted roster; a URL never grants bus access. Device labels and account names
 appear on each node, with immutable IDs to distinguish duplicate names.
 
-Drag nodes to arrange them; drag the background or scroll with two fingers to
-pan. Pinch or hold Ctrl/Command while scrolling to zoom. Selecting an agent
+Drag nodes to arrange them; drag the background to pan. Scroll with the mouse
+wheel or two fingers, or pinch, to zoom around the pointer. Selecting an agent
 opens its details over the canvas without moving or shrinking it. Routine polls
 wait for an active node drag to finish; access removal still applies immediately.
 Positions stay in this page's memory across polling updates. Changing bus,
