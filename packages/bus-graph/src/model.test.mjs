@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId, spectralNodes, placeConductor, graphPresentation, communityNodeId} from './model.mjs';
+import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId, spectralNodes, flowNodes, placeConductor, graphPresentation, communityNodeId} from './model.mjs';
 
 const agent = (id, extra = {}) => ({id, name: id, user: 'aadarwal', kind: 'codex', device: 'mini', device_id: 'device-one', status: 'queueable', buses: ['qit-wilde'], ...extra});
 const message = (source, target, extra = {}) => ({source, target, message_count: 1, last_sent_at: 100, status_counts: {delivered: 1}, ...extra});
@@ -285,5 +285,91 @@ test('an agent literally named null does not receive conductor handles without a
     const view = graphPresentation(model, nodes, analysis, {conductorId});
     assert.ok(view.nodes.every(node => !node.data.conductor));
     assert.ok(view.edges.every(edge => edge.sourceHandle === 'out' && edge.targetHandle === 'in'));
+  }
+});
+
+
+test('flow coordinates preserve moved cards and pins only for the same device identity', () => {
+  const original = snapshotModel(snapshot([agent('a'), agent('b')], [message('a', 'b')]));
+  const flow = {positions: new Map([['a', {x: 0, y: 50}], ['b', {x: 400, y: 50}]])};
+  const nodes = flowNodes(original, flow);
+  assert.deepEqual(nodes.map(node => node.position), [{x: 0, y: 50}, {x: 400, y: 50}]);
+  nodes[0].position = {x: 111, y: 222};
+  assert.deepEqual(flowNodes(original, flow, nodes)[0].position, {x: 111, y: 222});
+  const reassigned = snapshotModel(snapshot([agent('a', {device_id: 'different'}), agent('b')], [message('a', 'b')]));
+  assert.deepEqual(flowNodes(reassigned, flow, nodes).find(node => node.data.agent.id === 'a').position, {x: 0, y: 50});
+  const removed = snapshotModel(snapshot([agent('b')], []));
+  assert.deepEqual(flowNodes(removed, flow, nodes).map(node => node.data.agent.id), ['b']);
+});
+
+test('suggested flow root survives collapse without claiming conductor authority or losing directions', () => {
+  const model = snapshotModel(snapshot(['root', 'a', 'b'].map(id => agent(id)), [message('root', 'a', {message_count: 7}), message('a', 'root', {message_count: 3}), message('a', 'b', {message_count: 2})]));
+  const analysis = analysisFixture([['root', 'a', 'b']]);
+  const nodes = flowNodes(model, analysis);
+  const view = graphPresentation(model, nodes, analysis, {flowRootId: 'root', collapsed: new Set(['g0'])});
+  const root = view.nodes.find(node => node.id === agentNodeId('root'));
+  assert.equal(root.data.flowRoot, true);
+  assert.equal(root.data.conductor, false);
+  const group = view.nodes.find(node => node.type === 'community');
+  assert.deepEqual(group.data.community.members, ['a', 'b']);
+  assert.equal(group.data.internalMessages, 2);
+  assert.deepEqual(view.edges.map(edge => edge.data.messageCount), [7, 3]);
+  assert.ok(view.edges.every(edge => edge.sourceHandle === 'out' && edge.targetHandle === 'in'));
+  const removed = graphPresentation(snapshotModel(snapshot([agent('a'), agent('b')], [message('a', 'b')])), nodes, analysis, {flowRootId: 'root'});
+  assert.ok(removed.nodes.every(node => !node.data.flowRoot));
+});
+
+test('changing the flow root across collapsed groups keeps all traffic and only the current root outside', () => {
+  const model = snapshotModel(snapshot(['a', 'b', 'c', 'd'].map(id => agent(id)), [
+    message('a', 'b', {message_count: 5}), message('b', 'a', {message_count: 3}),
+    message('b', 'c', {message_count: 7}), message('c', 'b', {message_count: 11}),
+    message('c', 'd', {message_count: 13}), message('c', 'c', {message_count: 17}),
+  ]));
+  const analysis = analysisFixture([['a', 'b'], ['c', 'd']]);
+  const nodes = flowNodes(model, analysis);
+  const collapsed = new Set(['g0', 'g1']);
+  for (const rootId of ['a', 'c']) {
+    const view = graphPresentation(model, nodes, analysis, {flowRootId: rootId, collapsed});
+    assert.deepEqual(view.nodes.filter(node => node.type === 'agent').map(node => node.data.agent.id), [rootId]);
+    const aggregates = view.nodes.filter(node => node.type === 'community');
+    assert.equal(aggregates.reduce((sum, node) => sum + node.data.community.members.length, 0), 3);
+    assert.ok(aggregates.every(node => !node.data.community.members.includes(rootId)));
+    const total = aggregates.reduce((sum, node) => sum + node.data.internalMessages, 0) + view.edges.reduce((sum, edge) => sum + edge.data.messageCount, 0);
+    assert.equal(total, 56);
+    assert.ok(view.edges.every(edge => view.nodes.some(node => node.id === edge.source) && view.nodes.some(node => node.id === edge.target)));
+    const single = aggregates.find(node => node.data.community.members.length === 1);
+    assert.deepEqual(single.position, nodes.find(node => node.data.agent.id === single.data.community.members[0]).position);
+  }
+});
+
+test('new Flow aggregates clear a visible root and one another along the cross-flow axis', () => {
+  const model = snapshotModel(snapshot(['root', 'a', 'b', 'c', 'd'].map(id => agent(id)), [message('root', 'a'), message('b', 'c')]));
+  const analysis = analysisFixture([['root'], ['a', 'b'], ['c', 'd']]);
+  const collapsed = new Set(['g1', 'g2']);
+  for (const flowDirection of ['RIGHT', 'DOWN']) {
+    const point = (flow, across) => flowDirection === 'RIGHT' ? {x: flow, y: across} : {x: across, y: flow};
+    const gap = flowDirection === 'RIGHT' ? 154 : 284;
+    const positions = new Map([
+      ['root', point(400, gap)], ['a', point(400, 0)], ['b', point(400, gap * 2)],
+      ['c', point(400, 0)], ['d', point(400, gap * 2)],
+    ]);
+    const base = flowNodes(model, {positions});
+    const original = structuredClone(base);
+    const options = {flowRootId: 'root', flowDirection, collapsed, pinned: new Set(['root'])};
+    const view = graphPresentation(model, base, analysis, options);
+    const axis = flowDirection === 'RIGHT' ? 'y' : 'x';
+    const along = flowDirection === 'RIGHT' ? 'x' : 'y';
+    assert.equal(view.nodes.length, 3);
+    assert.deepEqual(view.nodes.find(node => node.data.agent?.id === 'root').position, positions.get('root'));
+    assert.ok(view.nodes.every(node => node.position[along] === 400));
+    const offsets = view.nodes.map(node => node.position[axis]).sort((a, b) => a - b);
+    assert.ok(offsets.slice(1).every((value, i) => value - offsets[i] >= gap));
+    assert.deepEqual(base, original, 'automatic spacing does not mutate stored member or pin positions');
+    assert.deepEqual(graphPresentation(model, base, analysis, options).nodes.map(node => node.position), view.nodes.map(node => node.position));
+    const manualId = communityNodeId('g2');
+    const manual = point(400, gap); // Deliberate overlap with the chosen root is retained.
+    const moved = graphPresentation(model, base, analysis, {...options, aggregatePositions: new Map([[manualId, manual]])});
+    assert.deepEqual(moved.nodes.find(node => node.id === manualId).position, manual);
+    assert.notDeepEqual(moved.nodes.find(node => node.id === communityNodeId('g1')).position, manual);
   }
 });

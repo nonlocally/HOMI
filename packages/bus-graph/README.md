@@ -4,9 +4,13 @@ A locally bundled Svelte Flow view of the existing authorized bus snapshot. The
 host dashboard owns authentication, fetching, filters, and permissions; this
 widget makes no requests and stores nothing in cookies or browser storage.
 
-The initial layout uses normalized-Laplacian spectral coordinates with
-relationship-aware card spacing. Leiden communities add neutral group
-labels and colors. **Devices** retains the owner/device grid as an alternative.
+The default **Flow** layout organizes the visible communication network into
+branches and successive levels, with left-to-right or top-to-bottom direction.
+A suggested root and local hubs come from connectivity; viewers can choose a
+root and correct a connected agent's layout parent. These are visual choices,
+not assigned roles or task dependencies. **Spectral** uses normalized-Laplacian
+coordinates with relationship-aware spacing, and **Devices** retains the
+owner/device grid. Leiden communities add neutral group labels and colors.
 Nodes can be moved freely, and the viewport supports pan, zoom, fit, and a minimap.
 The standalone graph page fills its host
 without a surrounding box. The embedded view retains Expand; Escape collapses
@@ -24,7 +28,7 @@ members, and weighted modularity. New traffic updates the displayed arrows;
 **Recompute** explicitly updates the analysis and arrangement. Pins retain an
 agent's chosen position during recomputation. All state remains in page memory.
 
-Select an agent and choose **Set apart as conductor** to give it a separate
+In Spectral or Devices, select an agent and choose **Set apart as conductor** to give it a separate
 position above the network. The viewer assigns this visual role explicitly;
 traffic does not imply authority. The agent remains visible when its community
 is collapsed, with all directed message counts preserved. Clear the choice to
@@ -32,11 +36,18 @@ restore ordinary placement. Recompute reapplies it unless that agent is pinned.
 
 ## Mathematical model
 
-Both calculations consume only the sanitized, visible graph. Undirected weights
+All calculations consume only the sanitized, visible graph. Undirected weights
 are `log1p(count(i→j) + count(j→i))`; directions and original counts remain in
 the display. Self-messages do not influence analysis. See
 [Graph analysis](../../docs/GRAPH-ANALYSIS.md) for equations and interpretation.
 
+- Flow uses root removal to identify branches, internal weighted degree to
+  suggest branch hubs, and breadth-first levels within branches. Parent
+  corrections must use real visible relationships and preserve an acyclic
+  forest. ELK Layered positions that forest; the full directed traffic is drawn
+  over it without changing any count or arrow. The automatic root prioritizes
+  distinct peer count, then weighted degree, then canonical ID. Names never
+  supply role information. Each disconnected component has its own root.
 - Spectral coordinates use the two lowest nonzero eigenmodes of each connected
   component's symmetric normalized Laplacian. Pairs have one mode; isolates
   have none. Canonical ID order, eigenspace projection, and sign orientation
@@ -55,7 +66,8 @@ the display. Self-messages do not influence analysis. See
   the view to enable spectral/Leiden analysis. Numerical failures similarly
   report their fallback instead of silently claiming successful analysis.
 
-The eigensolver is `ml-matrix@6.15.0`; the seeded RNG is `java-random@0.4.0`.
+The layered engine is `elkjs@0.11.0`, bundled locally with its EPL-2.0 notices and
+source provenance. The eigensolver is `ml-matrix@6.15.0`; the seeded RNG is `java-random@0.4.0`.
 The latter declares ISC but omits a standalone license file. A version-specific
 notice in `licenses/` records that provenance and the standard license text;
 the runtime license generator still fails on any other missing notice.
@@ -136,3 +148,6 @@ and removal from hidden community/analysis state against a temporary real broker
 `scripts/test-bus-conductor-browser.py` checks explicit conductor placement,
 vertical message paths, collapse accounting, pin precedence, restoration, and
 clearing scope or identity changes with all network requests blocked.
+`scripts/test-bus-flow-browser.py` checks default branches and ranks, orientation,
+root/parent correction, full traffic accounting, pins, stable polling, and stale
+asynchronous result rejection after permission, scope, clear, and layout changes.

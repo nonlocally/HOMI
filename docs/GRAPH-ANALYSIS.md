@@ -1,9 +1,10 @@
 # Graph analysis
 
-The bus graph has two calculations over the same authorized traffic snapshot:
-normalized-Laplacian coordinates followed by relationship-aware spacing for
-placement, and Leiden community detection for grouping. The browser performs
-these locally. No messages are sent, no extra
+The bus graph calculates a layered Flow arrangement, normalized-Laplacian
+coordinates with relationship-aware spacing, and Leiden communities over the
+same authorized traffic snapshot. Flow is the default drawing; Spectral remains
+available as a mathematical view. The browser performs these locally.
+No messages are sent, no extra
 network endpoint is called, and no message contents are required.
 
 ## What the graph measures
@@ -29,6 +30,63 @@ The input is retained activity, not a complete time series. Receipt retention
 starts at a terminal receipt's latest update. Local socket/SSH traffic that
 bypasses the broker is absent. Filtering the view changes the graph being
 analyzed. No hidden endpoint or out-of-view bus contributes to its matrix.
+
+## Flow: branches and levels
+
+Flow separates the relationships used to arrange the drawing from the complete
+set of message arrows. Reciprocal traffic makes the raw graph cyclic, and a
+conductor may message every worker directly. Following every message arrow as
+a dependency, or counting hops from that conductor, would obscure the local
+branches the viewer wants to see.
+
+For each connected component, the automatic root has the most distinct peers.
+Ties use total undirected log-weight, then canonical agent ID. A viewer-selected
+root overrides this suggestion for its component. Names, providers, owners,
+devices, and descriptions never infer organizational authority.
+
+Temporarily remove the root when identifying residual connected branches. Each
+branch's suggested hub maximizes its internal sum of log-weights, restricted to
+agents with an actual connection to the root. Ties use root-link weight and ID.
+Breadth-first levels from the branch hub determine deeper ranks. A node with
+several possible parents at the preceding level uses the strongest connection,
+then ID. The root is level zero, branch hubs level one, and their descendants
+occupy later levels. Every organizing link is backed by a real visible
+relationship in at least one message direction.
+
+This recovers the A and B organizer branches in the qit-wilde sample without
+parsing their names. In other branches, the suggested hub may be a busy worker
+or reviewer. It is a layout suggestion, not proof of delegation or dependency.
+
+**Layout parent** lets the viewer correct an assignment using a visible neighbor.
+Corrections must leave an acyclic forest, and a component root has no parent.
+**Automatic** restores inferred placement. Removing a relationship, identity,
+or device association prunes affected corrections; they never supply hidden
+nodes or additional message edges.
+
+The resulting directed forest goes to **ELK Layered**, using source-oriented
+longest-path layering and network-simplex coordinate placement. Canonical input
+order and seed 17 make repeated inputs reproducible. Log-weights influence edge
+straightness priorities. Layout reserves 70 pixels between cards, 170 between
+layers, and 150 between independently arranged components. Left-to-right and
+top-to-bottom share the same inferred hierarchy. Above 256 agents, an explicitly
+labeled layer-grid fallback retains every identity and its inferred rank.
+
+The full directed message graph is then routed through the current card
+positions, including root shortcuts, reverse traffic, self-messages, and links
+between branches. Orthogonal paths avoid card rectangles where the bounded
+router can find a clear route. Separate lanes and label positions help read
+reciprocal traffic. Fallback routes remain visible with a notice; no route
+failure drops an edge or its count. Dragged or pinned cards participate at
+their actual positions. This does not guarantee a crossing-free drawing.
+
+The Flow root remains visible when a Leiden community is collapsed. The other
+members' aggregate preserves all directed traffic, including messages to and
+from that root. Flow branches and Leiden communities answer different questions
+and do not overwrite one another.
+
+Background and implementation: [ELK Layered](https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html),
+[elkjs](https://github.com/kieler/elkjs). The pinned ELK version, source provenance,
+and license notices ship with the graph assets.
 
 ## Spectral placement
 
@@ -152,6 +210,11 @@ Ordinary updates retain existing node positions. New traffic can be applied
 with **Recompute**; pins preserve deliberately placed agents. The interface
 identifies analysis based on an earlier traffic snapshot. Opening a panel does
 not resize the canvas.
+
+Flow placement is asynchronous. A generation check discards a result after
+scope changes, removal, device reassignment, layout changes, or an intervening
+drag. Queued stale calculations are skipped. Clearing the graph invalidates all
+pending results, so completion cannot repopulate a signed-out or narrowed view.
 
 Removal is immediate: revoked or filtered-out identities, memberships, and
 relationships are removed from nodes, community members, aggregates, and

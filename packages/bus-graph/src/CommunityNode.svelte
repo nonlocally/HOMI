@@ -10,6 +10,10 @@
   <div class="cg-community-internal" data-internal-messages={data.internalMessages}>{data.internalMessages} internal messages</div>
   <div class="cg-node-device">{data.sent} sent · {data.received} received outside</div>
   <Handle type="source" position={Position.Right} id="out" isConnectable={false} />
+  <Handle class="cg-direction-handle" type="target" position={Position.Right} id="in-right" isConnectable={false} />
+  <Handle class="cg-direction-handle" type="source" position={Position.Left} id="out-left" isConnectable={false} />
   <Handle class="cg-direction-handle" type="target" position={Position.Top} id="in-top" isConnectable={false} />
   <Handle class="cg-direction-handle" type="source" position={Position.Top} id="out-top" isConnectable={false} />
+  <Handle class="cg-direction-handle" type="target" position={Position.Bottom} id="in-bottom" isConnectable={false} />
+  <Handle class="cg-direction-handle" type="source" position={Position.Bottom} id="out-bottom" isConnectable={false} />
 </div>

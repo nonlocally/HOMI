@@ -101,9 +101,11 @@ def main():
                 assert "lab-workstation" in text and "aadarwal" in text
                 assert "<img src=x onerror=alert(1)>" in text
                 assert graph.locator("img").count() == 0
-                # Twenty-one agents on one device must wrap, not form one tall column.
+                # This star has two Flow layers: its root and twenty peers.
+                expect(graph.locator('.cg-canvas')).to_have_attribute('data-flow-pending', 'false')
+                expect(graph.get_by_role('combobox', name='Graph layout', exact=True)).to_have_value('flow')
                 positions = nodes.evaluate_all("els => els.map(e => e.style.transform)")
-                assert len({pos.split(',')[0] for pos in positions}) >= 3, positions
+                assert len({pos.split(',')[0] for pos in positions}) == 2, positions
                 viewport = graph.locator(".svelte-flow__viewport")
                 canvas = graph.locator(".cg-canvas")
 
