@@ -96,6 +96,22 @@ export function layoutNodes(model, previous = []) {
   return nodes;
 }
 
+// Polling may wait for pointer release only while every displayed identity and
+// permission-bearing association remains present. Revocation/removal must never
+// sit behind an active drag, even if the pointer stays down indefinitely.
+export function canDeferRefresh(current, next) {
+  const nextAgents = new Map(next.agents.map(agent => [agent.id, agent]));
+  for (const agent of current.agents) {
+    const replacement = nextAgents.get(agent.id);
+    if (!replacement || deviceKey(replacement) !== deviceKey(agent) || agent.buses.some(bus => !replacement.buses.includes(bus))) return false;
+  }
+  const nextConnections = new Map(next.connections.map(edge => [edge.id, edge]));
+  return current.connections.every(edge => {
+    const replacement = nextConnections.get(edge.id);
+    return replacement && edge.buses.every(bus => replacement.buses.includes(bus));
+  });
+}
+
 export function decorate(model, nodes, selectedId) {
   const selected = model.agents.some(agent => agentNodeId(agent.id) === selectedId) ? selectedId : null;
   const neighbors = new Set();

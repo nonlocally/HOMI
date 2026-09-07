@@ -160,14 +160,19 @@ new database directly.
 
 ## Agent graph
 
-The dashboard opens in **Graph** view; **List** keeps the agent table available.
-Select a bus, then filter by user, device, status, or search. Both views use the
-same permitted roster. Device labels and account names appear on each node;
-immutable agent and device IDs distinguish duplicate names.
+The graph has its own full-window page at `/graph?bus=qit-wilde`. Select a bus in
+the directory and choose **Open graph**, or open that URL directly. The top bar
+switches buses, searches agents, and opens the user/device/status filters.
+**Directory** returns to the table for the selected bus. Both pages use the same
+permitted roster; a URL never grants bus access. Device labels and account names
+appear on each node, with immutable IDs to distinguish duplicate names.
 
-Drag nodes to arrange the canvas, pan and zoom, or select an agent to inspect
-its identity and connections. Positions stay in this page's memory across
-refreshes. Changing bus or signing out clears that layout. These controls are
+Drag nodes to arrange them; drag the background or scroll with two fingers to
+pan. Pinch or hold Ctrl/Command while scrolling to zoom. Selecting an agent
+opens its details over the canvas without moving or shrinking it. Routine polls
+wait for an active node drag to finish; access removal still applies immediately.
+Positions stay in this page's memory across polling updates. Changing bus,
+leaving/reloading the page, or signing out clears that layout. These controls are
 visual: they do not send messages, move conversations, or change membership.
 
 Arrows show directed messages recorded by this broker between agents currently
