@@ -158,5 +158,5 @@
       </aside>
     {/if}
   </div>
-  <footer class="cg-footer"><span>Drag agents to arrange · Drag background or scroll to pan · Pinch or Ctrl/⌘ + scroll to zoom</span><span>{messageCount} retained messages · Positions change this view only</span></footer>
+  <footer class="cg-footer"><span>Drag agents to arrange · Drag background to pan · Scroll or pinch to zoom</span><span>{messageCount} retained messages · Positions change this view only</span></footer>
 </section>

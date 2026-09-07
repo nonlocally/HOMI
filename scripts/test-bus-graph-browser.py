@@ -192,8 +192,8 @@ def main():
                 expect(target).to_have_attribute("style", moved)
                 refresh()
                 expect(target).to_have_attribute("style", moved)
-                # Left-button background drag and unmodified two-finger wheel
-                # motion pan; only an explicit Control+wheel gesture zooms.
+                # Left-button background drag pans. Unmodified mouse-wheel /
+                # two-finger scrolling zooms around the pointer in both directions.
                 point = blank_point()
                 before_pan = transform()
                 page.mouse.move(point["x"], point["y"])
@@ -203,17 +203,30 @@ def main():
                 settle_viewport()
                 after_pan = transform()
                 assert after_pan["zoom"] == before_pan["zoom"] and after_pan != before_pan, (before_pan, after_pan)
-                point = blank_point()
+                point = {axis: round(value) for axis, value in blank_point().items()}
                 page.mouse.move(point["x"], point["y"])
                 page.mouse.wheel(90, 130)
                 settle_viewport()
                 after_wheel = transform()
-                assert after_wheel["zoom"] == after_pan["zoom"] and after_wheel != after_pan, (after_pan, after_wheel)
+                assert after_wheel["zoom"] < after_pan["zoom"], (after_pan, after_wheel)
+                canvas_box = canvas.bounding_box()
+
+                def anchor_in_graph(view):
+                    return ((point["x"] - canvas_box["x"] - view["x"]) / view["zoom"],
+                            (point["y"] - canvas_box["y"] - view["y"]) / view["zoom"])
+
+                before_anchor, after_anchor = anchor_in_graph(after_pan), anchor_in_graph(after_wheel)
+                assert all(abs(a - b) < 0.05 for a, b in zip(before_anchor, after_anchor)), (before_anchor, after_anchor)
+                page.mouse.wheel(0, -130)
+                settle_viewport()
+                after_wheel_in = transform()
+                assert after_wheel_in["zoom"] > after_wheel["zoom"], (after_wheel, after_wheel_in)
+                # Browser pinch is delivered as Control+wheel and still zooms.
                 page.keyboard.down("Control")
                 page.mouse.wheel(0, -150)
                 page.keyboard.up("Control")
                 settle_viewport()
-                assert transform()["zoom"] > after_wheel["zoom"], (after_wheel, transform())
+                assert transform()["zoom"] > after_wheel_in["zoom"], (after_wheel_in, transform())
                 assert_no_overflow()
                 page.locator("#search").fill("Coordinator")
                 expect(nodes).to_have_count(1)
@@ -276,7 +289,7 @@ def main():
                 assert set(operations) == {"snapshot"}, operations
                 assert not errors, errors
                 browser.close()
-                print("PASS: standalone graph — direct route/reload, full viewport, overlay inspector, drag through refresh, pan/wheel/zoom, filters, mobile, mid-drag removal/revocation, zero command dispatch")
+                print("PASS: standalone graph — direct route/reload, full viewport, overlay inspector, drag through refresh, background pan, wheel/pinch zoom at pointer, filters, mobile, mid-drag removal/revocation, zero command dispatch")
         finally:
             server.shutdown()
             server.server_close()

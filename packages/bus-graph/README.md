@@ -8,8 +8,8 @@ The initial layout groups agents by owner and enrolled device, with a balanced
 three-column grid for larger devices. Nodes can be moved freely, and the viewport
 supports pan, zoom, fit, and a minimap. The standalone graph page fills its host
 without a surrounding box. The embedded view retains Expand; Escape collapses
-it and returns focus to its toolbar button. Drag the background or scroll with
-two fingers to pan. Pinch, or hold Ctrl/Command while scrolling, to zoom.
+it and returns focus to its toolbar button. Drag the background to pan. Scroll
+with the mouse wheel or two fingers, or pinch, to zoom around the pointer.
 Selecting an agent opens an overlay without resizing or moving the canvas. It shows its identity,
 device, current status, and incoming/outgoing counts, while highlighting its
 neighbors. These are visual operations only; they do not issue agent commands,
