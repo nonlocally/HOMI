@@ -37,6 +37,7 @@ MAX_RECORDS = 20000
 MAX_SSO_REPLAYS = 4096
 MAX_VIEW_HEADER = 8192
 MESSAGE_TTL = 86400
+RECEIPT_RETENTION = 7 * MESSAGE_TTL
 LIVE_TTL = 45
 LEASE_TTL = 60
 BUS_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}\Z")
@@ -417,15 +418,15 @@ class Broker:
                       WHERE status IN ('accepted','leased') AND expires_at<=?""", (now, now))
         # Retain receipts for seven days, with finite message and invite storage.
         db.execute("DELETE FROM messages WHERE updated_at<? AND status NOT IN ('accepted','leased')",
-                   (now - 7 * MESSAGE_TTL,))
+                   (now - RECEIPT_RETENTION,))
         db.execute("DELETE FROM invites WHERE expires_at<?", (now - MESSAGE_TTL,))
         db.execute("DELETE FROM conversations WHERE expires_at<? AND NOT EXISTS (SELECT 1 FROM messages WHERE conversation=conversations.id)",
-                   (now - 7 * MESSAGE_TTL,))
+                   (now - RECEIPT_RETENTION,))
         db.execute("""DELETE FROM agents WHERE last_seen<?
                       AND NOT EXISTS (SELECT 1 FROM memberships WHERE agent=agents.id)
                       AND NOT EXISTS (SELECT 1 FROM messages WHERE sender=agents.id OR target=agents.id)
                       AND NOT EXISTS (SELECT 1 FROM conversations WHERE initiator=agents.id OR published=agents.id)""",
-                   (now - 7 * MESSAGE_TTL,))
+                   (now - RECEIPT_RETENTION,))
 
     def _conversation_valid(self, db, conversation, now):
         if conversation is None or conversation["closed"] or conversation["expires_at"] <= now:
@@ -662,6 +663,7 @@ class Broker:
                     row["principal"] = a["principal"]
                 agents.append(row)
             buses.append({"name": bus, "visibility": visibility, "agents": agents})
+        self._snapshot_graphs(db, buses)
         result = {"server_id": self.server_id, "is_admin": bool(p["is_admin"]),
                   "principal": p["id"], "buses": buses, "ts": now, **self._device_info(p)}
         if p.get("browser_reader") is not None:
@@ -684,6 +686,42 @@ class Broker:
             if self.users:
                 result["users"] = [{"id": user} for user in self.users]
         return result
+
+    @staticmethod
+    def _snapshot_graphs(db, buses):
+        """Only observed traffic between currently visible, same-bus agents.
+
+        A general-bus initiator can be unpublished. Filtering by the bus alone
+        would expose that hidden identity, including through replies. Reuse the
+        snapshot's admitted endpoints before exposing any communication metadata.
+        The one grouped query is bounded by the broker's global MAX_RECORDS
+        message limit, even when a reader can view many buses. Message bodies,
+        receipt details and delivery capabilities never enter the graph.
+        """
+        visible = {bus["name"]: {agent["id"] for agent in bus["agents"]} for bus in buses}
+        grouped = {bus["name"]: {} for bus in buses}
+        if buses:
+            slots = ",".join("?" for _ in buses)
+            rows = db.execute("""SELECT bus,sender,target,status,COUNT(*) AS message_count,
+                                 MAX(created_at) AS last_sent_at FROM messages
+                                 WHERE bus IN (%s) GROUP BY bus,sender,target,status""" % slots,
+                              tuple(visible))
+            for row in rows:
+                if row["sender"] not in visible[row["bus"]] or row["target"] not in visible[row["bus"]]:
+                    continue
+                pair = (row["sender"], row["target"])
+                edge = grouped[row["bus"]].setdefault(pair, {
+                    "source": row["sender"], "target": row["target"], "message_count": 0,
+                    "last_sent_at": row["last_sent_at"], "status_counts": {},
+                })
+                edge["message_count"] += row["message_count"]
+                edge["last_sent_at"] = max(edge["last_sent_at"], row["last_sent_at"])
+                edge["status_counts"][row["status"]] = row["message_count"]
+        for bus in buses:
+            # Retention starts at a terminal receipt's last update. This is
+            # retained activity, not a claim to be a complete seven-day history.
+            bus["graph"] = {"edges": [edge for _, edge in sorted(grouped[bus["name"]].items())],
+                            "retention_seconds": RECEIPT_RETENTION, "basis": "retained_bus_messages"}
 
     def _op_members(self, db, p, r, now):
         self._admin(p)

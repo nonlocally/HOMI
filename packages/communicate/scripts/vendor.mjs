@@ -22,6 +22,12 @@ for (const f of readdirSync(path.join(repo, "lib"))) {
   if (/homi/.test(f)) throw new Error(`homi file escaped the filter: ${f}`);
   cpSync(path.join(repo, "lib", f), path.join(vendor, "lib", f));
 }
+// The graph is built from packages/bus-graph. Ship only its reviewed browser
+// assets, never the asset directory wholesale (it can contain release archives).
+mkdirSync(path.join(vendor, "lib", "assets"), { recursive: true });
+for (const asset of ["bus-graph.js", "bus-graph.css", "bus-graph.LICENSES.txt"]) {
+  cpSync(path.join(repo, "lib", "assets", asset), path.join(vendor, "lib", "assets", asset));
+}
 // plugins/ may hold other planes (phone, ...) — vendor ONLY the communicate plugin.
 mkdirSync(path.join(vendor, "plugins"), { recursive: true });
 cpSync(path.join(repo, "plugins", ".claude-plugin"), path.join(vendor, "plugins", ".claude-plugin"), { recursive: true });

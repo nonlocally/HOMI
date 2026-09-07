@@ -53,7 +53,7 @@ echo "3) vendor is homi-free"
 ( cd "$PKG" && node scripts/vendor.mjs >/dev/null ) || fail "vendor.mjs errored"
 find "$PKG/vendor" \( -name 'homi*.py' -o -name 'homi.sh' \) | grep -q . && fail "homi artifact in vendor" || ok "no homi artifacts"
 ls "$PKG/vendor/plugins" | grep -v "^\.claude-plugin$\|^communicate$" | grep -q . && fail "foreign plugin in vendor: $(ls "$PKG/vendor/plugins")" || ok "only the communicate plugin vendored"
-for artifact in bus.py bus_broker.py bus_ui.html; do
+for artifact in bus.py bus_broker.py bus_ui.html assets/bus-graph.js assets/bus-graph.css assets/bus-graph.LICENSES.txt; do
   [ -f "$PKG/vendor/lib/$artifact" ] && ok "bus payload: $artifact" || fail "bus payload missing: $artifact"
 done
 
