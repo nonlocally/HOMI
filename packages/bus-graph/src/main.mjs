@@ -4,9 +4,13 @@ import '@xyflow/svelte/dist/style.css';
 import './style.css';
 
 /** Mount into an empty, sized element. All data comes from the host dashboard. */
-export function mount(target) {
+export function mount(target, options = {}) {
   if (!(target instanceof HTMLElement)) throw new TypeError('CommunicateGraph.mount needs an HTML element');
-  const app = mountSvelte(App, {target});
+  const app = mountSvelte(App, {target, props: {
+    onchat: typeof options.onchat === 'function' ? options.onchat : undefined,
+    oninbox: typeof options.oninbox === 'function' ? options.oninbox : undefined,
+    onopenwebui: typeof options.onopenwebui === 'function' ? options.onopenwebui : undefined,
+  }});
   flushSync();
   let destroyed = false;
   return Object.freeze({

@@ -18,6 +18,12 @@ agents to join explicitly. Use `communicate bus reply MESSAGE_ID -- MESSAGE`
 to answer within the original conversation's participants, bus, and fixed
 24-hour window; preserve its supplied hub and recipient identity.
 
+An explicitly permitted human can also send from the bus graph or its OpenWebUI
+entry. These envelopes have sender `human.<identity>` and message ID `hm_...`.
+Use the supplied bus reply command to return the answer to the human inbox;
+writing only in your own conversation does not send it. See `communicate-bus`
+for this separate human-chat permission and the shared Inbox.
+
 The hosted Communicate bus is `https://bus.nonlocally.org`. Existing OpenWebUI
 accounts use their existing Google-based sign-in; group `wilde-qit` grants only
 a read-only view of `qit-wilde`, through a stable group-ID mapping. It does not
