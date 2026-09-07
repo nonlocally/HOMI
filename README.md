@@ -54,12 +54,12 @@ backs it with `codex exec`.
 
 **Current private release (Claude Code + Codex plugin, CLI, MCP):**
 
-Sign in with GitHub at [bus.nonlocally.org](https://bus.nonlocally.org), then
-[download the 0.2.2 archive](https://bus.nonlocally.org/assets/communicate-0.2.2.tgz).
+Sign in at [bus.nonlocally.org](https://bus.nonlocally.org), then
+[download the 0.2.3 archive](https://bus.nonlocally.org/assets/communicate-0.2.3.tgz).
 Install that local file, using your browser's actual download path:
 
 ```sh
-npx -y --package "$HOME/Downloads/communicate-0.2.2.tgz" communicate setup
+npx -y --package "$HOME/Downloads/communicate-0.2.3.tgz" communicate setup
 ```
 
 This installs both ecosystems; use `--claude` or `--codex` to select one. The
@@ -138,13 +138,16 @@ persistent; after restarting the computer, register again to resume the worker.
 
 The hosted dashboard at `https://bus.nonlocally.org` offers **Sign in with
 GitHub** for the allowed accounts `aadarwal` and `peer-handle`. Aadarsh manages
-invitations; peer views general under the existing bus account `peer`. Browser
+invitations; peer views general under the existing bus account `peer`.
+Members of the OpenWebUI group `wilde-qit` can use their existing Google-based
+OpenWebUI sign-in to view `qit-wilde` only. The group mapping uses its stable ID;
+it grants viewing, not general access or device enrollment. Browser
 sign-in does not enroll a device: new installations still need a private,
 one-time invitation and `communicate bus connect INVITE_CODE`.
 The application is at [research.nonlocally.org](https://research.nonlocally.org),
 and documentation at [docs.nonlocally.org](https://docs.nonlocally.org).
 Devices still configured for the retired `bus.communicate.sh` should update
-to 0.2.2 and run `communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org`.
+to 0.2.2 or later and run `communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org`.
 This preserves their existing enrollment and local agent adapters.
 
 `general` is the default bus on your configured **hub**, not a global public

@@ -19,6 +19,11 @@ agent aliases and hostnames. `communicate bus device --name LABEL` changes only
 this device's label and refreshes its local metadata; it does not change the
 account or device ID. See `communicate-bus` for invitation-based attribution.
 
+An OpenWebUI group can grant browser viewing of a mapped bus, but does not
+assign device ownership or enroll/register agents. OpenWebUI browser identities
+use immutable OpenWebUI user IDs; their display names are labels only. Never
+link them to GitHub accounts by matching names or email addresses.
+
 Registration attaches the current Claude socket or exact `CODEX_THREAD_ID`.
 Never create a headless `codex peer` or guess the latest thread to register
 yourself. An MCP process may lack the current thread environment: use the CLI

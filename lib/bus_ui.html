@@ -250,7 +250,7 @@
     <header class="sidebar">
       <div class="sidebar-top">
         <div class="brand">Agent bus</div>
-        <div class="top-actions"><span id="role" class="role"></span><button id="create-button" class="text-button admin" hidden>New bus</button><button id="devices-button" class="text-button admin" hidden>Devices</button><button id="disconnect" class="text-button">Disconnect</button></div>
+        <div class="top-actions"><span id="current-user" class="user-name" hidden></span><span id="role" class="role"></span><button id="create-button" class="text-button admin" hidden>New bus</button><button id="devices-button" class="text-button admin" hidden>Devices</button><button id="disconnect" class="text-button">Disconnect</button></div>
       </div>
       <div class="sidebar-bottom">
         <nav aria-label="Buses"><div class="sidebar-heading"><span>Buses</span><button class="text-button admin" id="sidebar-create" aria-label="Create a bus" hidden>New bus</button></div><div id="bus-nav" class="bus-nav"></div></nav>
@@ -543,6 +543,8 @@
       if (state.bus !== null && !buses().some(bus => bus.name === state.bus)) state.bus=null;
       const admin=Boolean(state.data.is_admin);
       for (const element of document.querySelectorAll('.admin')) element.hidden=!admin;
+      const readerName=state.data.browser_session ? state.data.display_name || state.data.user || '' : '';
+      $('current-user').textContent=readerName;$('current-user').title=readerName;$('current-user').hidden=!readerName;
       $('role').textContent=admin ? 'Broker admin' : state.data.read_only ? 'Directory reader' : 'Bus member';
       $('page-title').textContent=state.bus === null ? 'All buses' : state.bus;
       const privateBus=state.bus !== null && state.bus !== 'general';
