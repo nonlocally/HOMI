@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId} from './model.mjs';
+import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId, spectralNodes, graphPresentation, communityNodeId} from './model.mjs';
 
 const agent = (id, extra = {}) => ({id, name: id, user: 'aadarwal', kind: 'codex', device: 'mini', device_id: 'device-one', status: 'queueable', buses: ['qit-wilde'], ...extra});
 const message = (source, target, extra = {}) => ({source, target, message_count: 1, last_sent_at: 100, status_counts: {delivered: 1}, ...extra});
@@ -117,4 +117,97 @@ test('drag refresh cannot retain a removed source bus even when the same agents 
   const narrowed = snapshotModel({...shared, buses: shared.buses.slice(1)});
   assert.equal(current.connections.length, narrowed.connections.length);
   assert.equal(canDeferRefresh(current, narrowed), false);
+});
+
+const analysisFixture = (groups) => ({
+  positions: new Map(groups.flat().map((id, index) => [id, {x: index * 300, y: index % 2 * 160}])),
+  communities: groups.map((members, index) => ({id: `g${index}`, label: `Group ${index + 1}`, members, colorIndex: index})),
+});
+
+test('spectral positions use analysis coordinates, preserving manual positions only for the same device identity', () => {
+  const model = snapshotModel(snapshot([agent('a'), agent('b')], [message('a', 'b')]));
+  const analysis = analysisFixture([['a', 'b']]);
+  const nodes = spectralNodes(model, analysis);
+  assert.deepEqual(nodes.map(node => node.position), [...analysis.positions.values()]);
+  assert.ok(nodes.every(node => node.type === 'agent'));
+  nodes[0].position = {x: 3333, y: 4444};
+  assert.deepEqual(spectralNodes(model, analysis, nodes)[0].position, nodes[0].position);
+  const reassigned = snapshotModel(snapshot([agent('a', {device_id: 'changed'})], []));
+  assert.deepEqual(spectralNodes(reassigned, analysis, nodes)[0].position, analysis.positions.get('a'));
+});
+
+test('collapsed communities aggregate each directed message once and count internal messages separately', () => {
+  const model = snapshotModel(snapshot([agent('a'), agent('b'), agent('c'), agent('d')], [
+    message('a', 'b', {message_count: 3}), message('b', 'a', {message_count: 4}),
+    message('a', 'c', {message_count: 5}), message('b', 'd', {message_count: 6}),
+    message('d', 'b', {message_count: 7}), message('c', 'c', {message_count: 8}),
+  ]));
+  const analysis = analysisFixture([['a', 'b'], ['c', 'd']]);
+  const result = graphPresentation(model, spectralNodes(model, analysis), analysis, {collapsed: new Set(['g0', 'g1'])});
+  assert.equal(result.nodes.length, 2);
+  assert.equal(result.nodes.find(node => node.id === communityNodeId('g0')).data.internalMessages, 7);
+  assert.equal(result.nodes.find(node => node.id === communityNodeId('g1')).data.internalMessages, 8);
+  assert.deepEqual(result.edges.map(edge => [edge.source, edge.target, edge.data.messageCount]), [
+    [communityNodeId('g0'), communityNodeId('g1'), 11], [communityNodeId('g1'), communityNodeId('g0'), 7],
+  ]);
+  assert.equal(result.nodes.reduce((sum, node) => sum + node.data.internalMessages, 0) + result.edges.reduce((sum, edge) => sum + edge.data.messageCount, 0), model.connections.reduce((sum, edge) => sum + edge.message_count, 0));
+});
+
+test('expanded community layer preserves member positions and directed detail; disabling the layer expands groups', () => {
+  const model = snapshotModel(snapshot([agent('a'), agent('b'), agent('c')], [message('a', 'b'), message('b', 'c')]));
+  const analysis = analysisFixture([['a', 'b'], ['c']]);
+  const nodes = spectralNodes(model, analysis);
+  nodes[1].position = {x: 1000, y: 2000};
+  const options = {collapsed: new Set(['g0']), showCommunities: false, pinned: new Set(['b']), selectedId: agentNodeId('a')};
+  const result = graphPresentation(model, nodes, analysis, options);
+  assert.equal(result.nodes.length, 3);
+  assert.equal(result.edges.length, 2);
+  assert.deepEqual(result.nodes.find(node => node.id === agentNodeId('b')).position, {x: 1000, y: 2000});
+  assert.equal(result.nodes.find(node => node.id === agentNodeId('b')).data.pinned, true);
+  assert.ok(result.nodes.every(node => !node.data.community));
+  assert.equal(result.nodes.find(node => node.id === agentNodeId('c')).data.dimmed, true);
+});
+
+test('presentation removes revoked identities and aggregate totals even if caller supplied old analysis and positions', () => {
+  const all = snapshotModel(snapshot([agent('a'), agent('private'), agent('c')], [message('a', 'private', {message_count: 20}), message('a', 'c', {message_count: 2})]));
+  const analysis = analysisFixture([['a', 'private'], ['c']]);
+  analysis.communities[0].id = 'community:["a","private"]';
+  const now = snapshotModel(snapshot([agent('a'), agent('c')], [message('a', 'c', {message_count: 2})]));
+  const view = graphPresentation(now, spectralNodes(all, analysis), analysis, {collapsed: new Set(['community:["a","private"]']), selectedId: agentNodeId('private')});
+  assert.equal(view.selectedId, null);
+  assert.equal(view.nodes.filter(node => node.type === 'community').length, 0);
+  assert.deepEqual(view.nodes.map(node => node.data.agent.id), ['a', 'c']);
+  assert.equal(view.edges[0].data.messageCount, 2);
+  assert.ok(!JSON.stringify(view).includes('private'));
+  const clear = graphPresentation(snapshotModel(), spectralNodes(all, analysis), analysis, {collapsed: new Set(['g0', 'g1'])});
+  assert.deepEqual(clear.nodes, []);
+  assert.deepEqual(clear.edges, []);
+});
+
+test('community focus highlights its actual neighbors without inventing extra links', () => {
+  const model = snapshotModel(snapshot(['a', 'b', 'c', 'd'].map(id => agent(id)), [message('a', 'b'), message('b', 'c')]));
+  const analysis = analysisFixture([['a', 'b'], ['c'], ['d']]);
+  const view = graphPresentation(model, spectralNodes(model, analysis), analysis, {focusedCommunity: 'g0'});
+  assert.equal(view.edges.length, 2);
+  assert.equal(view.nodes.find(node => node.id === agentNodeId('a')).data.focused, true);
+  assert.equal(view.nodes.find(node => node.id === agentNodeId('c')).data.neighbor, true);
+  assert.equal(view.nodes.find(node => node.id === agentNodeId('d')).data.dimmed, true);
+});
+
+test('reciprocal message labels occupy opposite rows without changing counts or offsetting one-way links', () => {
+  const model = snapshotModel(snapshot(['a', 'b', 'c'].map(id => agent(id)), [
+    message('a', 'b', {message_count: 59}), message('b', 'a', {message_count: 50}), message('a', 'c', {message_count: 3}),
+  ]));
+  const analysis = analysisFixture([['a'], ['b'], ['c']]);
+  const edges = graphPresentation(model, spectralNodes(model, analysis), analysis).edges;
+  const outgoing = edges.find(edge => edge.source === agentNodeId('a') && edge.target === agentNodeId('b'));
+  const incoming = edges.find(edge => edge.source === agentNodeId('b') && edge.target === agentNodeId('a'));
+  const oneWay = edges.find(edge => edge.target === agentNodeId('c'));
+  assert.equal(outgoing.label, '59');
+  assert.equal(incoming.label, '50');
+  assert.match(outgoing.labelStyle, /translate:0 -12px/);
+  assert.match(incoming.labelStyle, /translate:0 12px/);
+  assert.doesNotMatch(oneWay.labelStyle, /translate/);
+  assert.match(outgoing.labelStyle, /^color:/);
+  assert.deepEqual(edges.map(edge => edge.data.messageCount), [59, 50, 3]);
 });

@@ -167,6 +167,14 @@ switches buses, searches agents, and opens the user/device/status filters.
 permitted roster; a URL never grants bus access. Device labels and account names
 appear on each node, with immutable IDs to distinguish duplicate names.
 
+The default **Spectral** layout uses the communication graph to place agents.
+**Devices** keeps the owner/device directory arrangement available. The
+**Communities** layer groups agents by their observed traffic using Leiden;
+open a group to inspect its members or collapse it to see traffic between groups.
+These inferred groups are view controls, separate from bus membership and access.
+The **Analysis** panel explains the weighting, spectrum, and community objective.
+See [Graph analysis](GRAPH-ANALYSIS.md) for the mathematical model and its limits.
+
 Drag nodes to arrange them; drag the background to pan. Scroll with the mouse
 wheel or two fingers, or pinch, to zoom around the pointer. Selecting an agent
 opens its details over the canvas without moving or shrinking it. Routine polls
@@ -174,6 +182,12 @@ wait for an active node drag to finish; access removal still applies immediately
 Positions stay in this page's memory across polling updates. Changing bus,
 leaving/reloading the page, or signing out clears that layout. These controls are
 visual: they do not send messages, move conversations, or change membership.
+
+Use **Recompute** to arrange the graph from updated traffic. Ordinary polling
+updates the arrows without continually moving the map; the interface indicates
+when the analysis has newer traffic available. Pinned agents keep their chosen
+positions during recomputation. Access removal still clears affected nodes,
+communities, and analysis immediately.
 
 Arrows show directed messages recorded by this broker between agents currently
 visible on that bus. Counts aggregate retained messages, including unsuccessful

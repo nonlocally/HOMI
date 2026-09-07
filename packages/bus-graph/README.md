@@ -4,9 +4,11 @@ A locally bundled Svelte Flow view of the existing authorized bus snapshot. The
 host dashboard owns authentication, fetching, filters, and permissions; this
 widget makes no requests and stores nothing in cookies or browser storage.
 
-The initial layout groups agents by owner and enrolled device, with a balanced
-three-column grid for larger devices. Nodes can be moved freely, and the viewport
-supports pan, zoom, fit, and a minimap. The standalone graph page fills its host
+The initial layout uses normalized-Laplacian spectral coordinates with a
+separate pass for readable card spacing. Leiden communities add neutral group
+labels and colors. **Devices** retains the owner/device grid as an alternative.
+Nodes can be moved freely, and the viewport supports pan, zoom, fit, and a minimap.
+The standalone graph page fills its host
 without a surrounding box. The embedded view retains Expand; Escape collapses
 it and returns focus to its toolbar button. Drag the background to pan. Scroll
 with the mouse wheel or two fingers, or pinch, to zoom around the pointer.
@@ -14,6 +16,41 @@ Selecting an agent opens an overlay without resizing or moving the canvas. It sh
 device, current status, and incoming/outgoing counts, while highlighting its
 neighbors. These are visual operations only; they do not issue agent commands,
 change bus membership, or create message edges.
+
+**Communities** supports group focus, member inspection, and collapse/expand.
+Collapsed edges preserve directed external message totals; each group shows its
+internal count. **Analysis** exposes the weighting, eigenvalues, component
+members, and weighted modularity. New traffic updates the displayed arrows;
+**Recompute** explicitly updates the analysis and arrangement. Pins retain an
+agent's chosen position during recomputation. All state remains in page memory.
+
+## Mathematical model
+
+Both calculations consume only the sanitized, visible graph. Undirected weights
+are `log1p(count(i→j) + count(j→i))`; directions and original counts remain in
+the display. Self-messages do not influence analysis. See
+[Graph analysis](../../docs/GRAPH-ANALYSIS.md) for equations and interpretation.
+
+- Spectral coordinates use the two lowest nonzero eigenmodes of each connected
+  component's symmetric normalized Laplacian. Pairs have one mode; isolates
+  have none. Canonical ID order, eigenspace projection, and sign orientation
+  make identical inputs reproducible, including repeated eigenvalues.
+- Card spacing moves only overlapping rectangles, with bounded correction and
+  a legal-gap fallback. It does not replace spectral geometry with a spring
+  layout. Disconnected components are packed independently.
+- Leiden optimizes weighted modularity at resolution one. Three seeded starts
+  (`17`, `29`, `43`), each with ten iterations, select the highest objective;
+  canonical membership order resolves ties. The implementation is
+  `networkanalysis-ts@1.0.0`, the Leiden authors' TypeScript port.
+- Dense analysis is limited to **256 visible agents**. Larger views retain every
+  node in a grid with connected-component groups and an explicit notice. Filter
+  the view to enable spectral/Leiden analysis. Numerical failures similarly
+  report their fallback instead of silently claiming successful analysis.
+
+The eigensolver is `ml-matrix@6.15.0`; the seeded RNG is `java-random@0.4.0`.
+The latter declares ISC but omits a standalone license file. A version-specific
+notice in `licenses/` records that provenance and the standard license text;
+the runtime license generator still fails on any other missing notice.
 
 ## Build
 
@@ -80,6 +117,10 @@ graph.destroy();
 - `destroy()` is idempotent and removes the component; later update calls are
   ignored. Recreate it with `mount()` when needed.
 
-The pure-model tests cover edge authorization boundaries, message aggregation,
-large same-device layouts, state pruning, and selection neighbors. Dashboard
-integration tests cover actual Svelte Flow interaction and backend authorization.
+The pure-model tests cover known spectra, eigenvector residuals, degenerate
+eigenspaces, weighted modularity, connected communities, card collisions,
+determinism, authorization boundaries, directed aggregation, and state pruning.
+`scripts/test-bus-graph-browser.py` covers navigation, dragging through refresh,
+zoom, mobile layout, and revocation. `scripts/test-bus-spectral-browser.py` checks
+analysis controls, collapsed traffic accounting, stale analysis, pinned positions,
+and removal from hidden community/analysis state against a temporary real broker.
