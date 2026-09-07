@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {analyzeGraph, graphSignature, weightedGraph, ANALYSIS_NODE_LIMIT, CARD_WIDTH, CARD_HEIGHT} from './analysis.mjs';
+import {analyzeGraph, graphSignature, weightedGraph, refineSpectralSpacing, SPACING_ITERATIONS, ANALYSIS_NODE_LIMIT, CARD_WIDTH, CARD_HEIGHT} from './analysis.mjs';
 
 const edge = (source, target, message_count = 1) => ({source, target, message_count});
 const model = (ids, connections = []) => ({agents: ids.map(id => ({id, name: 'Same displayed name'})), connections});
@@ -187,4 +187,71 @@ test('revoked or removed endpoints disappear from positions, spectra and communi
   assert.equal(next.stats.relationships, 0);
   assert.ok(next.components.every(component => !component.ids.includes('b')));
   assert.ok(next.communities.every(community => !community.members.includes('b')));
+});
+
+test('relationship weights change spacing with the raw spectral coordinates held fixed', () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const raw = Object.freeze([{x: 0, y: 0}, {x: 900, y: 0}, {x: 900, y: 800}, {x: 0, y: 800}].map(Object.freeze));
+  const edges = [['a', 'b'], ['b', 'c'], ['c', 'd'], ['a', 'd']].map(([source, target]) => ({source, target, weight: 1}));
+  const distance = (points, i, j) => Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y);
+  const uniform = refineSpectralSpacing(ids, edges, raw);
+  const strongAB = refineSpectralSpacing(ids, edges.map((value, i) => ({...value, weight: i === 0 ? 9 : 1})), raw);
+  const strongCD = refineSpectralSpacing(ids, edges.map((value, i) => ({...value, weight: i === 2 ? 9 : 1})), raw);
+  assert.ok(distance(strongAB.points, 0, 1) < .85 * distance(uniform.points, 0, 1), 'strengthening a relationship shortens its display distance');
+  assert.ok(distance(strongAB.points, 0, 1) < .75 * distance(strongCD.points, 0, 1), 'swapping the strong relationship changes the placement');
+  assert.ok(distance(strongCD.points, 2, 3) < .75 * distance(strongAB.points, 2, 3));
+  assert.deepEqual(raw, [{x: 0, y: 0}, {x: 900, y: 0}, {x: 900, y: 800}, {x: 0, y: 800}]);
+  assert.deepEqual(uniform, refineSpectralSpacing(ids, edges, raw));
+  for (const result of [uniform, strongAB, strongCD]) {
+    assert.ok(result.diagnostics.objectiveAfter <= result.diagnostics.objectiveBefore);
+    assert.ok(result.diagnostics.stressAfter < result.diagnostics.stressBefore);
+    assertReadable({positions: new Map(ids.map((id, i) => [id, result.points[i]])), stats: {agents: ids.length}});
+  }
+});
+
+test('graph-distance stress keeps strong cliques coherent across a weak bridge', () => {
+  const left = ['a', 'b', 'c', 'd', 'e'], right = ['v', 'w', 'x', 'y', 'z'];
+  const ids = [...left, ...right];
+  const input = model(ids, [...clique(left), ...clique(right)].map(value => ({...value, message_count: 1000})).concat(edge('e', 'v', 1)));
+  const result = analyzeGraph(input);
+  const distance = (a, b) => Math.hypot(result.positions.get(a).x - result.positions.get(b).x, result.positions.get(a).y - result.positions.get(b).y);
+  let internal = 0, external = 0;
+  for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
+    if ((i < left.length) === (j < left.length)) internal += distance(ids[i], ids[j]);
+    else external += distance(ids[i], ids[j]);
+  }
+  assert.ok(internal / 20 < .5 * external / 25, 'strong groups stay closer internally than across their bridge');
+  assert.deepEqual(result.communities.map(group => group.members), [left, right]);
+  const diagnostics = result.components[0].spacing;
+  assert.ok(diagnostics.stressAfter < .5 * diagnostics.stressBefore);
+  assert.ok(diagnostics.objectiveAfter <= diagnostics.objectiveBefore);
+  assert.ok(diagnostics.rmsDisplacement > 0);
+  assert.ok(diagnostics.iterations <= SPACING_ITERATIONS);
+  near(result.stats.modularity, independentModularity(input, result));
+  checkEigenResidual(result, input);
+  assertReadable(result);
+});
+
+test('tied dense modes spread in two dimensions without changing eigenmodes', () => {
+  const ids = Array.from({length: 32}, (_, i) => `a${String(i).padStart(2, '0')}`);
+  const input = model(ids, clique(ids));
+  const result = analyzeGraph(input);
+  const positions = [...result.positions.values()];
+  const width = Math.max(...positions.map(point => point.x)) - Math.min(...positions.map(point => point.x));
+  const height = Math.max(...positions.map(point => point.y)) - Math.min(...positions.map(point => point.y));
+  assert.ok(width / height > .35 && width / height < 3, `readable 2D extent, got ${width}×${height}`);
+  assert.ok(new Set(positions.map(point => Math.round(point.x))).size > ids.length / 2);
+  assert.ok(result.components[0].spacing.objectiveAfter < result.components[0].spacing.objectiveBefore);
+  checkEigenResidual(result, input);
+  assertReadable(result);
+});
+
+test('256-node dense refinement is bounded, finite and collision-free', () => {
+  const ids = Array.from({length: ANALYSIS_NODE_LIMIT}, (_, i) => `a${String(i).padStart(3, '0')}`);
+  const result = analyzeGraph(model(ids, clique(ids)));
+  assert.equal(result.warning, null);
+  assert.equal(result.components[0].layout, 'spectral');
+  assert.ok(result.components[0].spacing.iterations <= SPACING_ITERATIONS);
+  assert.ok(result.components[0].spacing.objectiveAfter <= result.components[0].spacing.objectiveBefore);
+  assertReadable(result);
 });

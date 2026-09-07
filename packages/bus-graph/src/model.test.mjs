@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId, spectralNodes, graphPresentation, communityNodeId} from './model.mjs';
+import {snapshotModel, layoutNodes, canDeferRefresh, decorate, agentDetails, agentNodeId, spectralNodes, placeConductor, graphPresentation, communityNodeId} from './model.mjs';
 
 const agent = (id, extra = {}) => ({id, name: id, user: 'aadarwal', kind: 'codex', device: 'mini', device_id: 'device-one', status: 'queueable', buses: ['qit-wilde'], ...extra});
 const message = (source, target, extra = {}) => ({source, target, message_count: 1, last_sent_at: 100, status_counts: {delivered: 1}, ...extra});
@@ -210,4 +210,80 @@ test('reciprocal message labels occupy opposite rows without changing counts or 
   assert.doesNotMatch(oneWay.labelStyle, /translate/);
   assert.match(outgoing.labelStyle, /^color:/);
   assert.deepEqual(edges.map(edge => edge.data.messageCount), [59, 50, 3]);
+});
+
+test('explicit conductor sits above all cards centered on actual peers while the default layout stays unchanged', () => {
+  const model = snapshotModel(snapshot(['a', 'b', 'c', 'unrelated'].map(id => agent(id)), [message('a', 'b'), message('c', 'a')]));
+  const analysis = analysisFixture([['a', 'b', 'c', 'unrelated']]);
+  const nodes = spectralNodes(model, analysis);
+  nodes.find(node => node.data.agent.id === 'unrelated').position = {x: 9000, y: -50};
+  const original = structuredClone(nodes);
+  assert.equal(placeConductor(nodes, null), nodes);
+  const chosen = placeConductor(nodes, 'a', new Set(), model.connections);
+  const leader = chosen.find(node => node.data.agent.id === 'a');
+  assert.equal(leader.position.x, 450); // peers b and c span x=300..850
+  assert.equal(leader.position.y + 120, -50 - 220); // above even the unrelated card
+  assert.deepEqual(nodes, original);
+  assert.deepEqual(chosen.filter(node => node.data.agent.id !== 'a'), original.filter(node => node.data.agent.id !== 'a'));
+  assert.equal(placeConductor(nodes, 'a', new Set(['a']), model.connections), nodes);
+  assert.equal(placeConductor(nodes, 'missing'), nodes);
+  const solo = nodes.slice(0, 1);
+  assert.equal(placeConductor(solo, 'a'), solo);
+});
+
+test('conductor remains separate from a collapsed community without changing math membership or double-counting traffic', () => {
+  const model = snapshotModel(snapshot(['a', 'b', 'c', 'd'].map(id => agent(id)), [
+    message('a', 'b', {message_count: 7}), message('c', 'a', {message_count: 5}),
+    message('b', 'c', {message_count: 3}), message('a', 'd', {message_count: 2}),
+    message('d', 'b', {message_count: 11}), message('a', 'a', {message_count: 13}),
+  ]));
+  const analysis = analysisFixture([['a', 'b', 'c'], ['d']]);
+  const originalCommunities = structuredClone(analysis.communities);
+  const nodes = spectralNodes(model, analysis);
+  const view = graphPresentation(model, nodes, analysis, {conductorId: 'a', collapsed: new Set(['g0', 'g1'])});
+  const conductor = view.nodes.find(node => node.id === agentNodeId('a'));
+  assert.equal(conductor.data.conductor, true);
+  assert.equal(conductor.data.community.members.length, 3);
+  const group = view.nodes.find(node => node.id === communityNodeId('g0'));
+  assert.deepEqual(group.data.community.members, ['b', 'c']);
+  assert.equal(group.data.totalMembers, 3);
+  assert.equal(group.data.internalMessages, 3);
+  assert.deepEqual(analysis.communities, originalCommunities);
+  const outward = view.edges.find(edge => edge.source === conductor.id && edge.target === group.id);
+  const inward = view.edges.find(edge => edge.source === group.id && edge.target === conductor.id);
+  assert.equal(outward.data.messageCount, 7);
+  assert.equal(inward.data.messageCount, 5);
+  assert.equal(outward.sourceHandle, 'out-bottom');
+  assert.equal(outward.targetHandle, 'in-top');
+  assert.equal(inward.sourceHandle, 'out-top');
+  assert.equal(inward.targetHandle, 'in-bottom');
+  const total = view.edges.reduce((sum, edge) => sum + edge.data.messageCount, 0) + view.nodes.reduce((sum, node) => sum + (node.data.internalMessages || 0), 0);
+  assert.equal(total, 41);
+  const reset = graphPresentation(model, nodes, analysis, {collapsed: new Set(['g0', 'g1'])});
+  assert.ok(!reset.nodes.some(node => node.data.conductor));
+  assert.equal(reset.nodes.find(node => node.id === communityNodeId('g0')).data.internalMessages, 28);
+});
+
+test('choosing a singleton conductor never creates an empty aggregate or resurrects a removed choice', () => {
+  const model = snapshotModel(snapshot([agent('a'), agent('b')], [message('a', 'b')]));
+  const analysis = analysisFixture([['a'], ['b']]);
+  const nodes = spectralNodes(model, analysis);
+  const view = graphPresentation(model, nodes, analysis, {conductorId: 'a', collapsed: new Set(['g0', 'g1'])});
+  assert.equal(view.nodes.length, 2);
+  assert.ok(!view.nodes.some(node => node.id === communityNodeId('g0')));
+  assert.ok(view.edges.every(edge => view.nodes.some(node => node.id === edge.source) && view.nodes.some(node => node.id === edge.target)));
+  const removed = graphPresentation(snapshotModel(snapshot([agent('b')], [])), nodes, analysis, {conductorId: 'a'});
+  assert.ok(!removed.nodes.some(node => node.data.conductor));
+  assert.deepEqual(removed.edges, []);
+});
+
+test('an agent literally named null does not receive conductor handles without an explicit choice', () => {
+  const model = snapshotModel(snapshot([agent('null'), agent('b')], [message('null', 'b'), message('b', 'null')]));
+  const analysis = analysisFixture([['null', 'b']]);
+  const nodes = spectralNodes(model, analysis);
+  for (const conductorId of [null, 'missing']) {
+    const view = graphPresentation(model, nodes, analysis, {conductorId});
+    assert.ok(view.nodes.every(node => !node.data.conductor));
+    assert.ok(view.edges.every(edge => edge.sourceHandle === 'out' && edge.targetHandle === 'in'));
+  }
 });
