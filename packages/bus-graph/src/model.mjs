@@ -163,27 +163,44 @@ export function spectralNodes(model, analysis, previous = []) {
   });
 }
 
+// A person may choose one visible card to sit above the others. This is a
+// drawing preference only: no role inference, routing, or community changes.
+export function placeConductor(nodes, conductorId, pinned = new Set(), connections = []) {
+  const conductor = nodes.find(node => node.type === 'agent' && node.data.agent.id === conductorId);
+  const peers = nodes.filter(node => node.type === 'agent' && node.data.agent.id !== conductorId);
+  if (!conductor || !peers.length || pinned.has(conductorId)) return nodes;
+  const peerIds = new Set(connections.flatMap(edge => edge.source === conductorId ? [edge.target] : edge.target === conductorId ? [edge.source] : []));
+  const linked = peers.filter(node => peerIds.has(node.data.agent.id));
+  const centered = linked.length ? linked : peers;
+  const left = Math.min(...centered.map(node => node.position.x));
+  const right = Math.max(...centered.map(node => node.position.x + (node.width || NODE_WIDTH)));
+  const top = Math.min(...peers.map(node => node.position.y));
+  const position = {x: (left + right - (conductor.width || NODE_WIDTH)) / 2, y: top - 220 - (conductor.height || 120)};
+  return nodes.map(node => node === conductor ? {...node, position} : node);
+}
+
 export function graphPresentation(model, baseNodes, analysis, options = {}) {
-  const {collapsed = new Set(), aggregatePositions = new Map(), pinned = new Set(), showCommunities = true, selectedId = null, focusedCommunity = null} = options;
+  const {collapsed = new Set(), aggregatePositions = new Map(), pinned = new Set(), showCommunities = true, selectedId = null, focusedCommunity = null, conductorId = null} = options;
   const visible = new Set(model.agents.map(agent => agent.id));
+  const visibleConductor = typeof conductorId === 'string' && visible.has(conductorId);
   // Even a caller holding an old analysis cannot render a removed identity.
   const communities = (analysis?.communities || []).filter(group => group.members.length && group.members.every(id => visible.has(id))); // IDs encode membership: discard a stale group whole.
   const byAgent = new Map(communities.flatMap(group => group.members.map(id => [id, group])));
-  const collapsedGroups = new Map(communities.filter(group => showCommunities && collapsed.has(group.id)).map(group => [group.id, group]));
-  const destination = id => collapsedGroups.has(byAgent.get(id)?.id) ? communityNodeId(byAgent.get(id).id) : agentNodeId(id);
+  const collapsedGroups = new Map(communities.filter(group => showCommunities && collapsed.has(group.id) && group.members.some(id => id !== conductorId)).map(group => [group.id, group]));
+  const destination = id => id !== conductorId && collapsedGroups.has(byAgent.get(id)?.id) ? communityNodeId(byAgent.get(id).id) : agentNodeId(id);
   const aggregates = new Map();
   const existing = new Map(baseNodes.filter(node => node.type === 'agent').map(node => [node.data.agent.id, node]));
-  const rendered = baseNodes.filter(node => node.type === 'device' ? model.groups.some(group => node.id === `device:${group.key}`) : node.type === 'agent' && visible.has(node.data.agent.id) && !collapsedGroups.has(byAgent.get(node.data.agent.id)?.id)).map(node => {
+  const rendered = baseNodes.filter(node => node.type === 'device' ? model.groups.some(group => node.id === `device:${group.key}`) : node.type === 'agent' && visible.has(node.data.agent.id) && (node.data.agent.id === conductorId || !collapsedGroups.has(byAgent.get(node.data.agent.id)?.id))).map(node => {
     if (node.type !== 'agent') return node;
     const community = showCommunities ? byAgent.get(node.data.agent.id) : null;
-    return {...node, data: {...node.data, community, pinned: pinned.has(node.data.agent.id)}};
+    return {...node, data: {...node.data, community, pinned: pinned.has(node.data.agent.id), conductor: node.data.agent.id === conductorId}};
   });
   for (const group of collapsedGroups.values()) {
-    const members = group.members.map(id => existing.get(id)).filter(Boolean);
+    const members = group.members.filter(id => id !== conductorId).map(id => existing.get(id)).filter(Boolean);
     if (!members.length) continue;
     const id = communityNodeId(group.id);
     const position = aggregatePositions.get(id) || {x: members.reduce((sum, node) => sum + node.position.x, 0) / members.length, y: members.reduce((sum, node) => sum + node.position.y, 0) / members.length};
-    const data = {community: group, internalMessages: 0, sent: 0, received: 0, dimmed: false, neighbor: false};
+    const data = {community: {...group, members: members.map(node => node.data.agent.id)}, totalMembers: group.members.length, internalMessages: 0, sent: 0, received: 0, dimmed: false, neighbor: false};
     aggregates.set(id, data);
     rendered.push({id, type: 'community', position: {...position}, width: NODE_WIDTH, height: 120, data, connectable: false, deletable: false, ariaLabel: `${group.label}, ${members.length} agents, collapsed community`});
   }
@@ -216,7 +233,9 @@ export function graphPresentation(model, baseNodes, analysis, options = {}) {
       // Reverse-direction curves share their label midpoint. Individual CSS
       // translate preserves Flow's transform while giving each count its own row.
       const labelOffset = reciprocal ? `;translate:0 ${edge.source < edge.target ? -12 : 12}px` : '';
-      return {id: `message:${edge.id}`, source: edge.source, target: edge.target, type: 'bezier', sourceHandle: 'out', targetHandle: 'in', animated: false, selectable: false, focusable: false, deletable: false, reconnectable: false,
+      const fromConductor = visibleConductor && edge.source !== edge.target && edge.source === agentNodeId(conductorId);
+      const toConductor = visibleConductor && edge.source !== edge.target && edge.target === agentNodeId(conductorId);
+      return {id: `message:${edge.id}`, source: edge.source, target: edge.target, type: 'bezier', sourceHandle: fromConductor ? 'out-bottom' : toConductor ? 'out-top' : 'out', targetHandle: toConductor ? 'in-bottom' : fromConductor ? 'in-top' : 'in', animated: false, selectable: false, focusable: false, deletable: false, reconnectable: false,
         markerEnd: {type: 'arrowclosed', color, width: 14, height: 14}, label: active.size && !connected ? undefined : String(edge.message_count), labelStyle: `color:${connected ? '#edede7' : '#a1a199'};font-size:10px;font-family:inherit${labelOffset}`, labelBgStyle: 'fill:#121211;fill-opacity:0.95', labelBgPadding: [6, 3], labelBgBorderRadius: 3,
         style: `stroke:${color};stroke-width:${connected ? 2 : 1};opacity:${active.size && !connected ? .08 : connected ? .95 : .35}`,
         data: {messageCount: edge.message_count}, ariaLabel: `${edge.message_count} retained messages from ${edge.source} to ${edge.target}`};

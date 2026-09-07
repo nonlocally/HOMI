@@ -2,7 +2,7 @@
   import { tick, onDestroy } from 'svelte';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import FlowCanvas from './FlowCanvas.svelte';
-  import { snapshotModel, layoutNodes, spectralNodes, graphPresentation, communityColor, communityNodeId, canDeferRefresh, agentDetails, agentNodeId, owner, deviceName, deviceKey } from './model.mjs';
+  import { snapshotModel, layoutNodes, spectralNodes, placeConductor, graphPresentation, communityColor, communityNodeId, canDeferRefresh, agentDetails, agentNodeId, owner, deviceName, deviceKey } from './model.mjs';
   import { analyzeGraph, graphSignature } from './analysis.mjs';
 
   let model = $state.raw(snapshotModel());
@@ -18,6 +18,8 @@
   let stale = $state(false);
   let collapsed = $state.raw(new Set());
   let pinned = $state.raw(new Set());
+  let conductorId = $state(null);
+  let conductorHome = null;
   let aggregatePositions = new Map();
   let scope = '';
   let epoch = $state(0);
@@ -43,7 +45,7 @@
     for (const node of nodes) if (node.type === 'community') aggregatePositions.set(node.id, {...node.position});
   }
   function present() {
-    const view = graphPresentation(model, baseNodes, analysis, {collapsed, pinned, aggregatePositions, showCommunities, selectedId, focusedCommunity});
+    const view = graphPresentation(model, baseNodes, analysis, {collapsed, pinned, aggregatePositions, showCommunities, selectedId, focusedCommunity, conductorId});
     selectedId = view.selectedId;
     nodes = view.nodes;
     edges = view.edges;
@@ -83,11 +85,11 @@
     const next = new Set(collapsed);
     if (next.has(group.id)) {
       const position = aggregatePositions.get(communityNodeId(group.id));
-      const members = baseNodes.filter(node => node.type === 'agent' && group.members.includes(node.data.agent.id));
+      const members = baseNodes.filter(node => node.type === 'agent' && group.members.includes(node.data.agent.id) && node.data.agent.id !== conductorId);
       if (position && members.length) {
         const dx = position.x - members.reduce((sum, node) => sum + node.position.x, 0) / members.length;
         const dy = position.y - members.reduce((sum, node) => sum + node.position.y, 0) / members.length;
-        baseNodes = baseNodes.map(node => node.type === 'agent' && group.members.includes(node.data.agent.id) ? {...node, position: {x: node.position.x + dx, y: node.position.y + dy}} : node);
+        baseNodes = baseNodes.map(node => node.type === 'agent' && group.members.includes(node.data.agent.id) && node.data.agent.id !== conductorId ? {...node, position: {x: node.position.x + dx, y: node.position.y + dy}} : node);
       }
       next.delete(group.id);
       aggregatePositions.delete(communityNodeId(group.id));
@@ -97,7 +99,7 @@
   }
   function openMember(id) {
     const group = analysis.communities.find(value => value.members.includes(id));
-    if (group && collapsed.has(group.id)) toggleGroup(group);
+    if (group && collapsed.has(group.id) && id !== conductorId) toggleGroup(group);
     select(agentNodeId(id));
   }
   function togglePin(id) {
@@ -106,6 +108,30 @@
     next.has(id) ? next.delete(id) : next.add(id);
     pinned = next;
     present();
+  }
+  function restoreConductor() {
+    if (conductorHome && !pinned.has(conductorId)) {
+      baseNodes = baseNodes.map(node => node.type === 'agent' && node.data.agent.id === conductorId && node.data.group === conductorHome.group ? {...node, position: {...conductorHome.position}} : node);
+    }
+    conductorId = null;
+    conductorHome = null;
+  }
+  function rememberConductorHome() {
+    const node = baseNodes.find(node => node.type === 'agent' && node.data.agent.id === conductorId);
+    conductorHome = node ? {position: {...node.position}, group: node.data.group} : null;
+  }
+  async function chooseConductor(id) {
+    capturePositions();
+    const clear = id === conductorId;
+    restoreConductor();
+    if (!clear && model.agents.some(agent => agent.id === id)) {
+      conductorId = id;
+      rememberConductorHome();
+      baseNodes = placeConductor(baseNodes, conductorId, pinned, model.connections);
+    }
+    present();
+    await tick();
+    canvas?.fit();
   }
   function pruneGroups() {
     const permitted = new Set(analysis.communities.map(group => group.id));
@@ -119,6 +145,8 @@
     capturePositions();
     if (recompute) { analysis = analyzeGraph(model); stale = false; pruneGroups(); }
     baseNodes = place(baseNodes.filter(node => node.type === 'agent' && pinned.has(node.data.agent.id)));
+    rememberConductorHome();
+    baseNodes = placeConductor(baseNodes, conductorId, pinned, model.connections);
     aggregatePositions.clear();
     present();
     await tick();
@@ -163,11 +191,12 @@
     capturePositions();
     if (changed) {
       expanded = false; cancelFit(); selectedId = null; focusedCommunity = null;
-      panel = null; collapsed = new Set(); pinned = new Set(); aggregatePositions.clear();
+      panel = null; collapsed = new Set(); pinned = new Set(); conductorId = null; conductorHome = null; aggregatePositions.clear();
     }
     if (changed || (!model.agents.length && next.agents.length)) epoch += 1;
     // Pins and positions never cross a reassigned device identity.
     pinned = new Set([...pinned].filter(id => next.agents.some(agent => agent.id === id && model.agents.some(old => old.id === id && deviceKey(old) === deviceKey(agent)))));
+    if (conductorId && !next.agents.some(agent => agent.id === conductorId && model.agents.some(old => old.id === conductorId && deviceKey(old) === deviceKey(agent)))) { conductorId = null; conductorHome = null; }
     scope = nextScope;
     model = next;
     if (changed || narrower || identityChanged) {
@@ -189,7 +218,7 @@
   }
   export function clear() {
     cancelFit(); expanded = false; dragging = false; pendingRefresh = null;
-    scope = ''; selectedId = null; focusedCommunity = null; panel = null;
+    scope = ''; selectedId = null; focusedCommunity = null; panel = null; conductorId = null; conductorHome = null;
     collapsed = new Set(); pinned = new Set(); aggregatePositions.clear();
     baseNodes = []; nodes = []; edges = []; model = snapshotModel();
     analysis = analyzeGraph(model); stale = false; epoch += 1;
@@ -199,7 +228,7 @@
 <svelte:window onkeydown={handleKey} />
 <section class="cg-shell" class:cg-expanded={expanded} class:cg-standalone={standalone} aria-label="Agent connections graph">
   <header class="cg-toolbar">
-    <div class="cg-counts"><strong>{model.agents.length}</strong> agents <span>·</span><strong>{model.groups.length}</strong> {model.groups.length === 1 ? 'device' : 'devices'}<span>·</span><strong>{model.connections.length}</strong> directed links</div>
+    <div class="cg-counts"><strong>{model.agents.length}</strong> agents <span>·</span><strong>{model.groups.length}</strong> {model.groups.length === 1 ? 'device' : 'devices'}<span>·</span><strong>{model.connections.length}</strong> directed links{#if conductorId}<span>·</span><span class="cg-conductor-summary" title={names.get(conductorId)}><span>Conductor: {names.get(conductorId)}</span><button type="button" onclick={() => chooseConductor(conductorId)} aria-label="Clear conductor placement">×</button></span>{/if}</div>
     <div class="cg-actions">
       <select aria-label="Graph layout" value={layoutMode} onchange={chooseLayout}><option value="spectral">Spectral</option><option value="devices">Devices</option></select>
       <button type="button" onclick={() => togglePanel('communities')} aria-expanded={panel === 'communities'}>Communities</button>
@@ -230,7 +259,7 @@
       <aside class="cg-inspector cg-community-panel nowheel nopan" aria-label="Communities">
         <div class="cg-inspector-header"><span>Communities</span><button class="cg-close" type="button" onclick={() => togglePanel('communities')} aria-label="Close communities">×</button></div>
         <h3>Patterns in communication</h3>
-        <p class="cg-panel-description">Groups reflect retained message relationships, not assigned teams. Collapsing and moving a group changes this view only.</p>
+        <p class="cg-panel-description">Groups reflect retained message relationships, not assigned teams. Collapsing and moving a group changes this view only.{#if conductorId} The chosen conductor stays visible outside its collapsed group; community membership is unchanged.{/if}</p>
         <label class="cg-layer-toggle"><input type="checkbox" checked={showCommunities} onchange={toggleCommunityLayer} /> Show community layer</label>
         {#if stale}<p class="cg-analysis-stale" role="status">New traffic is available. Recompute to refresh these groups.</p>{/if}
         <div class="cg-community-list">
@@ -256,7 +285,7 @@
           <div><dt>Relationship weight</dt><dd>{analysis.method.weighting}</dd></div>
         </dl>
         <p class="cg-equation">L = I − D⁻¹ᐟ² W D⁻¹ᐟ²</p>
-        <p class="cg-panel-description">The two lowest nonzero modes set each connected component's coordinates. Spacing separates overlapping cards; component packing is visual. Dragging changes the drawing, not the calculation.</p>
+        <p class="cg-panel-description">The two lowest nonzero modes set the starting coordinates. Weighted graph distances refine the spacing, with an anchor to that spectral arrangement and room for each card. Component packing is visual. Dragging changes the drawing, not the calculation.{#if conductorId} The chosen conductor is placed apart for this view; its mathematical coordinates and community are unchanged.{/if}</p>
         <dl class="cg-detail-list cg-analysis-stats">
           <div><dt>Agents</dt><dd>{analysis.stats.agents}</dd></div>
           <div><dt>Relationships</dt><dd>{analysis.stats.relationships}</dd></div>
@@ -277,6 +306,7 @@
         <div class="cg-inspector-header"><span>Selected agent</span><button class="cg-close" type="button" onclick={() => select(null)} aria-label="Close agent details">×</button></div>
         <h3>{details.agent.name}</h3>
         <div class="cg-detail-actions"><button type="button" aria-pressed={pinned.has(details.agent.id)} onclick={() => togglePin(details.agent.id)}>{pinned.has(details.agent.id) ? 'Unpin agent' : 'Pin agent'}</button><small>Keep position on Recompute</small></div>
+        <div class="cg-detail-actions cg-conductor-action"><button type="button" aria-pressed={conductorId === details.agent.id} onclick={() => chooseConductor(details.agent.id)}>{conductorId === details.agent.id ? 'Clear conductor placement' : 'Set apart as conductor'}</button><small>Visual placement only.{pinned.has(details.agent.id) ? ' Pinned position takes precedence.' : ''}</small></div>
         <p class="cg-detail-kind">{details.agent.kind} <span>·</span> {details.agent.status}</p>
         {#if details.agent.description}<p class="cg-description">{details.agent.description}</p>{/if}
         <dl class="cg-detail-list">

@@ -1,4 +1,4 @@
-import {Matrix, EigenvalueDecomposition} from 'ml-matrix';
+import {Matrix, EigenvalueDecomposition, CholeskyDecomposition} from 'ml-matrix';
 import Network from 'networkanalysis-ts/network.js';
 import LeidenAlgorithm from 'networkanalysis-ts/leidenAlgorithm.js';
 import Clustering from 'networkanalysis-ts/clustering.js';
@@ -135,11 +135,11 @@ function gridPoints(n) {
   return Array.from({length: n}, (_, i) => ({x: (i % columns) * WIDTH, y: Math.floor(i / columns) * HEIGHT}));
 }
 
-// Only overlapping card rectangles exert a displacement. There are no springs
-// or attraction forces here, so the relationship geometry stays spectral.
-function separateCards(raw) {
+// Projection onto readable card positions. The bounded overlap relaxation and
+// final interval placement together guarantee non-overlapping rectangles.
+function separateCards(raw, passes = 80) {
   const points = raw.map(point => ({...point}));
-  for (let iteration = 0; iteration < 80; iteration++) {
+  for (let iteration = 0; iteration < passes; iteration++) {
     let collisions = 0;
     for (let i = 0; i < points.length; i++) for (let j = i + 1; j < points.length; j++) {
       const a = points[i], b = points[j];
@@ -175,6 +175,133 @@ function separateCards(raw) {
     placed.push(point);
   }
   return points;
+}
+
+// Display refinement constants are independent of agent names, kinds and roles.
+// At n<=256 the dense path matrix and one Cholesky factorization are bounded;
+// all iterations reuse the same factorization and never run a live simulation.
+export const SPACING_ITERATIONS = 36;
+const SPECTRAL_ANCHOR_STRENGTH = .06;
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+function seedTiedPoints(raw) {
+  const seeded = raw.map(point => ({...point}));
+  const visited = new Set();
+  for (let i = 0; i < raw.length; i++) {
+    if (visited.has(i)) continue;
+    const tied = [];
+    for (let j = i; j < raw.length; j++) if (Math.hypot(raw[i].x - raw[j].x, raw[i].y - raw[j].y) < 1e-6) {
+      tied.push(j); visited.add(j);
+    }
+    if (tied.length < 2) continue;
+    // Equal spectral coordinates cannot choose a direction by themselves.
+    // A canonical-ID-ordered, centered sunflower breaks that display tie in
+    // two dimensions. It does not change the raw coordinates or eigenmodes.
+    const offsets = tied.map((_, k) => ({x: Math.sqrt(k + .5) * WIDTH * .62 * Math.cos(k * GOLDEN_ANGLE), y: Math.sqrt(k + .5) * HEIGHT * .8 * Math.sin(k * GOLDEN_ANGLE)}));
+    const center = offsets.reduce((sum, p) => ({x: sum.x + p.x / offsets.length, y: sum.y + p.y / offsets.length}), {x: 0, y: 0});
+    tied.forEach((j, k) => {seeded[j].x += offsets[k].x - center.x; seeded[j].y += offsets[k].y - center.y;});
+  }
+  return seeded;
+}
+
+/**
+ * Refine one connected component while retaining its spectral anchors.
+ *
+ * The objective is a constrained weighted stress, not a role-based force rule:
+ *   E(X) = sum_{i<j} (||Xi-Xj|| - dij)^2 / dij^2
+ *          + lambda * sum_i ||Xi-Si||^2,
+ * with non-overlapping card rectangles. Si are the original spectral points.
+ * dij are weighted shortest-path lengths, scaled uniformly for card density.
+ * Their edge costs are clamp(sqrt(median(w)/w), .4, 2.5), where w is log1p
+ * retained traffic. lambda=.06 times mean row degree of the stress Laplacian.
+ *
+ * Anchored SMACOF majorization is followed by readable-card projection each
+ * iteration. Projection is approximate, so monotonic descent/global optimality
+ * is NOT claimed. We retain the best feasible objective encountered, starting
+ * with a feasible spectral layout. The displayed diagnostics report both
+ * stress and displacement honestly; spectra/Leiden are never modified.
+ *
+ * ids must be canonical and points aligned to ids. Inputs are never mutated.
+ */
+export function refineSpectralSpacing(ids, edges, raw) {
+  const n = ids.length;
+  if (n < 2 || n > ANALYSIS_NODE_LIMIT || !edges.length) return {points: separateCards(raw), diagnostics: null};
+  const index = new Map(ids.map((id, i) => [id, i]));
+  const localEdges = edges.filter(edge => index.has(edge.source) && index.has(edge.target) && edge.source !== edge.target && Number.isFinite(edge.weight) && edge.weight > 0);
+  if (!localEdges.length) return {points: separateCards(raw), diagnostics: null};
+  const sortedWeights = localEdges.map(edge => edge.weight).sort((a, b) => a - b);
+  const middle = Math.floor(sortedWeights.length / 2);
+  const medianWeight = sortedWeights.length % 2 ? sortedWeights[middle] : (sortedWeights[middle - 1] + sortedWeights[middle]) / 2;
+  const paths = Array.from({length: n}, (_, i) => Float64Array.from({length: n}, (_, j) => i === j ? 0 : Infinity));
+  for (const edge of localEdges) {
+    const i = index.get(edge.source), j = index.get(edge.target);
+    const length = Math.max(.4, Math.min(2.5, Math.sqrt(medianWeight / edge.weight)));
+    paths[i][j] = Math.min(paths[i][j], length);
+    paths[j][i] = paths[i][j];
+  }
+  for (let k = 0; k < n; k++) for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const through = paths[i][k] + paths[k][j];
+    if (through < paths[i][j]) {paths[i][j] = through; paths[j][i] = through;}
+  }
+  const pairs = [];
+  let squaredDistance = 0;
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    if (!Number.isFinite(paths[i][j])) throw new Error('Spacing requires one connected component');
+    pairs.push({i, j, distance: paths[i][j]});
+    squaredDistance += paths[i][j] ** 2;
+  }
+  const desiredRmsDistance = Math.max(430, 210 * Math.sqrt(n));
+  const scale = desiredRmsDistance / Math.sqrt(squaredDistance / pairs.length);
+  const matrix = Matrix.zeros(n, n);
+  let degreeSum = 0;
+  for (const pair of pairs) {
+    pair.distance *= scale;
+    pair.weight = 1 / pair.distance ** 2;
+    matrix.set(pair.i, pair.j, -pair.weight);
+    matrix.set(pair.j, pair.i, -pair.weight);
+    matrix.set(pair.i, pair.i, matrix.get(pair.i, pair.i) + pair.weight);
+    matrix.set(pair.j, pair.j, matrix.get(pair.j, pair.j) + pair.weight);
+    degreeSum += 2 * pair.weight;
+  }
+  const anchorWeight = SPECTRAL_ANCHOR_STRENGTH * degreeSum / n;
+  for (let i = 0; i < n; i++) matrix.set(i, i, matrix.get(i, i) + anchorWeight);
+  const factor = new CholeskyDecomposition(matrix);
+  const score = points => {
+    let stress = 0, displacement = 0;
+    for (const {i, j, distance, weight} of pairs) stress += weight * (Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y) - distance) ** 2;
+    for (let i = 0; i < n; i++) displacement += (points[i].x - raw[i].x) ** 2 + (points[i].y - raw[i].y) ** 2;
+    return {stress: stress / pairs.length, objective: (stress + anchorWeight * displacement) / pairs.length, rmsDisplacement: Math.sqrt(displacement / n)};
+  };
+  // Keep the prior collision-only solution as a feasible candidate too: the
+  // refinement may change it only when the declared objective improves.
+  const baseline = separateCards(raw);
+  let points = separateCards(seedTiedPoints(raw), 6);
+  const before = score(baseline), seeded = score(points);
+  let best = seeded.objective < before.objective ? points : baseline;
+  let bestScore = seeded.objective < before.objective ? seeded : before;
+  let iterations = 0;
+  for (; iterations < SPACING_ITERATIONS; iterations++) {
+    const rhs = Matrix.zeros(n, 2);
+    for (let i = 0; i < n; i++) {rhs.set(i, 0, anchorWeight * raw[i].x); rhs.set(i, 1, anchorWeight * raw[i].y);}
+    for (const {i, j, distance, weight} of pairs) {
+      const dx = points[i].x - points[j].x, dy = points[i].y - points[j].y;
+      const length = Math.max(1e-9, Math.hypot(dx, dy));
+      const coefficient = weight * distance / length;
+      rhs.set(i, 0, rhs.get(i, 0) + coefficient * dx); rhs.set(j, 0, rhs.get(j, 0) - coefficient * dx);
+      rhs.set(i, 1, rhs.get(i, 1) + coefficient * dy); rhs.set(j, 1, rhs.get(j, 1) - coefficient * dy);
+    }
+    const solved = factor.solve(rhs);
+    const next = separateCards(points.map((point, i) => ({x: .25 * point.x + .75 * solved.get(i, 0), y: .25 * point.y + .75 * solved.get(i, 1)})), 6);
+    const nextScore = score(next);
+    if (!Number.isFinite(nextScore.objective)) throw new Error('Nonfinite spacing refinement');
+    if (nextScore.objective < bestScore.objective) {best = next; bestScore = nextScore;}
+    const movement = Math.max(...next.map((point, i) => Math.hypot(point.x - points[i].x, point.y - points[i].y)));
+    points = next;
+    if (movement < .1) {iterations++; break;}
+  }
+  return {points: best.map(point => ({...point})), diagnostics: {iterations, pairCount: pairs.length, desiredRmsDistance,
+    anchorStrength: SPECTRAL_ANCHOR_STRENGTH, stressBefore: before.stress, stressAfter: bestScore.stress,
+    objectiveBefore: before.objective, objectiveAfter: bestScore.objective, rmsDisplacement: bestScore.rmsDisplacement}};
 }
 
 function makeCommunities(groups) {
@@ -232,12 +359,21 @@ export function analyzeGraph(model = {}) {
       warnings.push(`Spectral analysis could not resolve a ${ids.length}-agent component; that component uses a grid.`);
       result = {eigenvalues: [], modes: [], layout: 'grid', points: gridPoints(ids.length)};
     }
-    const readable = result.layout === 'spectral' ? separateCards(result.points) : result.points.map(point => ({...point}));
-    const minX = Math.min(...readable.map(point => point.x), ...result.points.map(point => point.x));
-    const minY = Math.min(...readable.map(point => point.y), ...result.points.map(point => point.y));
-    const width = Math.max(...readable.map(point => point.x), ...result.points.map(point => point.x)) - minX + CARD_WIDTH;
-    const height = Math.max(...readable.map(point => point.y), ...result.points.map(point => point.y)) - minY + CARD_HEIGHT;
-    components.push({id: `component:${JSON.stringify(ids)}`, ids, eigenvalues: result.eigenvalues, modes: result.modes, layout: result.layout});
+    let refinement;
+    try {
+      refinement = result.layout === 'spectral' ? refineSpectralSpacing(ids, componentEdges[i], result.points) : {points: result.points.map(point => ({...point})), diagnostics: null};
+    } catch {
+      warnings.push(`Relationship spacing could not resolve a ${ids.length}-agent component; retaining spectral card spacing.`);
+      refinement = {points: separateCards(result.points), diagnostics: null};
+    }
+    const readable = refinement.points;
+    // Pack the displayed geometry. The raw spectral geometry receives the same
+    // translation, but need not reserve blank space outside readable cards.
+    const minX = Math.min(...readable.map(point => point.x));
+    const minY = Math.min(...readable.map(point => point.y));
+    const width = Math.max(...readable.map(point => point.x)) - minX + CARD_WIDTH;
+    const height = Math.max(...readable.map(point => point.y)) - minY + CARD_HEIGHT;
+    components.push({id: `component:${JSON.stringify(ids)}`, ids, eigenvalues: result.eigenvalues, modes: result.modes, layout: result.layout, spacing: refinement.diagnostics});
     return {ids, readable, raw: result.points, minX, minY, width, height};
   });
   // Components share no spectral coordinate system, so pack their own canvases.
@@ -266,7 +402,7 @@ export function analyzeGraph(model = {}) {
     signature: signatureFor(graph), positions, rawPositions, communities, communityByAgent, components,
     stats: {agents: graph.ids.length, relationships: graph.edges.length, components: groups.length, isolates: groups.filter(ids => ids.length === 1).length, communities: communities.length, modularity},
     method: {
-      layout: components.some(component => component.layout === 'grid') ? 'Grid fallback (see analysis warning)' : 'Normalized Laplacian · lowest nonzero modes · collision spacing',
+      layout: components.some(component => component.layout === 'grid') ? 'Grid fallback (see analysis warning)' : warnings.some(warning => warning.startsWith('Relationship spacing')) ? 'Normalized Laplacian · spectral card spacing fallback' : 'Normalized Laplacian · anchored graph-distance stress · card spacing',
       community: limited || warnings.some(warning => warning.startsWith('Leiden')) ? 'Connected components (Leiden unavailable)' : 'Leiden · weighted modularity · resolution 1 · three seeded starts',
       weighting: 'Undirected weight = log(1 + retained messages in both directions); self-messages excluded',
     },

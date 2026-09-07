@@ -4,8 +4,8 @@ A locally bundled Svelte Flow view of the existing authorized bus snapshot. The
 host dashboard owns authentication, fetching, filters, and permissions; this
 widget makes no requests and stores nothing in cookies or browser storage.
 
-The initial layout uses normalized-Laplacian spectral coordinates with a
-separate pass for readable card spacing. Leiden communities add neutral group
+The initial layout uses normalized-Laplacian spectral coordinates with
+relationship-aware card spacing. Leiden communities add neutral group
 labels and colors. **Devices** retains the owner/device grid as an alternative.
 Nodes can be moved freely, and the viewport supports pan, zoom, fit, and a minimap.
 The standalone graph page fills its host
@@ -24,6 +24,12 @@ members, and weighted modularity. New traffic updates the displayed arrows;
 **Recompute** explicitly updates the analysis and arrangement. Pins retain an
 agent's chosen position during recomputation. All state remains in page memory.
 
+Select an agent and choose **Set apart as conductor** to give it a separate
+position above the network. The viewer assigns this visual role explicitly;
+traffic does not imply authority. The agent remains visible when its community
+is collapsed, with all directed message counts preserved. Clear the choice to
+restore ordinary placement. Recompute reapplies it unless that agent is pinned.
+
 ## Mathematical model
 
 Both calculations consume only the sanitized, visible graph. Undirected weights
@@ -35,9 +41,11 @@ the display. Self-messages do not influence analysis. See
   component's symmetric normalized Laplacian. Pairs have one mode; isolates
   have none. Canonical ID order, eigenspace projection, and sign orientation
   make identical inputs reproducible, including repeated eigenvalues.
-- Card spacing moves only overlapping rectangles, with bounded correction and
-  a legal-gap fallback. It does not replace spectral geometry with a spring
-  layout. Disconnected components are packed independently.
+- Card spacing refines the spectral starting positions using weighted
+  graph-distance stress, a spectral anchor, and rectangle separation. Strong
+  connections prefer shorter distances, and densely connected neighborhoods
+  influence the spread. The bounded refinement does not change reported
+  eigenvectors or eigenvalues. Disconnected components are packed independently.
 - Leiden optimizes weighted modularity at resolution one. Three seeded starts
   (`17`, `29`, `43`), each with ten iterations, select the highest objective;
   canonical membership order resolves ties. The implementation is
@@ -119,8 +127,12 @@ graph.destroy();
 
 The pure-model tests cover known spectra, eigenvector residuals, degenerate
 eigenspaces, weighted modularity, connected communities, card collisions,
-determinism, authorization boundaries, directed aggregation, and state pruning.
+fixed-coordinate relationship changes, deterministic stress refinement,
+authorization boundaries, directed aggregation, and state pruning.
 `scripts/test-bus-graph-browser.py` covers navigation, dragging through refresh,
 zoom, mobile layout, and revocation. `scripts/test-bus-spectral-browser.py` checks
 analysis controls, collapsed traffic accounting, stale analysis, pinned positions,
 and removal from hidden community/analysis state against a temporary real broker.
+`scripts/test-bus-conductor-browser.py` checks explicit conductor placement,
+vertical message paths, collapse accounting, pin precedence, restoration, and
+clearing scope or identity changes with all network requests blocked.

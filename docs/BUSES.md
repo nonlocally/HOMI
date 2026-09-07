@@ -167,13 +167,19 @@ switches buses, searches agents, and opens the user/device/status filters.
 permitted roster; a URL never grants bus access. Device labels and account names
 appear on each node, with immutable IDs to distinguish duplicate names.
 
-The default **Spectral** layout uses the communication graph to place agents.
+The default **Spectral** layout uses the communication graph to place agents,
+then refines their spacing using connection strength and weighted graph distances.
 **Devices** keeps the owner/device directory arrangement available. The
 **Communities** layer groups agents by their observed traffic using Leiden;
 open a group to inspect its members or collapse it to see traffic between groups.
 These inferred groups are view controls, separate from bus membership and access.
 The **Analysis** panel explains the weighting, spectrum, and community objective.
 See [Graph analysis](GRAPH-ANALYSIS.md) for the mathematical model and its limits.
+
+To distinguish a coordinator visually, select that agent and choose **Set apart
+as conductor**. It gets a separate position above the network and stays visible
+when its community is collapsed. This is a viewer choice, not a role inferred
+from message volume. It creates no new edges and changes no agent behavior.
 
 Drag nodes to arrange them; drag the background to pan. Scroll with the mouse
 wheel or two fingers, or pinch, to zoom around the pointer. Selecting an agent
