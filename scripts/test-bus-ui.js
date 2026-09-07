@@ -13,7 +13,7 @@ const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 function element(tag) {
   return {
     tagName:tag, children:[], attrs:{}, dataset:{}, className:'', value:'', hidden:false,
-    disabled:false, open:false, checked:false, required:false, _text:'', events:{},
+    disabled:false, open:false, checked:false, required:false, _text:'', events:{},scrollHeight:0,scrollTop:0,clientHeight:0,
     set textContent(value) {this.children=[];this._text=String(value);},
     get textContent() {return this._text+this.children.map(child=>child.textContent).join('');},
     set innerHTML(_) {throw new Error('Untrusted HTML must never be parsed');},
@@ -21,7 +21,7 @@ function element(tag) {
     append(...children) {this.children.push(...children);},
     replaceChildren(...children) {this._text='';this.children=children;},
     addEventListener(name,handler) {(this.events[name] ||= []).push(handler);},
-    async fire(name) {await Promise.all((this.events[name] || []).map(handler => handler({target:this,preventDefault(){}})));},
+    async fire(name,values={}) {await Promise.all((this.events[name] || []).map(handler => handler({target:this,...values,preventDefault(){}})));},
     showModal() {this.open=true;},
     close() {this.open=false;this.fire('close');},
   };
@@ -52,7 +52,7 @@ function page({hash='#token=secret', storedToken='', snapshot=fixture(), origin=
   }};
   const context={
     CommunicateGraph:graphRenderer,
-    document,URL,URLSearchParams,TextEncoder,AbortController,Map,Set,Date,
+    document,URL,URLSearchParams,TextEncoder,AbortController,Map,Set,Date,crypto:require('node:crypto').webcrypto,
     location:{hash,pathname,search,origin,assign:url=>navigations.push(url)},
     history:{replaceState(_state,_title,url){history.push(url);context.location.hash='';}},
     sessionStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
@@ -377,7 +377,7 @@ function fixture() {
   assert.equal(graphPage.ids['table-wrap'].hidden,true);
   assert.equal(graphPage.ids['view-graph'].attrs['aria-current'],'page');
   assert.equal(graphCalls.at(-1).agents.length,3);
-  assert.deepEqual(Object.keys(graphCalls.at(-1)).sort(),['agents','buses','scope','standalone']);
+  assert.deepEqual(Object.keys(graphCalls.at(-1)).sort(),['agents','buses','chat','scope','standalone']);
   assert.equal(graphCalls.at(-1).standalone,true);
   assert.equal(graphPage.ids.app.dataset.page,'graph');
   assert.equal(graphPage.ids['graph-topbar'].hidden,false);
@@ -423,4 +423,100 @@ function fixture() {
   assert.equal(directory.ids['table-wrap'].hidden,false);
   assert.equal(directory.ids['graph-panel'].hidden,true);
   console.log('ok standalone graph links, permitted URL selection, filters, no credentials, revocation clear and asset fallback');
+  function chatFixture() {return {...fixture(),is_admin:false,browser_session:true,read_only:true,user:'aadarsh',chat:{enabled:true,buses:['general','photonics'],openwebui:[{bus:'general',agent:'a'},{bus:'photonics',agent:'a'}]}};}
+  function summary(id='chat-a',agent=fixture().buses[0].agents[0],bus='general') {return {id,bus,agent,unread:1,can_send:true,created_at:1,updated_at:2};}
+  function message(seq,role='assistant',content='<img src=x onerror=alert(1)>',status='replied') {return {id:'m'+seq,seq,role,content,status,created_at:2};}
+  function children(root) {return [root,...root.children.flatMap(children)];}
+  const own=page({snapshot:chatFixture()});
+  let ownMessages=[message(1)],ownChats=[summary()];
+  own.setHandler(request => {
+    if (request.op==='snapshot') return chatFixture();
+    if (request.op==='chat_list') return {ok:true,chats:ownChats};
+    if (request.op==='chat_open') return {ok:true,chat:ownChats[0]};
+    if (request.op==='chat_messages') return {ok:true,chat:ownChats[0],messages:ownMessages.filter(m=>m.seq>request.after),next_after:ownMessages.at(-1)?.seq || 0,has_more:false};
+    if (request.op==='chat_read') return {ok:true,unread:0};
+    if (request.op==='chat_send') {const sent={...message(ownMessages.length+1,'user',request.message,'queued'),request_id:request.request_id};ownMessages.push(sent);return {ok:true,chat:'chat-a',message:sent,deduplicated:false};}
+    throw new Error('unexpected operation '+request.op);
+  });
+  await flush();assert.equal(own.ids['inbox-button'].hidden,false);
+  assert.equal(own.ids['inbox-button'].textContent,'Inbox · 1');
+  await own.ids['inbox-button'].fire('click');await flush();
+  assert.equal(own.ids['chat-dialog'].open,true);
+  assert.equal(own.ids['chat-inbox'].children.length,1);
+  await own.ids['chat-inbox'].children[0].fire('click');await flush();
+  assert.equal(own.ids['chat-form'].hidden,false,'allowlisted directory reader can chat without gaining admin rights');
+  assert.equal(own.ids['invite-button'].hidden,true);
+  assert.ok(own.ids['chat-messages'].textContent.includes('<img src=x onerror=alert(1)>'));
+  assert.equal(own.ids['chat-registration'].textContent,'Agent ID: a');
+  assert.equal(own.ids['chat-device-id'].textContent,'Device ID: device-a');
+  assert.equal(own.ids['chat-nonlocally'].attrs.href,'https://mit.nonlocally.org/?models=communicate_bus.general--a');
+  assert.ok(own.requests.some(r=>r.op==='chat_read' && r.through===1));
+  assert.ok(!own.requests.some(r=>r.op==='chat_send'),'opening inbox/history does not send');
+  own.ids['chat-input'].value='Hello exact agent';await own.ids['chat-input'].fire('input');
+  await own.ids['chat-form'].fire('submit');
+  assert.equal(own.requests.at(-1).op,'chat_send');assert.match(own.requests.at(-1).request_id,/^[a-f0-9-]{36}$/);
+  assert.equal(own.requests.at(-1).chat,'chat-a');
+  assert.ok(own.ids['chat-messages'].textContent.includes('Queued for agent · awaiting reply'));
+  assert.equal(own.ids['chat-input'].value,'');
+  assert.ok(!own.requests.some(r=>Object.hasOwn(r,'sender')),'human identity is assigned by broker');
+  console.log('ok human allowlist, own inbox, exact identity/deep-link, plain text, read acknowledgment, and honest queued receipt');
+
+  const retry=page({snapshot:chatFixture()});let retryRequests=[];
+  retry.setHandler(request => {
+    if (request.op==='snapshot') return chatFixture();
+    if (request.op==='chat_list') return {ok:true,chats:[summary()]};
+    if (request.op==='chat_messages') return {ok:true,chat:summary(),messages:[],next_after:0,has_more:false};
+    if (request.op==='chat_send') {retryRequests.push(request);return retryRequests.length===1 ? {ok:false,status:503,error:'Connection interrupted'} : {ok:true,chat:'chat-a',message:message(1,'user',request.message,'accepted'),deduplicated:true};}
+    return {ok:true};
+  });await flush();await retry.ids['inbox-button'].fire('click');await flush();await retry.ids['chat-inbox'].children[0].fire('click');
+  retry.ids['chat-input'].value='One intentional message';await retry.ids['chat-form'].fire('submit');
+  assert.equal(retry.ids['chat-input'].value,'One intentional message');assert.equal(retry.ids['chat-retry'].hidden,false);
+  await retry.ids['chat-retry'].fire('click');assert.equal(retryRequests[0].request_id,retryRequests[1].request_id);
+  retry.ids['chat-input'].value='One intentional message';await retry.ids['chat-form'].fire('submit');
+  assert.notEqual(retryRequests[1].request_id,retryRequests[2].request_id,'a later intentional identical message gets a fresh request id');
+  console.log('ok uncertain-send retry retains idempotency key; repeated intentional messages stay distinct');
+
+  const selection=page({snapshot:chatFixture()});let finishOld,oldSignal;
+  const second=summary('chat-b',fixture().buses[0].agents[1]);
+  selection.setHandler(request => {
+    if (request.op==='snapshot') return chatFixture();
+    if (request.op==='chat_list') return {ok:true,chats:[summary(),second]};
+    if (request.op==='chat_messages' && request.chat==='chat-a') {oldSignal=request.options.signal;return new Promise(resolve=>finishOld=resolve);}
+    if (request.op==='chat_messages') return {ok:true,chat:second,messages:[message(1,'assistant','Current conversation')],next_after:1,has_more:false};
+    return {ok:true,unread:0};
+  });await flush();await selection.ids['inbox-button'].fire('click');await flush();
+  const pendingOld=selection.ids['chat-inbox'].children[0].fire('click');await flush();
+  await selection.ids['chat-back'].fire('click');await flush();
+  await selection.ids['chat-inbox'].children[1].fire('click');await flush();assert.equal(oldSignal.aborted,true);
+  finishOld({ok:true,chat:summary(),messages:[message(1,'assistant','STALE PRIVATE HISTORY')],next_after:1,has_more:false});await pendingOld;await flush();
+  assert.ok(!selection.ids['chat-messages'].textContent.includes('STALE'));assert.ok(selection.ids['chat-messages'].textContent.includes('Current conversation'));
+  let completeRevoked;selection.setHandler(request => request.op==='chat_messages' ? new Promise(resolve=>completeRevoked=resolve) : request.op==='snapshot' ? {...chatFixture(),chat:{enabled:false,buses:[]}} : {ok:true,chats:[second]});
+  const pendingRevoked=selection.ids['chat-retry'].fire('click');await flush();await selection.ids.refresh.fire('click');
+  assert.equal(selection.ids['chat-dialog'].open,false);assert.equal(selection.ids['chat-messages'].textContent,'');assert.equal(selection.ids['chat-form'].hidden,true);
+  assert.equal(selection.ids['chat-registration'].textContent,'');assert.equal(selection.ids['chat-nonlocally'].attrs.href,'');
+  completeRevoked({ok:true,chat:second,messages:[message(2,'assistant','REVOKED HISTORY')],next_after:2,has_more:false});await pendingRevoked;
+  assert.equal(selection.ids['chat-messages'].textContent,'');assert.equal(selection.ids['inbox-button'].hidden,true);
+  console.log('ok switching conversations and scope revocation abort requests and reject late private responses');
+
+  const deviceToken=page({snapshot:{...chatFixture(),browser_session:false}});await flush();
+  assert.equal(deviceToken.ids['inbox-button'].hidden,true);assert.equal(deviceToken.ids['chat-form'].hidden,true);
+  assert.ok(!deviceToken.requests.some(r=>r.op.startsWith('chat_')),'device tokens never access human chat');
+  const otherHuman=page({snapshot:{...chatFixture(),user:'another-reader',chat:{enabled:false,buses:[]}}});await flush();
+  assert.equal(otherHuman.ids['inbox-button'].hidden,true);
+  assert.ok(!otherHuman.requests.some(r=>r.op.startsWith('chat_')),'non-allowlisted readers stay directory-only');
+  const multi=page({snapshot:chatFixture()});multi.setHandler(r=>r.op==='snapshot' ? chatFixture() : {ok:true,chats:[]});await flush();
+  const multiButton=children(multi.ids['agent-rows']).find(el=>el.attrs['aria-label']==='Chat with research');await multiButton.fire('click');
+  assert.equal(multi.ids['chat-bus-field'].hidden,false);assert.equal(multi.ids['chat-start'].hidden,false);
+  assert.ok(!multi.requests.some(r=>r.op==='chat_open'),'multiple eligible buses require a visible bus choice before opening');
+  multi.ids['chat-bus'].value='photonics';await multi.ids['chat-bus'].fire('change');
+  assert.equal(multi.ids['chat-nonlocally'].attrs.href,'https://mit.nonlocally.org/?models=communicate_bus.photonics--a');
+  const unconfiguredData={...chatFixture(),chat:{enabled:true,buses:['general','photonics']}};
+  const unconfigured=page({snapshot:unconfiguredData});unconfigured.setHandler(r=>r.op==='snapshot' ? unconfiguredData : {ok:true,chats:[]});await flush();
+  await children(unconfigured.ids['agent-rows']).find(el=>el.attrs['aria-label']==='Chat with research').fire('click');
+  assert.equal(unconfigured.ids['chat-nonlocally'].hidden,true,'missing deployed Pipe catalog defaults to no external link');
+  assert.equal(unconfigured.ids['chat-start'].hidden,false,'native chat remains available before Pipe deployment');
+  multi.setHandler(r=>r.op==='snapshot' ? {...chatFixture(),chat:{...chatFixture().chat,openwebui:[{bus:'general',agent:'b'}]}} : {ok:false,status:503,error:'Inbox unavailable'});
+  await multi.ids.refresh.fire('click');await flush();
+  assert.equal(multi.ids['chat-nonlocally'].hidden,true,'catalog removal takes effect before a successful inbox poll');
+  console.log('ok human-only permission gate, explicit multi-bus choice, and default-deny exact deployed Pipe catalog');
 })().catch(error=>{console.error(error);process.exitCode=1;});

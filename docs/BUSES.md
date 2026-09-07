@@ -377,6 +377,72 @@ removes that fragment immediately and keeps the credential only in session
 storage. Protect the URL like a password. Closing the session or clicking
 Disconnect clears browser access; device access is revoked separately by the owner.
 
+## Chat with an existing agent
+
+On the hosted graph, select an agent and choose **Chat**. The drawer shows its
+exact registration, account, device and bus; **Inbox** reopens your conversations.
+Selecting an agent or opening a conversation sends nothing. Enter a message and
+press Send (or Enter; Shift+Enter adds a line). Replies and unread counts survive a reload or
+closing the browser. The directory offers the same chat controls.
+
+Human messaging has a separate explicit allowlist. Initially only Aadarwal can
+use it. OpenWebUI group viewing, GitHub viewer access and enrolled device tokens
+do not grant human chat permission. The owner configures `BUS_CHAT_READERS` in
+the hub's private settings as a JSON map of trusted reader IDs to
+`{"identity":"canonical-person","buses":["allowed-bus"]}`. Access is the
+intersection of this configuration and the reader's current bus view. Separately
+verified GitHub and OpenWebUI IDs can be explicitly linked to the same canonical
+identity; the system never infers a link from names or email addresses.
+
+Chats target an exact published registration ID, so two agents with the same
+name cannot receive each other's messages. The human inbox is separate from the
+agent roster and connection graph. Its messages do not create graph edges, and
+no agent transcripts are scraped. Claude receives the existing socket delivery;
+Codex receives a turn in the exact existing thread's queue. These paths work
+with the existing 0.2.3 client. The agent must run the supplied
+`communicate bus --hub ORIGIN reply MESSAGE_ID --from AGENT_ID -- ANSWER`
+command to answer the human. Answering only in its own terminal conversation
+does not populate the inbox.
+
+Each human send has a 24-hour delivery/reply window. Explicit replies are shown
+as **replied**, independently of the outgoing message's transport status.
+History and request-ID deduplication are retained for 30 days, with finite inbox
+and queue limits. Retrying the same request UUID and content within that window
+does not enqueue it twice; changed content with the same UUID is rejected.
+Delivery itself retains the existing at-least-once crash-recovery semantics.
+
+Browser reads and sends require current access. OpenWebUI membership checks may
+be cached for at most 60 seconds. Already accepted work cannot be retracted from
+an agent. Broker config or agent publication changes close affected reply
+windows; a reduced view observed by the broker also closes them permanently.
+Workers do not independently query OpenWebUI, so a group removal rejected at the
+gateway can leave an already accepted reply window open until expiry. The
+removed reader still cannot read or send through the gateway. Unpublished
+agents' histories are hidden until publication and access are restored; closed
+old sends never reopen.
+
+**Open in Nonlocally** selects that same registered agent in OpenWebUI at
+`mit.nonlocally.org`. The reviewed `communicate_bus` Function and exact private
+model metadata must be installed there first. It uses your actual OpenWebUI
+session, sends only your newest typed text, and waits briefly for a correlated
+reply. It never creates a replacement model session or falls back to another
+model. Auxiliary title/tag/follow-up tasks send nothing. Earlier graph history
+and later replies remain under **Open bus conversation**, even when OpenWebUI's
+local transcript only contains turns sent from OpenWebUI. Agent model entries
+are explicitly configured; newly registered agents need their exact entry added.
+The link appears only for entries in the hub's `BUS_CHAT_OPENWEBUI_TARGETS`
+JSON list of `{"bus":"allowed-bus","agent":"a_exact_registration_id"}`.
+Populate this list only after those exact private OpenWebUI models are installed;
+an empty list leaves graph chat working and hides unavailable OpenWebUI links.
+
+The Pipe forwards the current user credential only to
+`POST https://bus.nonlocally.org/_bus/chat/bridge`. The gateway verifies it with
+OpenWebUI, checks the expected user and groups, then forwards fresh trusted
+reader context to the origin's private `POST /_bus/chat`. The user's OpenWebUI
+credential never reaches the broker. Both paths allow only `chat_open`,
+`chat_list`, `chat_messages`, `chat_send` and `chat_read`; the direct origin path
+is hidden at the public gateway. No additional signing key is required.
+
 ## Security and delivery
 
 The credential authenticates an installation, not a real-world person or an
@@ -457,6 +523,19 @@ The deterministic checks are:
 scripts/test-bus.sh
 scripts/test-communicate-dist.sh
 ```
+
+With the gateway and platform source checkouts available, the optional
+cross-repository acceptance fixture exercises the real Pipe, gateway handler,
+broker HTTP server and a disposable recipient. Only the identity provider and
+network origin adapters are fixtures:
+
+```sh
+python3 scripts/test-bus-chat-stack.py --gateway-source /path/to/communicate-site --platform-source /path/to/openweb-marimo-platform
+```
+
+It requires Node and the Pipe's Python dependencies (`httpx`, Pydantic 2,
+`starlette`). It contacts no live provider or agent. The standalone browser
+fixture is `python3 scripts/test-bus-chat-browser.py` with Playwright installed.
 
 The client suite uses isolated homes, a real certificate-verified TLS server,
 real Unix sockets, and a Codex argv fixture. It tests independent installations

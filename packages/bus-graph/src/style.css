@@ -33,3 +33,8 @@
 /* Flow remains the same full canvas, with a direction choice and local corrections. */
 .cg-shell select[aria-label="Flow direction"]{max-width:130px}.cg-agent[data-flow-root=true]{box-shadow:-3px 0 0 -1px #8d8260,0 4px 12px #0003}.cg-parent-picker{display:flex;flex-direction:column;gap:7px;margin:17px 0;color:#b8b2a0;font-size:11px}.cg-shell .cg-parent-picker select{width:100%;max-width:none;font-size:10px}.cg-parent-picker small{color:#797669;font-size:9px;line-height:1.6}.cg-shell .cg-parent-picker select:disabled{color:#747265;opacity:.75}
 @media(max-width:640px){.cg-standalone .cg-actions{flex-wrap:wrap;justify-content:flex-start}.cg-shell select[aria-label="Flow direction"]{max-width:115px}.cg-standalone .cg-actions button{flex:none}.cg-conductor-summary{max-width:calc(100vw - 45px)}}
+.cg-chat-actions { margin: 14px 0 18px; padding-bottom: 14px; border-bottom: 1px solid #30302c; }
+.cg-chat-actions .cg-detail-actions { flex-wrap: wrap; gap: 8px; }
+.cg-chat-actions a { color: #d1cfc5; font-size: 11px; text-underline-offset: 3px; }
+.cg-chat-actions .cg-chat-primary { background: #f6f5f1; color: #131312; border-color: #f6f5f1; }
+.cg-unread { margin-left: 6px; padding: 1px 5px; border-radius: 9px; background: #fab219; color: #131312; font-size: 10px; }

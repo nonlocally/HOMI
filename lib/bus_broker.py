@@ -36,7 +36,15 @@ MAX_INVITES = 4096
 MAX_RECORDS = 20000
 MAX_SSO_REPLAYS = 4096
 MAX_VIEW_HEADER = 8192
+MAX_CHATS = 4096
+MAX_CHATS_PER_IDENTITY = 128
+MAX_CHAT_MESSAGES = 20000
+MAX_CHAT_MESSAGES_PER_CHAT = 2000
+MAX_CHAT_SEEN = 80000
+MAX_CHAT_PAGE_BYTES = 512 * 1024
+MAX_CHAT_OPENWEBUI_TARGETS = 256
 MESSAGE_TTL = 86400
+CHAT_RETENTION = 30 * MESSAGE_TTL
 RECEIPT_RETENTION = 7 * MESSAGE_TTL
 LIVE_TTL = 45
 LEASE_TTL = 60
@@ -45,6 +53,9 @@ USER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}\Z")
 DEVICE_FIELDS = {"hostname": 253, "platform": 64, "tailscale_hostname": 253, "tailscale_dns_name": 253}
 ACTIVE = ("accepted", "leased")
 TERMINAL = ("delivered", "queued", "failed", "expired", "cancelled")
+CHAT_OPS = frozenset(("chat_open", "chat_list", "chat_messages", "chat_send", "chat_read"))
+CHAT_FIELDS = {"chat_open": {"bus", "agent"}, "chat_list": set(), "chat_messages": {"chat", "after", "limit"},
+               "chat_send": {"chat", "request_id", "message"}, "chat_read": {"chat", "through"}}
 
 
 class BusError(Exception):
@@ -124,6 +135,34 @@ class Broker:
         except (ValueError, TypeError, BusError):
             raise ValueError("BUS_READER_USERS must map reader logins to valid user handles") from None
         self.users = sorted(set(self.reader_users.values()))
+        try:
+            self.chat_readers = json.loads(os.environ.get("BUS_CHAT_READERS", "{}"), object_pairs_hook=_unique_object)
+            if not isinstance(self.chat_readers, dict) or len(self.chat_readers) > MAX_PRINCIPALS:
+                raise ValueError()
+            for reader, grant in self.chat_readers.items():
+                if (not isinstance(reader, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", reader)
+                        or not isinstance(grant, dict) or set(grant) != {"identity", "buses"}
+                        or not isinstance(grant["buses"], list) or len(grant["buses"]) > 64
+                        or len(set(grant["buses"])) != len(grant["buses"])):
+                    raise ValueError()
+                _user(grant["identity"])
+                for bus in grant["buses"]:
+                    _bus(bus)
+        except (ValueError, TypeError, BusError):
+            raise ValueError("BUS_CHAT_READERS must map trusted readers to explicit identity and bus grants") from None
+        try:
+            targets = json.loads(os.environ.get("BUS_CHAT_OPENWEBUI_TARGETS", "[]"), object_pairs_hook=_unique_object)
+            if not isinstance(targets, list) or len(targets) > MAX_CHAT_OPENWEBUI_TARGETS:
+                raise ValueError()
+            unique = set()
+            for target in targets:
+                if (not isinstance(target, dict) or set(target) != {"bus", "agent"}
+                        or not isinstance(target["agent"], str) or not re.fullmatch(r"a_[0-9a-f]{32}", target["agent"])):
+                    raise ValueError()
+                unique.add((_bus(target["bus"]), target["agent"]))
+            self.chat_openwebui_targets = tuple(sorted(unique))
+        except (ValueError, TypeError, BusError):
+            raise ValueError("BUS_CHAT_OPENWEBUI_TARGETS must list exact installed bus and agent targets") from None
         self.root = Path(state_dir).expanduser().absolute()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.root.is_symlink() or self.root.stat().st_uid != os.getuid():
@@ -195,6 +234,26 @@ class Broker:
                   created_at REAL NOT NULL, expires_at REAL NOT NULL,
                   lease TEXT, lease_until REAL, updated_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS message_delivery ON messages(target,status,created_at);
+                CREATE TABLE IF NOT EXISTS human_chats(
+                  id TEXT PRIMARY KEY, identity TEXT NOT NULL, bus TEXT NOT NULL REFERENCES buses(name),
+                  agent TEXT NOT NULL REFERENCES agents(id), created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                  next_seq INTEGER NOT NULL DEFAULT 1, read_seq INTEGER NOT NULL DEFAULT 0,
+                  UNIQUE(identity,bus,agent));
+                CREATE TABLE IF NOT EXISTS human_chat_messages(
+                  id TEXT PRIMARY KEY, chat TEXT NOT NULL REFERENCES human_chats(id) ON DELETE CASCADE,
+                  identity TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+                  created_at REAL NOT NULL, updated_at REAL NOT NULL, status TEXT NOT NULL,
+                  in_reply_to TEXT, request_id TEXT, sender_reader TEXT, expires_at REAL,
+                  closed INTEGER NOT NULL DEFAULT 0, lease TEXT, lease_until REAL,
+                  detail TEXT NOT NULL DEFAULT '', UNIQUE(chat,seq), UNIQUE(identity,request_id));
+                CREATE INDEX IF NOT EXISTS human_chat_history ON human_chat_messages(chat,seq);
+                CREATE TABLE IF NOT EXISTS human_chat_seen(
+                  chat TEXT NOT NULL REFERENCES human_chats(id) ON DELETE CASCADE,
+                  reader TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(chat,reader,seq),
+                  FOREIGN KEY(chat,seq) REFERENCES human_chat_messages(chat,seq) ON DELETE CASCADE);
+                CREATE TABLE IF NOT EXISTS outbound_queue(
+                  ordering INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL UNIQUE,
+                  target TEXT NOT NULL REFERENCES agents(id));
             """)
             # Upgrade existing hubs without changing credentials or guessing the
             # owner of an enrolled device from its self-reported display name.
@@ -213,6 +272,7 @@ class Broker:
                 db.execute("INSERT OR IGNORE INTO conversations VALUES(?,?,?,?,?,0)",
                            (conversation, message["sender"], message["target"], message["bus"], message["expires_at"]))
                 db.execute("UPDATE messages SET conversation=? WHERE id=?", (conversation, message["id"]))
+            db.execute("INSERT OR IGNORE INTO outbound_queue(message,target) SELECT id,target FROM messages ORDER BY rowid")
             db.execute("INSERT OR IGNORE INTO meta VALUES('server_id',?)", (uuid.uuid4().hex,))
             db.execute("INSERT OR IGNORE INTO principals(id,device,created_at,is_admin) VALUES('admin','local',?,1)",
                        (self.clock(),))
@@ -267,6 +327,9 @@ class Broker:
                     db.execute("DELETE FROM tokens WHERE principal=? AND digest<>?", (principal, digest))
                     db.execute("INSERT OR IGNORE INTO tokens VALUES(?,?)", (digest, principal))
                     db.execute("INSERT OR REPLACE INTO browser_credentials VALUES(?,?,?)", (digest, reader, reader_hash))
+                    current = self._auth(db, token, reader, reader_hash, view)
+                    self._chat_observe_scope(db, current, self.clock())
+                    self._cancel_chat_invalid(db, self.clock())
             finally:
                 db.close()
         result = {"ok": True, "token": token, "user": user, "browser_session": True, "logout_url": "/_gateway/logout"}
@@ -414,6 +477,12 @@ class Broker:
         return row
 
     def _expire(self, db, now):
+        db.execute("""UPDATE human_chat_messages SET status='expired',detail='message expired',updated_at=?,closed=1
+                      WHERE role='user' AND status IN ('accepted','leased') AND expires_at<=?""", (now, now))
+        db.execute("UPDATE human_chat_messages SET closed=1 WHERE role='user' AND expires_at<=?", (now,))
+        db.execute("DELETE FROM human_chat_messages WHERE created_at<?", (now - CHAT_RETENTION,))
+        db.execute("""DELETE FROM human_chats WHERE updated_at<? AND NOT EXISTS
+                      (SELECT 1 FROM human_chat_messages WHERE chat=human_chats.id)""", (now - CHAT_RETENTION,))
         db.execute("""UPDATE messages SET status='expired',detail='message expired',updated_at=?
                       WHERE status IN ('accepted','leased') AND expires_at<=?""", (now, now))
         # Retain receipts for seven days, with finite message and invite storage.
@@ -422,9 +491,13 @@ class Broker:
         db.execute("DELETE FROM invites WHERE expires_at<?", (now - MESSAGE_TTL,))
         db.execute("DELETE FROM conversations WHERE expires_at<? AND NOT EXISTS (SELECT 1 FROM messages WHERE conversation=conversations.id)",
                    (now - RECEIPT_RETENTION,))
+        db.execute("""DELETE FROM outbound_queue WHERE NOT EXISTS (SELECT 1 FROM messages WHERE id=outbound_queue.message)
+                      AND NOT EXISTS (SELECT 1 FROM human_chat_messages WHERE id=outbound_queue.message)""")
         db.execute("""DELETE FROM agents WHERE last_seen<?
                       AND NOT EXISTS (SELECT 1 FROM memberships WHERE agent=agents.id)
                       AND NOT EXISTS (SELECT 1 FROM messages WHERE sender=agents.id OR target=agents.id)
+                      AND NOT EXISTS (SELECT 1 FROM human_chats WHERE agent=agents.id)
+                      AND NOT EXISTS (SELECT 1 FROM outbound_queue WHERE target=agents.id)
                       AND NOT EXISTS (SELECT 1 FROM conversations WHERE initiator=agents.id OR published=agents.id)""",
                    (now - RECEIPT_RETENTION,))
 
@@ -440,6 +513,7 @@ class Broker:
         return bool(sender and self._granted(db, sender[0], bus))
 
     def _cancel_invalid(self, db, now):
+        self._cancel_chat_invalid(db, now)
         # Close permanently on loss of admission/publication; rejoining must
         # never reactivate a previously withdrawn conversation.
         for conversation in db.execute("SELECT * FROM conversations WHERE closed=0").fetchall():
@@ -466,11 +540,24 @@ class Broker:
                 raise BusError("request too large", "too_large")
             with self.lock:
                 db = self._connect()
+                observed = False
                 try:
                     db.execute("BEGIN IMMEDIATE")
                     now = self.clock()
                     p = self._auth(db, token, reader, reader_hash, view) if token else None
-                    if p is not None and p["browser_reader"] is not None and not p["is_admin"] and request["op"] != "snapshot":
+                    if p is not None and p["browser_reader"] is not None:
+                        # A valid reduced view is a revocation observation even
+                        # when the requested operation is subsequently denied.
+                        self._chat_observe_scope(db, p, now)
+                    if p is not None:
+                        self._cancel_chat_invalid(db, now)
+                    # Preserve authenticated revocation observations when an
+                    # operation fails, without releasing the database lock
+                    # between authorization and the requested operation.
+                    db.execute("SAVEPOINT requested_operation")
+                    observed = True
+                    if (p is not None and p["browser_reader"] is not None and not p["is_admin"]
+                            and request["op"] != "snapshot" and request["op"] not in CHAT_OPS):
                         raise BusError("this browser reader has read-only directory access", "forbidden")
                     if request["op"] == "redeem":
                         result = self._redeem(db, p, token, request, now)
@@ -479,6 +566,10 @@ class Broker:
                         if p is None:
                             raise BusError("authentication required", "unauthorized")
                         self._expire(db, now)
+                        if request["op"] in CHAT_OPS:
+                            self._chat_access(db, p)
+                            if set(request) - CHAT_FIELDS[request["op"]] - {"op"}:
+                                raise BusError("unexpected chat request fields")
                         fn = getattr(self, "_op_" + request["op"], None)
                         if fn is None:
                             raise BusError("unknown operation")
@@ -486,7 +577,11 @@ class Broker:
                     db.commit()
                     return {"ok": True, **result}
                 except Exception:
-                    db.rollback()
+                    if observed:
+                        db.execute("ROLLBACK TO requested_operation")
+                        db.commit()
+                    else:
+                        db.rollback()
                     raise
                 finally:
                     db.close()
@@ -666,6 +761,10 @@ class Broker:
         self._snapshot_graphs(db, buses)
         result = {"server_id": self.server_id, "is_admin": bool(p["is_admin"]),
                   "principal": p["id"], "buses": buses, "ts": now, **self._device_info(p)}
+        chat_buses = self._chat_buses(db, p)
+        result["chat"] = {"enabled": bool(chat_buses), "buses": chat_buses,
+                          "openwebui": [{"bus": bus, "agent": agent} for bus, agent in self.chat_openwebui_targets
+                                        if bus in chat_buses and self._member(db, agent, bus)]}
         if p.get("browser_reader") is not None:
             result.update(browser_session=True, read_only=not p["is_admin"], logout_url="/_gateway/logout")
             if "display_name" in p:
@@ -727,6 +826,230 @@ class Broker:
         self._admin(p)
         return self._op_snapshot(db, p, r, now)
 
+    def _chat_buses(self, db, p):
+        reader = p.get("browser_reader")
+        grant = self.chat_readers.get(reader)
+        if not reader or not grant:
+            return []
+        visible = (set(p["view_buses"]) if "view_buses" in p else
+                   {row[0] for row in db.execute("SELECT name FROM buses") if self._granted(db, p["id"], row[0])})
+        return sorted(visible.intersection(grant["buses"]))
+
+    def _chat_access(self, db, p):
+        reader = p.get("browser_reader")
+        grant = self.chat_readers.get(reader)
+        if not reader or not grant:
+            raise BusError("human chat is not enabled for this reader", "forbidden")
+        return grant["identity"], self._chat_buses(db, p)
+
+    @staticmethod
+    def _chat_close(db, message, now):
+        db.execute("""UPDATE human_chat_messages SET closed=1,
+                      status=CASE WHEN status IN ('accepted','leased') THEN 'cancelled' ELSE status END,
+                      detail='chat access changed',updated_at=? WHERE id=?""", (now, message))
+
+    def _chat_observe_scope(self, db, p, now):
+        """Do not persist a view as future authorization. Only remember losses.
+
+        Agent requests cannot consult current OWUI groups. Their reply windows
+        remain bounded by 24 hours, current broker config/publication, and any
+        scope loss observed on a subsequent authenticated browser request.
+        """
+        buses = self._chat_buses(db, p)
+        grant = self.chat_readers.get(p["browser_reader"])
+        for row in db.execute("""SELECT m.id,c.bus,c.identity FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                                 WHERE m.role='user' AND m.closed=0 AND m.sender_reader=?""", (p["browser_reader"],)).fetchall():
+            if not grant or row["identity"] != grant["identity"] or row["bus"] not in buses:
+                self._chat_close(db, row["id"], now)
+
+    def _cancel_chat_invalid(self, db, now):
+        for row in db.execute("""SELECT m.*,c.bus,c.agent FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                                 WHERE m.role='user' AND m.closed=0""").fetchall():
+            grant = self.chat_readers.get(row["sender_reader"])
+            if row["expires_at"] <= now:
+                db.execute("""UPDATE human_chat_messages SET closed=1,updated_at=?,
+                              detail=CASE WHEN status IN ('accepted','leased') THEN 'message expired' ELSE detail END,
+                              status=CASE WHEN status IN ('accepted','leased') THEN 'expired' ELSE status END WHERE id=?""",
+                           (now, row["id"]))
+                continue
+            if (not grant or grant["identity"] != row["identity"] or row["bus"] not in grant["buses"]
+                    or not self._member(db, row["agent"], row["bus"])):
+                self._chat_close(db, row["id"], now)
+
+    def _chat_owned(self, db, p, chat):
+        identity, buses = self._chat_access(db, p)
+        if not isinstance(chat, str):
+            raise BusError("unknown or unavailable chat", "not_found")
+        row = db.execute("SELECT * FROM human_chats WHERE id=? AND identity=?", (chat, identity)).fetchone()
+        if row is None or row["bus"] not in buses or not self._member(db, row["agent"], row["bus"]):
+            raise BusError("unknown or unavailable chat", "not_found")
+        return row
+
+    @staticmethod
+    def _chat_message(row):
+        result = {key: row[key] for key in ("id", "seq", "role", "content", "created_at", "status")}
+        for key in ("in_reply_to", "request_id"):
+            if row[key] is not None:
+                result[key] = row[key]
+        return result
+
+    def _chat_summary(self, db, chat, now):
+        agent = db.execute("""SELECT a.id,a.name,a.kind,a.status,a.last_seen,p.user,p.device,p.id AS device_id
+                              FROM agents a JOIN principals p ON p.id=a.principal WHERE a.id=?""", (chat["agent"],)).fetchone()
+        public = {key: agent[key] for key in ("id", "name", "kind", "user", "device", "device_id", "status")}
+        if now - agent["last_seen"] > LIVE_TTL:
+            public["status"] = "offline"
+        unread = db.execute("SELECT COUNT(*) FROM human_chat_messages WHERE chat=? AND role='assistant' AND seq>?",
+                            (chat["id"], chat["read_seq"])).fetchone()[0]
+        return {"id": chat["id"], "bus": chat["bus"], "agent": public,
+                "created_at": chat["created_at"], "updated_at": chat["updated_at"],
+                "unread": unread, "can_send": self._member(db, chat["agent"], chat["bus"])}
+
+    def _op_chat_open(self, db, p, r, now):
+        identity, buses = self._chat_access(db, p)
+        bus, agent = _bus(r.get("bus")), r.get("agent")
+        if bus not in buses or not isinstance(agent, str) or not self._member(db, agent, bus):
+            raise BusError("unknown or unavailable recipient", "not_found")
+        chat = db.execute("SELECT * FROM human_chats WHERE identity=? AND bus=? AND agent=?", (identity, bus, agent)).fetchone()
+        if chat is None:
+            if (db.execute("SELECT COUNT(*) FROM human_chats").fetchone()[0] >= MAX_CHATS
+                    or db.execute("SELECT COUNT(*) FROM human_chats WHERE identity=?", (identity,)).fetchone()[0] >= MAX_CHATS_PER_IDENTITY):
+                raise BusError("human chat limit reached", "limit")
+            cid = "hc_" + uuid.uuid4().hex
+            db.execute("INSERT INTO human_chats(id,identity,bus,agent,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                       (cid, identity, bus, agent, now, now))
+            chat = db.execute("SELECT * FROM human_chats WHERE id=?", (cid,)).fetchone()
+        return {"chat": self._chat_summary(db, chat, now)}
+
+    def _op_chat_list(self, db, p, r, now):
+        identity, buses = self._chat_access(db, p)
+        self._cancel_chat_invalid(db, now)
+        chats = db.execute("SELECT * FROM human_chats WHERE identity=? ORDER BY updated_at DESC,id", (identity,))
+        return {"chats": [self._chat_summary(db, chat, now) for chat in chats
+                          if chat["bus"] in buses and self._member(db, chat["agent"], chat["bus"])]}
+
+    def _op_chat_messages(self, db, p, r, now):
+        chat = self._chat_owned(db, p, r.get("chat"))
+        after, limit = r.get("after", 0), r.get("limit", 100)
+        if type(after) is not int or not 0 <= after <= 2**63 - 1 or type(limit) is not int or not 1 <= limit <= 100:
+            raise BusError("invalid chat pagination")
+        self._cancel_chat_invalid(db, now)
+        rows = db.execute("SELECT * FROM human_chat_messages WHERE chat=? AND seq>? ORDER BY seq LIMIT ?",
+                          (chat["id"], after, limit + 1)).fetchall()
+        result = {"chat": self._chat_summary(db, chat, now), "messages": [], "has_more": bool(rows), "next_after": after}
+        for row in rows[:limit]:
+            result["messages"].append(self._chat_message(row))
+            result.update(has_more=len(rows) > len(result["messages"]), next_after=row["seq"])
+            # Match the HTTP encoder, including its Unicode/control escaping
+            # and the handle() success wrapper, so every page fits the gateway.
+            if len(json.dumps({"ok": True, **result}).encode("utf-8")) > MAX_CHAT_PAGE_BYTES:
+                result["messages"].pop()
+                if not result["messages"]:
+                    raise BusError("chat message exceeds the response limit", "too_large")
+                result.update(has_more=True, next_after=result["messages"][-1]["seq"])
+                break
+        self._chat_mark_seen(db, chat, p["browser_reader"], [row["seq"] for row in result["messages"]])
+        return result
+
+    def _op_chat_read(self, db, p, r, now):
+        chat = self._chat_owned(db, p, r.get("chat"))
+        through = r.get("through")
+        if type(through) is not int or not 0 <= through < chat["next_seq"]:
+            raise BusError("invalid read position")
+        if db.execute("""SELECT 1 FROM human_chat_messages m WHERE m.chat=? AND m.seq>? AND m.seq<=?
+                         AND NOT EXISTS (SELECT 1 FROM human_chat_seen s WHERE s.chat=m.chat AND s.seq=m.seq AND s.reader=?)""",
+                      (chat["id"], chat["read_seq"], through, p["browser_reader"])).fetchone():
+            raise BusError("only fetched messages can be marked read", "conflict")
+        db.execute("UPDATE human_chats SET read_seq=MAX(read_seq,?) WHERE id=?", (through, chat["id"]))
+        db.execute("DELETE FROM human_chat_seen WHERE chat=? AND seq<=?", (chat["id"], max(through, chat["read_seq"])))
+        unread = db.execute("SELECT COUNT(*) FROM human_chat_messages WHERE chat=? AND role='assistant' AND seq>?",
+                            (chat["id"], max(through, chat["read_seq"]))).fetchone()[0]
+        return {"unread": unread}
+
+    @staticmethod
+    def _chat_mark_seen(db, chat, reader, sequences):
+        unseen = [seq for seq in sequences if seq > chat["read_seq"] and not db.execute(
+            "SELECT 1 FROM human_chat_seen WHERE chat=? AND reader=? AND seq=?", (chat["id"], reader, seq)).fetchone()]
+        if unseen and db.execute("SELECT COUNT(*) FROM human_chat_seen").fetchone()[0] + len(unseen) > MAX_CHAT_SEEN:
+            raise BusError("chat read tracking limit reached", "limit")
+        db.executemany("INSERT INTO human_chat_seen VALUES(?,?,?)", [(chat["id"], reader, seq) for seq in unseen])
+
+    @staticmethod
+    def _message_content(message):
+        if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > MAX_MESSAGE or "\x00" in message:
+            raise BusError("message must contain 1 to %d UTF-8 bytes" % MAX_MESSAGE)
+        return message
+
+    @staticmethod
+    def _chat_capacity(db, chat):
+        if (db.execute("SELECT COUNT(*) FROM human_chat_messages").fetchone()[0] >= MAX_CHAT_MESSAGES
+                or db.execute("SELECT COUNT(*) FROM human_chat_messages WHERE chat=?", (chat,)).fetchone()[0] >= MAX_CHAT_MESSAGES_PER_CHAT):
+            raise BusError("human chat history is full", "limit")
+
+    @staticmethod
+    def _pending_count(db, target):
+        return db.execute("""SELECT (SELECT COUNT(*) FROM messages WHERE target=? AND status IN ('accepted','leased')) +
+                            (SELECT COUNT(*) FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                             WHERE c.agent=? AND m.role='user' AND m.status IN ('accepted','leased'))""", (target, target)).fetchone()[0]
+
+    def _op_chat_send(self, db, p, r, now):
+        chat = self._chat_owned(db, p, r.get("chat"))
+        request_id, content = r.get("request_id"), self._message_content(r.get("message"))
+        if not _canonical_uuid(request_id):
+            raise BusError("request_id must be a canonical UUID")
+        self._cancel_chat_invalid(db, now)
+        old = db.execute("SELECT * FROM human_chat_messages WHERE identity=? AND request_id=?", (chat["identity"], request_id)).fetchone()
+        if old:
+            if old["chat"] != chat["id"] or old["content"] != content:
+                raise BusError("request_id was already used for a different message", "conflict")
+            self._chat_mark_seen(db, chat, p["browser_reader"], [old["seq"]])
+            return {"chat": chat["id"], "message": self._chat_message(old), "deduplicated": True}
+        self._chat_capacity(db, chat["id"])
+        if self._pending_count(db, chat["agent"]) >= MAX_PENDING:
+            raise BusError("recipient queue is full", "limit")
+        mid = "hm_" + uuid.uuid4().hex
+        db.execute("""INSERT INTO human_chat_messages(id,chat,identity,seq,role,content,created_at,updated_at,status,
+                      request_id,sender_reader,expires_at) VALUES(?,?,?,?,'user',?,?,?,'accepted',?,?,?)""",
+                   (mid, chat["id"], chat["identity"], chat["next_seq"], content, now, now, request_id, p["browser_reader"], now + MESSAGE_TTL))
+        db.execute("UPDATE human_chats SET next_seq=next_seq+1,updated_at=? WHERE id=?", (now, chat["id"]))
+        db.execute("INSERT INTO outbound_queue(message,target) VALUES(?,?)", (mid, chat["agent"]))
+        self._chat_mark_seen(db, chat, p["browser_reader"], [chat["next_seq"]])
+        return {"chat": chat["id"], "message": self._chat_message(db.execute("SELECT * FROM human_chat_messages WHERE id=?", (mid,)).fetchone()),
+                "deduplicated": False}
+
+    def _chat_reply(self, db, sender, mid, r, now):
+        if any(field in r for field in ("target", "bus", "conversation", "chat", "identity")):
+            raise BusError("reply destination and bus are fixed by the original message")
+        self._cancel_chat_invalid(db, now)
+        previous = db.execute("""SELECT m.* FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                                 WHERE m.id=? AND m.role='user' AND c.agent=?""", (mid, sender["id"])).fetchone()
+        if (previous is None or previous["closed"] or previous["expires_at"] <= now
+                or previous["status"] not in ("leased", "delivered", "queued")):
+            raise BusError("unknown or unavailable conversation", "not_found")
+        content = self._message_content(r.get("message"))
+        chat = db.execute("SELECT * FROM human_chats WHERE id=?", (previous["chat"],)).fetchone()
+        self._chat_capacity(db, chat["id"])
+        reply = "hr_" + uuid.uuid4().hex
+        db.execute("""INSERT INTO human_chat_messages(id,chat,identity,seq,role,content,created_at,updated_at,status,in_reply_to)
+                      VALUES(?,?,?,?,'assistant',?,?,?,'replied',?)""",
+                   (reply, chat["id"], chat["identity"], chat["next_seq"], content, now, now, mid))
+        db.execute("UPDATE human_chats SET next_seq=next_seq+1,updated_at=? WHERE id=?", (now, chat["id"]))
+        return {"id": reply, "status": "replied", "target": "human." + chat["identity"],
+                "expires_at": previous["expires_at"], "conversation_expires_at": previous["expires_at"]}
+
+    def _chat_ack(self, db, agent, mid, lease, status, detail, now):
+        self._cancel_chat_invalid(db, now)
+        message = db.execute("""SELECT m.* FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                                WHERE m.id=? AND m.role='user' AND c.agent=?""", (mid, agent["id"])).fetchone()
+        if message is None or not message["lease"] or not secrets.compare_digest(message["lease"], lease):
+            raise BusError("unknown or unavailable message", "not_found")
+        if not message["closed"] and message["status"] == status:
+            return {"id": mid, "status": status}
+        if message["closed"] or message["status"] != "leased" or message["lease_until"] <= now:
+            raise BusError("delivery lease is no longer active", "conflict")
+        db.execute("UPDATE human_chat_messages SET status=?,detail=?,updated_at=? WHERE id=?", (status, detail, now, mid))
+        return {"id": mid, "status": status}
+
     def _op_send(self, db, p, r, now):
         sender = self._owned(db, p, r.get("sender"))
         bus = _bus(r.get("bus", "general"))
@@ -754,6 +1077,8 @@ class Broker:
     def _op_reply(self, db, p, r, now):
         sender = self._owned(db, p, r.get("sender"))
         mid = _text(r.get("id"), "message id", 128)
+        if mid.startswith("hm_"):
+            return self._chat_reply(db, sender, mid, r, now)
         # The message ID is not a bearer capability. The authenticated device
         # must own exactly the recipient of this already-fetched message.
         previous = db.execute("SELECT * FROM messages WHERE id=? AND target=?", (mid, sender["id"])).fetchone()
@@ -769,14 +1094,14 @@ class Broker:
                              conversation["id"], conversation["expires_at"], now)
 
     def _enqueue(self, db, sender, target, bus, message, conversation, expires_at, now):
-        if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > MAX_MESSAGE or "\x00" in message:
-            raise BusError("message must contain 1 to %d UTF-8 bytes" % MAX_MESSAGE)
-        pending = db.execute("SELECT COUNT(*) FROM messages WHERE target=? AND status IN ('accepted','leased')", (target,)).fetchone()[0]
+        self._message_content(message)
+        pending = self._pending_count(db, target)
         if pending >= MAX_PENDING or db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] >= MAX_RECORDS:
             raise BusError("recipient queue is full", "limit")
         mid = "m_" + uuid.uuid4().hex
         db.execute("""INSERT INTO messages(id,sender,target,bus,message,status,created_at,expires_at,updated_at,conversation)
                       VALUES(?,?,?,?,?,'accepted',?,?,?,?)""", (mid, sender, target, bus, message, now, expires_at, now, conversation))
+        db.execute("INSERT INTO outbound_queue(message,target) VALUES(?,?)", (mid, target))
         return {"id": mid, "status": "accepted", "target": target, "expires_at": expires_at,
                 "conversation_expires_at": expires_at}
 
@@ -798,17 +1123,34 @@ class Broker:
     def _poll(self, db, agents, now, limit):
         self._cancel_invalid(db, now)
         slots = ",".join("?" for _ in agents)
-        # SQLite insertion order survives equal timestamps or a backwards wall
-        # clock; neither may let a second message bypass an active target lease.
-        rows = db.execute("""SELECT m.* FROM messages m WHERE m.target IN (%s) AND
-                             (m.status='accepted' OR (m.status='leased' AND m.lease_until<=?))
-                             AND NOT EXISTS (SELECT 1 FROM messages earlier WHERE earlier.target=m.target
-                               AND earlier.status IN ('accepted','leased') AND
-                               earlier.rowid<m.rowid)
-                             ORDER BY m.rowid LIMIT ?""" % slots, (*agents, now, limit)).fetchall()
+        # The shared durable order prevents an agent delivery and a human
+        # delivery from holding concurrent leases for one exact destination.
+        rows = db.execute("""WITH pending AS (
+                             SELECT q.*,COALESCE(m.status,h.status) AS status,
+                                    COALESCE(m.lease_until,h.lease_until) AS lease_until
+                             FROM outbound_queue q LEFT JOIN messages m ON m.id=q.message
+                             LEFT JOIN human_chat_messages h ON h.id=q.message
+                             WHERE COALESCE(m.status,h.status) IN ('accepted','leased'))
+                             SELECT * FROM pending q WHERE q.target IN (%s)
+                             AND (q.status='accepted' OR q.lease_until<=?)
+                             AND NOT EXISTS (SELECT 1 FROM pending earlier WHERE earlier.target=q.target
+                                             AND earlier.ordering<q.ordering)
+                             ORDER BY q.ordering LIMIT ?""" % slots, (*agents, now, limit)).fetchall()
         messages = []
-        for m in rows:
+        for queued in rows:
             lease = secrets.token_urlsafe(18)
+            if queued["message"].startswith("hm_"):
+                m = db.execute("""SELECT m.*,c.bus,c.agent FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                                  WHERE m.id=?""", (queued["message"],)).fetchone()
+                db.execute("UPDATE human_chat_messages SET status='leased',lease=?,lease_until=?,updated_at=? WHERE id=?",
+                           (lease, now + LEASE_TTL, now, m["id"]))
+                messages.append({"id": m["id"], "sender": {"id": "human." + m["identity"], "name": m["identity"],
+                                 "kind": "human", "user": m["identity"], "device": "browser", "device_id": None},
+                                 "sender_type": "human", "chat": m["chat"], "target": m["agent"], "bus": m["bus"],
+                                 "message": m["content"], "created_at": m["created_at"], "expires_at": m["expires_at"],
+                                 "lease": lease, "reply_to": m["id"], "conversation_expires_at": m["expires_at"]})
+                continue
+            m = db.execute("SELECT * FROM messages WHERE id=?", (queued["message"],)).fetchone()
             db.execute("UPDATE messages SET status='leased',lease=?,lease_until=?,updated_at=? WHERE id=?",
                        (lease, now + LEASE_TTL, now, m["id"]))
             sender = db.execute("SELECT a.id,a.name,a.kind,p.device,p.user,p.id AS device_id FROM agents a JOIN principals p ON a.principal=p.id WHERE a.id=?",
@@ -826,6 +1168,8 @@ class Broker:
         detail = _text(r.get("detail", ""), "detail", 1024, optional=True)
         mid = _text(r.get("id"), "message id", 128)
         lease = _text(r.get("lease"), "delivery lease", 128)
+        if mid.startswith("hm_"):
+            return self._chat_ack(db, agent, mid, lease, status, detail, now)
         m = db.execute("SELECT * FROM messages WHERE id=? AND target=?", (mid, agent["id"])).fetchone()
         if m is None or not m["lease"] or not secrets.compare_digest(m["lease"], lease):
             raise BusError("unknown or unavailable message", "not_found")
@@ -841,6 +1185,12 @@ class Broker:
     def _op_receipt(self, db, p, r, now):
         mid = _text(r.get("id"), "message id", 128)
         self._cancel_invalid(db, now)
+        if mid.startswith("hm_"):
+            m = db.execute("""SELECT m.* FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                              JOIN agents a ON a.id=c.agent WHERE m.id=? AND a.principal=?""", (mid, p["id"])).fetchone()
+            if m is None:
+                raise BusError("unknown or unavailable message", "not_found")
+            return {key: m[key] for key in ("id", "status", "detail", "created_at", "updated_at", "expires_at")}
         m = db.execute("""SELECT m.* FROM messages m JOIN agents s ON s.id=m.sender JOIN agents t ON t.id=m.target
                           WHERE m.id=? AND (s.principal=? OR t.principal=?)""", (mid, p["id"], p["id"])).fetchone()
         if m is None:
@@ -908,6 +1258,9 @@ def handler_factory(broker, assets_dir=None):
                     self._respond(403, {"ok": False, "error": "SSO consume requires gateway-only context", "code": "forbidden"})
                     return None
                 return {}
+            if self.path == "/_bus/chat" and any(self.headers.get_all(name) is not None for name in ("Authorization", "Cookie")):
+                self._respond(403, {"ok": False, "error": "chat bridge requires gateway-only credentials", "code": "forbidden"})
+                return None
             readers = self.headers.get_all("X-Communicate-Bus-Reader", [])
             hashes = self.headers.get_all("X-Communicate-Bus-Reader-Hash", [])
             views = self.headers.get_all("X-Communicate-Bus-View", [])
@@ -987,9 +1340,10 @@ def handler_factory(broker, assets_dir=None):
 
         def do_POST(self):
             consume = self.path == "/_bus/sso/consume"
-            if self.path != "/v1" and not consume:
+            chat_bridge = self.path == "/_bus/chat"
+            if self.path != "/v1" and not consume and not chat_bridge:
                 return self._respond(404, {"ok": False, "error": "not found"})
-            if consume and broker.gateway_shared_secret is None:
+            if (consume or chat_bridge) and broker.gateway_shared_secret is None:
                 return self._respond(404, {"ok": False, "error": "not found", "code": "not_found"})
             origin = self.headers.get("Origin")
             if origin:
@@ -1012,12 +1366,18 @@ def handler_factory(broker, assets_dir=None):
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     raise ValueError("incomplete body")
-                request = json.loads(raw.decode("utf-8"), **({"object_pairs_hook": _unique_object} if consume else {}))
+                request = json.loads(raw.decode("utf-8"), **({"object_pairs_hook": _unique_object} if consume or chat_bridge else {}))
             except (ValueError, UnicodeError, OSError, RecursionError):
                 return self._respond(400, {"ok": False, "error": "invalid JSON body", "code": "invalid_request"})
             auth = self.headers.get("Authorization", "")
             token = auth[7:] if auth.startswith("Bearer ") else None
             try:
+                if chat_bridge:
+                    if not self.gateway_context:
+                        raise BusError("authenticated browser reader required", "unauthorized")
+                    if not isinstance(request, dict) or request.get("op") not in CHAT_OPS:
+                        raise BusError("chat bridge accepts only chat operations", "forbidden")
+                    token = broker.browser_session(**self.gateway_context)["token"]
                 result = broker.consume_sso(request) if consume else broker.handle(token, request, **self.gateway_context)
             except BusError as exc:
                 result = {"ok": False, "error": str(exc), "code": exc.code}

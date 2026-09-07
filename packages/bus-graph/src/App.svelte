@@ -7,6 +7,10 @@
   import { inferFlow, layoutFlow, validateParentOverride, parentOverrideOptions } from './flow.mjs';
   import { clearFlowRoutingCache } from './flow-routing.mjs';
 
+  let { onchat, oninbox, onopenwebui } = $props();
+  let chatConfig = $state.raw({enabled: false, buses: [], unread: 0, openwebui: []});
+  let chatBus = $state('');
+
   let model = $state.raw(snapshotModel());
   let analysis = $state.raw(analyzeGraph(snapshotModel()));
   let nodes = $state.raw([]);
@@ -45,6 +49,10 @@
   const cancelFit = () => { cancelAnimationFrame(fitFrame); fitFrame = 0; };
   onDestroy(() => { disposed = true; invalidateLayout(); pendingRefresh = null; cancelFit(); clearFlowRoutingCache(); });
   const details = $derived(agentDetails(model, selectedId));
+  const chatBuses = $derived(chatConfig.enabled && details ? details.agent.buses.filter(bus => chatConfig.buses.includes(bus)) : []);
+  const chosenChatBus = $derived(chatBuses.includes(chatBus) ? chatBus : chatBuses[0] || '');
+  const canOpenWebUI = $derived(details && chatConfig.openwebui.some(entry => entry.bus === chosenChatBus && entry.agent === details.agent.id));
+  const webuiURL = $derived(details && chosenChatBus ? 'https://mit.nonlocally.org/?models=' + encodeURIComponent('communicate_bus.' + chosenChatBus + '--' + details.agent.id) : '');
   const messageCount = $derived(model.connections.reduce((sum, edge) => sum + edge.message_count, 0));
   const names = $derived(new Map(model.agents.map(agent => [agent.id, agent.name])));
   const activeCommunity = $derived(analysis.communities.find(group => group.id === focusedCommunity) || null);
@@ -263,6 +271,8 @@
     });
   }
   function handleKey(event) {
+    // A host dialog (including chat) owns Escape while it is open.
+    if (document.querySelector('dialog[open]')) return;
     if (event.key === 'Escape' && (panel || details)) { select(null); panel = null; }
     else if (expanded && event.key === 'Escape') { event.preventDefault(); expanded = false; expandButton?.focus(); }
   }
@@ -276,6 +286,7 @@
   function statusSummary(edge) { return receiptStates.filter(state => edge.status_counts[state]).map(state => `${edge.status_counts[state]} ${state}`).join(' · '); }
 
   export function update(snapshot) {
+    chatConfig = {enabled: snapshot?.chat?.enabled === true, buses: Array.isArray(snapshot?.chat?.buses) ? snapshot.chat.buses.filter(bus => typeof bus === 'string') : [], unread: Number.isSafeInteger(snapshot?.chat?.unread) ? Math.max(0, snapshot.chat.unread) : 0, openwebui: Array.isArray(snapshot?.chat?.openwebui) ? snapshot.chat.openwebui.filter(entry => entry && typeof entry.bus === 'string' && typeof entry.agent === 'string') : []};
     const nextScope = typeof snapshot?.scope === 'string' ? snapshot.scope : '';
     const next = snapshotModel(snapshot);
     standalone = snapshot?.standalone === true;
@@ -328,6 +339,7 @@
     applyRefresh(pending.model, pending.scope);
   }
   export function clear() {
+    chatConfig = {enabled: false, buses: [], unread: 0, openwebui: []}; chatBus = '';
     clearFlowRoutingCache();
     cancelFit(); invalidateLayout(); expanded = false; dragging = false; pendingRefresh = null;
     scope = ''; selectedId = null; focusedCommunity = null; panel = null; conductorId = null; conductorHome = null; flowRootId = null; parentOverrides = new Map(); parentError = ''; flowAnalysis = inferFlow(snapshotModel());
@@ -342,6 +354,7 @@
   <header class="cg-toolbar">
     <div class="cg-counts"><strong>{model.agents.length}</strong> agents <span>·</span><strong>{model.groups.length}</strong> {model.groups.length === 1 ? 'device' : 'devices'}<span>·</span><strong>{model.connections.length}</strong> directed links{#if layoutMode === 'flow' && flowAnalysis.rootId}<span>·</span><span class="cg-conductor-summary" title={names.get(flowAnalysis.rootId)}><span>{flowRootId ? 'Flow root' : 'Suggested root'}: {names.get(flowAnalysis.rootId)}</span>{#if flowRootId}<button type="button" onclick={() => chooseFlowRoot(flowRootId)} aria-label="Use suggested flow root">×</button>{/if}</span>{:else if conductorId}<span>·</span><span class="cg-conductor-summary" title={names.get(conductorId)}><span>Conductor: {names.get(conductorId)}</span><button type="button" onclick={() => chooseConductor(conductorId)} aria-label="Clear conductor placement">×</button></span>{/if}</div>
     <div class="cg-actions">
+      {#if chatConfig.enabled && oninbox}<button type="button" onclick={oninbox} aria-label={'Inbox' + (chatConfig.unread ? ', ' + chatConfig.unread + ' unread replies' : '')}>Inbox{#if chatConfig.unread}<span class="cg-unread">{chatConfig.unread}</span>{/if}</button>{/if}
       <select aria-label="Graph layout" value={layoutMode} onchange={chooseLayout}><option value="flow">Flow</option><option value="spectral">Spectral</option><option value="devices">Devices</option></select>
       {#if layoutMode === 'flow'}<select aria-label="Flow direction" value={flowDirection} onchange={chooseDirection}><option value="RIGHT">Left → right</option><option value="DOWN">Top → bottom</option></select>{/if}
       <button type="button" onclick={() => togglePanel('communities')} aria-expanded={panel === 'communities'}>Communities</button>
@@ -432,6 +445,16 @@
       <aside class="cg-inspector nowheel nopan" aria-label="Selected agent details">
         <div class="cg-inspector-header"><span>Selected agent</span><button class="cg-close" type="button" onclick={() => select(null)} aria-label="Close agent details">×</button></div>
         <h3>{details.agent.name}</h3>
+        {#if chatBuses.length}
+          <div class="cg-chat-actions">
+            {#if chatBuses.length > 1}<label class="cg-parent-picker"><span>Chat on bus</span><select aria-label="Chat on bus" value={chosenChatBus} onchange={event => chatBus = event.currentTarget.value}>{#each chatBuses as bus}<option value={bus}>{bus}</option>{/each}</select></label>{/if}
+            <div class="cg-detail-actions">
+              {#if onchat}<button type="button" class="cg-chat-primary" onclick={() => onchat(details.agent, chosenChatBus)}>Chat</button>{/if}
+              {#if canOpenWebUI}{#if onopenwebui}<button type="button" onclick={() => onopenwebui(details.agent, chosenChatBus)}>Open in Nonlocally ↗</button>{:else}<a href={webuiURL} target="_blank" rel="noopener noreferrer">Open in Nonlocally ↗</a>{/if}{/if}
+            </div>
+            <p class="cg-metric-note">Message this exact session on {chosenChatBus}.</p>
+          </div>
+        {/if}
         <div class="cg-detail-actions"><button type="button" aria-pressed={pinned.has(details.agent.id)} onclick={() => togglePin(details.agent.id)}>{pinned.has(details.agent.id) ? 'Unpin agent' : 'Pin agent'}</button><small>Keep position on Recompute</small></div>
         {#if layoutMode === 'flow'}
           <div class="cg-detail-actions cg-conductor-action"><button type="button" aria-pressed={flowRootId === details.agent.id} onclick={() => chooseFlowRoot(details.agent.id)}>{flowRootId === details.agent.id ? 'Use suggested flow root' : 'Use as flow root'}</button><small>{flowAnalysis.rootId === details.agent.id && !flowRootId ? 'Suggested from visible connections. ' : ''}Visual organization only; this assigns no authority.</small></div>

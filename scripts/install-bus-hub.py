@@ -44,9 +44,10 @@ config = json.loads(Path(%r).read_text())
 for name in ('BUS_GATEWAY_SHARED_SECRET', 'BUS_ADMIN_READERS', 'BUS_OPENWEBUI_READERS'):
     if name in config:
         os.environ[name] = config[name]
-if 'BUS_READER_USERS' in config:
-    users = config['BUS_READER_USERS']
-    os.environ['BUS_READER_USERS'] = json.dumps(users) if isinstance(users, dict) else users
+for name in ('BUS_READER_USERS', 'BUS_CHAT_READERS', 'BUS_CHAT_OPENWEBUI_TARGETS'):
+    if name in config:
+        value = config[name]
+        os.environ[name] = json.dumps(value) if isinstance(value, (dict, list)) else value
 sys.path.insert(0, %r)
 from bus_broker import Broker, serve
 serve(Broker(%r), '127.0.0.1', %r)

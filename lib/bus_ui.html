@@ -22,7 +22,7 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--plane); color: var(--ink); font-size: 14px; line-height: 1.45; letter-spacing: -.006em; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
-    button, input, select { font: inherit; }
+    button, input, select, textarea { font: inherit; }
     button { cursor: pointer; border: 0; }
     button:disabled { opacity: .45; cursor: default; }
     button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 4px; }
@@ -180,6 +180,49 @@
     .device-row strong { font-size: 13px; font-weight: 500; }
     .device-row p { font-size: 11px; overflow-wrap: anywhere; }
     .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 10; width: max-content; max-width: calc(100vw - 32px); padding: 11px 17px; border: 1px solid #44443d; border-radius: 6px; background: #1b1b19; color: var(--ink); font-size: 12px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .chat-launch { margin-top: 8px; }
+    .chat-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; padding: 0; width: min(620px, 100%); height: 100dvh; max-width: 100%; max-height: 100dvh; border: 0; border-left: 1px solid #373733; background: var(--surface); color: var(--ink); box-shadow: -20px 0 70px #0006; }
+    .chat-drawer[open] { display: flex; flex-direction: column; }
+    .chat-drawer::backdrop { background: #0006; }
+    .chat-header { display: flex; align-items: center; gap: 14px; padding: 18px 22px; border-bottom: 1px solid var(--line); }
+    .chat-header h2 { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 18px; }
+    .chat-header .icon-button { flex: none; }
+    .chat-intro, .chat-target { padding: 18px 22px; border-bottom: 1px solid var(--line); }
+    .chat-intro p, .chat-target p { color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+    .chat-target details { margin-top: 9px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+    .chat-target summary { cursor: pointer; }
+    .chat-target .field { margin: 12px 0 0; }
+    .chat-target-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+    .chat-target-actions a { font-size: 12px; text-underline-offset: 3px; }
+    .chat-inbox, .chat-history { overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1; padding: 12px 22px; }
+    .chat-inbox-item { display: grid; gap: 5px; width: 100%; background: transparent; color: var(--ink); border-bottom: 1px solid var(--line); text-align: left; padding: 17px 0; overflow-wrap: anywhere; }
+    .chat-inbox-item:hover { background: #ffffff05; }
+    .chat-inbox-item strong { font-size: 14px; font-weight: 500; }
+    .chat-inbox-item small { color: var(--muted); font-size: 11px; }
+    .chat-unread { display: inline-block; border-radius: 9px; padding: 1px 6px; background: var(--amber); color: var(--plane); font-size: 10px; margin-left: 7px; }
+    .chat-message { margin: 10px 0 20px; }
+    .chat-message[data-role="user"] { margin-left: 32px; }
+    .chat-message-header { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; margin-bottom: 7px; font-size: 12px; }
+    .chat-message-header time { font-size: 10px; color: var(--muted); }
+    .chat-message-content { padding: 13px 15px; background: var(--surface-2); border: 1px solid #30302c; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+    .chat-message[data-role="assistant"] .chat-message-content { background: transparent; }
+    .chat-message-status { margin-top: 6px; color: var(--muted); font-size: 11px; }
+    .chat-bottom { padding: 12px 22px 20px; border-top: 1px solid var(--line); }
+    .chat-notice { color: var(--muted); font-size: 12px; padding: 9px 0; overflow-wrap: anywhere; }
+    .chat-composer label { display: block; color: var(--ink-2); font-size: 12px; margin-bottom: 8px; }
+    .chat-composer textarea { display: block; width: 100%; resize: vertical; min-height: 84px; max-height: 28dvh; padding: 11px; border: 1px solid #41413b; border-radius: 7px; background: var(--plane); color: var(--ink); }
+    .chat-composer textarea:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+    .chat-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+    .chat-composer-actions small { color: var(--muted); font-size: 10px; }
+    .chat-more { width: 100%; margin-bottom: 10px; }
+    @media (max-width: 520px) {
+      .chat-header, .chat-intro, .chat-target, .chat-bottom { padding: 14px 16px; }
+      .chat-inbox, .chat-history { padding: 8px 16px; }
+      .chat-target details { font-size: 10px; }
+      .chat-header h2 { font-size: 16px; }
+      .chat-message[data-role="user"] { margin-left: 18px; }
+    }
     @media (max-width: 1050px) {
       .app { padding-left: 25px; padding-right: 25px; }
       .sidebar-help { display: none; }
@@ -321,7 +364,7 @@
       </div>
     </header>
     <main class="main">
-      <div class="page-heading"><div class="heading-copy"><h1 id="page-title">All buses</h1><p class="subtitle" id="page-description"></p></div><div class="heading-actions"><button id="invite-button" class="button admin" hidden>Invite device</button><button id="register-button" class="button primary">Publish agent</button></div></div>
+      <div class="page-heading"><div class="heading-copy"><h1 id="page-title">All buses</h1><p class="subtitle" id="page-description"></p></div><div class="heading-actions"><button id="inbox-button" class="button" aria-haspopup="dialog" hidden>Inbox</button><button id="invite-button" class="button admin" hidden>Invite device</button><button id="register-button" class="button primary">Publish agent</button></div></div>
       <div class="stats"><div class="stat"><p class="stat-label">Live</p><p class="stat-value" id="live-count">0</p></div><div class="stat"><p class="stat-label">Queueable</p><p class="stat-value" id="queueable-count">0</p></div><div class="stat"><p class="stat-label">Publishing devices</p><p class="stat-value" id="device-count">0</p></div></div>
       <p id="stale-notice" class="notice" role="status" hidden></p>
       <section class="roster" aria-labelledby="roster-title">
@@ -347,6 +390,24 @@
   <dialog id="invite-dialog" class="dialog" aria-labelledby="invite-title"><form id="invite-form"><div class="dialog-heading"><h2 id="invite-title">Invite a device</h2><button type="button" class="icon-button" data-close="invite-dialog" aria-label="Close">×</button></div><p>This invitation enrolls one device on the selected bus. It does not publish any agents. Share it privately.</p><div id="invite-user-field" class="field" hidden><label for="invite-user">User</label><select id="invite-user"></select><small>The device and its agents will belong to this user.</small></div><div class="field"><label for="invite-bus">Bus</label><select id="invite-bus"></select></div><p id="invite-access">On general, the device’s agents can contact published recipients without publishing themselves.</p><div class="field"><label for="invite-url">Broker URL</label><input id="invite-url" type="url" required spellcheck="false"><small>Use an HTTPS address the recipient can reach.</small></div><p id="invite-scope" class="scope"></p><label id="local-only-label" class="check" hidden><input id="local-only" type="checkbox">This invitation is for this device only.</label><div class="field"><label for="invite-ttl">Expires in</label><select id="invite-ttl"><option value="3600">1 hour</option><option value="86400">24 hours</option><option value="604800">7 days</option></select></div><p id="invite-error" class="form-error" role="alert"></p><div id="invite-result" hidden><h3>Connect this device</h3><pre id="invite-output" class="output"></pre><p id="invite-expiry" class="small muted"></p><button id="copy-invite" class="button" type="button">Copy command</button> <button id="revoke-invite" class="button danger" type="button" hidden>Revoke invitation</button></div><div class="dialog-actions"><button type="button" class="button" data-close="invite-dialog">Done</button><button id="invite-submit" class="button primary" type="submit">Create invitation</button></div></form></dialog>
 
   <dialog id="devices-dialog" class="dialog" aria-labelledby="devices-title"><div class="dialog-heading"><h2 id="devices-title">Devices</h2><button class="icon-button" data-close="devices-dialog" aria-label="Close">×</button></div><p>These devices have bus access. Their local agents are reachable automatically; only chosen agents are published in this directory. Devices enrolled on general can contact its published recipients without publishing the sender. Private buses also require both agents to join. Revoking a device removes its bus access.</p><div id="device-list" class="device-list"></div><div class="dialog-actions"><button class="button" data-close="devices-dialog">Done</button></div></dialog>
+  <dialog id="chat-dialog" class="chat-drawer" aria-labelledby="chat-title">
+    <header class="chat-header"><button id="chat-back" class="text-button" type="button" hidden>← Inbox</button><h2 id="chat-title">Inbox</h2><button class="icon-button" data-close="chat-dialog" aria-label="Close chat" type="button">×</button></header>
+    <div id="chat-intro" class="chat-intro"><p>Your conversations with published agents. Only messages sent here and their explicit replies appear in this inbox.</p></div>
+    <div id="chat-target" class="chat-target" hidden>
+      <p id="chat-identity"></p><p id="chat-presence" class="muted"></p>
+      <details><summary>Exact session and device</summary><p id="chat-registration" class="mono"></p><p id="chat-device-id" class="mono"></p></details>
+      <div id="chat-bus-field" class="field" hidden><label for="chat-bus">Chat on bus</label><select id="chat-bus"></select></div>
+      <div class="chat-target-actions"><button id="chat-start" class="button primary" type="button" hidden>Open conversation</button><a id="chat-nonlocally" target="_blank" rel="noopener noreferrer" hidden>Open in Nonlocally ↗</a></div>
+    </div>
+    <div id="chat-inbox" class="chat-inbox" aria-label="Your conversations"></div>
+    <section id="chat-history" class="chat-history" aria-label="Conversation messages" tabindex="0" hidden><div id="chat-messages"></div><button id="chat-more" class="button chat-more" type="button" hidden>Load more messages</button></section>
+    <div class="chat-bottom">
+      <p id="chat-notice" class="chat-notice" role="status" aria-live="polite"></p><p id="chat-error" class="form-error" role="alert"></p>
+      <button id="chat-retry" class="button small" type="button" hidden>Retry</button>
+      <form id="chat-form" class="chat-composer" hidden><label for="chat-input">Message this agent</label><textarea id="chat-input" rows="3" maxlength="16000" required placeholder="Write a message…"></textarea><div class="chat-composer-actions"><small>Enter to send · Shift+Enter for a new line</small><button id="chat-send" class="button primary" type="submit">Send</button></div></form>
+    </div>
+  </dialog>
+  <div id="chat-announcement" class="sr-only" role="status" aria-live="polite"></div>
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="/assets/bus-graph.js"></script>
@@ -394,8 +455,10 @@
       try { await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
       catch (_) { toast('Clipboard unavailable. Select and copy the displayed command.'); }
     }
-    async function api(op, values={}) {
+    async function api(op, values={}, signal) {
       const controller = new AbortController();
+      const abort=() => controller.abort();
+      if (signal) {if (signal.aborted) controller.abort();else signal.addEventListener('abort',abort,{once:true});}
       const timeout = setTimeout(() => controller.abort(), 12000);
       try {
         const response = await fetch('/v1', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.token},body:JSON.stringify({op,...values}),cache:'no-store',credentials:'same-origin',signal:controller.signal});
@@ -408,9 +471,239 @@
         }
         return data;
       } catch (error) {
-        if (error.name === 'AbortError') throw new Error('The broker did not respond. Check your connection.');
+        if (error.name === 'AbortError' && !(signal && signal.aborted)) throw new Error('The broker did not respond. Check your connection.');
         throw error;
-      } finally { clearTimeout(timeout); }
+      } finally { clearTimeout(timeout); if (signal) signal.removeEventListener('abort',abort); }
+    }
+    // The host owns every authenticated request. The graph receives callbacks
+    // and permitted metadata only; conversation contents never enter its model.
+    const chatState = {scope:'',epoch:0,selection:0,controllers:new Set(),lists:[],active:null,target:null,messages:new Map(),cursor:0,receiptSeq:0,hasMore:false,listPending:false,historyPending:false,sending:false,pendingSend:null,mode:'inbox',deepLink:new URLSearchParams(location.search).get('chat')};
+    function chatBuses() {
+      const config=state.data && state.data.chat;
+      return state.token && state.data && state.data.browser_session && config && config.enabled === true && Array.isArray(config.buses) ? config.buses.filter(name => buses().some(bus => bus.name === name)) : [];
+    }
+    function agentChatBuses(agent) {return chatBuses().filter(name => buses().some(bus => bus.name === name && (bus.agents || []).some(value => value.id === agent.id)));}
+    function openWebUITargets() {
+      const entries=state.data && state.data.chat && state.data.chat.openwebui;
+      return Array.isArray(entries) ? entries.filter(entry => entry && typeof entry.agent === 'string' && chatBuses().includes(entry.bus)).map(entry => ({bus:entry.bus,agent:entry.agent})) : [];
+    }
+    function canOpenWebUI(agent,bus) {return agentChatBuses(agent).includes(bus) && openWebUITargets().some(entry => entry.bus === bus && entry.agent === agent.id);}
+    function chatUnread() {return chatState.lists.reduce((sum,chat) => sum + Math.max(0,Number(chat.unread) || 0),0);}
+    function graphChatConfig() {return {enabled:chatBuses().length > 0,buses:chatBuses().filter(bus => state.bus === null || bus === state.bus),unread:chatUnread(),openwebui:openWebUITargets().filter(entry => state.bus === null || entry.bus === state.bus)};}
+    function abortChats() {for (const controller of chatState.controllers) controller.abort();chatState.controllers.clear();}
+    function resetChatSelection() {
+      chatState.selection++;abortChats();chatState.listPending=false;chatState.historyPending=false;chatState.sending=false;
+      chatState.active=null;chatState.target=null;chatState.messages.clear();chatState.cursor=0;chatState.receiptSeq=0;chatState.hasMore=false;chatState.pendingSend=null;
+      $('chat-input').value='';$('chat-messages').replaceChildren();$('chat-error').textContent='';$('chat-notice').textContent='';$('chat-retry').hidden=true;
+      $('chat-title').textContent='Inbox';for (const id of ['chat-identity','chat-presence','chat-registration','chat-device-id']) $(id).textContent='';
+      $('chat-nonlocally').setAttribute('href','');$('chat-bus').replaceChildren();
+      $('chat-form').hidden=true;$('chat-history').hidden=true;$('chat-target').hidden=true;$('chat-nonlocally').hidden=true;$('chat-start').hidden=true;$('chat-start').disabled=false;
+      $('chat-back').hidden=true;$('chat-intro').hidden=false;$('chat-inbox').hidden=false;
+    }
+    function resetChat() {
+      chatState.epoch++;resetChatSelection();chatState.lists=[];chatState.mode='inbox';$('chat-inbox').replaceChildren();
+      $('chat-announcement').textContent='';$('inbox-button').hidden=true;
+      if ($('chat-dialog').open) $('chat-dialog').close();
+    }
+    function syncChatPermission() {
+      const scope=JSON.stringify([state.data && state.data.server_id,state.data && state.data.principal,state.data && state.data.user,state.bus,chatBuses().slice().sort(),buses().map(bus => [bus.name,(bus.agents || []).map(agent => [agent.id,agent.device_id,agent.user]).sort()]).sort()]);
+      if (scope !== chatState.scope) {resetChat();chatState.scope=scope;}
+      if (chatState.active) renderChatTarget(chatState.active.agent,chatState.active.bus);
+      else if (chatState.target) renderChatTarget(chatState.target,$('chat-bus').value);
+      updateInboxBadge();
+    }
+    function updateInboxBadge() {
+      const unread=chatUnread();$('inbox-button').hidden=!chatBuses().length;
+      $('inbox-button').textContent='Inbox' + (unread ? ' · ' + unread : '');
+      $('inbox-button').setAttribute('aria-label','Inbox' + (unread ? ', ' + unread + ' unread replies' : ''));
+    }
+    function chatCurrent(epoch,selection) {return epoch === chatState.epoch && selection === chatState.selection && Boolean(chatBuses().length);}
+    async function chatAPI(op,values={}) {
+      const controller=new AbortController();chatState.controllers.add(controller);
+      try {return await api(op,values,controller.signal);} finally {chatState.controllers.delete(controller);}
+    }
+    function chatError(error,epoch,selection) {
+      if (!chatCurrent(epoch,selection) || error.name === 'AbortError') return;
+      if (error.status === 401) {disconnect('Your reader session expired. Sign in again to open your inbox.',state.browserSession);return;}
+      if (error.status === 403) {
+        resetChat();if (state.data) state.data.chat={enabled:false,buses:[]};render();toast('Chat access changed. Refresh to check your current access.');return;
+      }
+      $('chat-error').textContent=error.message;$('chat-retry').hidden=false;
+    }
+    function mergeChat(summary) {
+      if (!summary || !chatBuses().includes(summary.bus)) return;
+      const index=chatState.lists.findIndex(chat => chat.id === summary.id);
+      if (index < 0) chatState.lists.push(summary);else chatState.lists[index]=summary;
+      if (chatState.active && chatState.active.id === summary.id) chatState.active=summary;
+      updateInboxBadge();
+    }
+    function renderInbox() {
+      $('chat-inbox').replaceChildren();
+      const chats=chatState.lists.slice().sort((a,b) => b.updated_at-a.updated_at);
+      if (!chats.length) {$('chat-inbox').append(node('p','chat-notice','No conversations yet. Select an agent and choose Chat.'));return;}
+      for (const chat of chats) {
+        const button=node('button','chat-inbox-item');button.type='button';
+        const title=node('strong','',chat.agent.name || 'Unnamed agent');
+        if (chat.unread) title.append(node('span','chat-unread',chat.unread + ' unread'));
+        button.append(title,node('small','',userLabel(chat.agent) + ' · ' + deviceName(chat.agent) + ' · ' + chat.bus),node('small','mono',chat.agent.id),node('small','',chat.can_send ? 'Open conversation · ' + ago(chat.updated_at) : 'History available · sending unavailable'));
+        button.addEventListener('click',() => selectChat(chat));$('chat-inbox').append(button);
+      }
+    }
+    async function pollChatList() {
+      if (!chatBuses().length || chatState.listPending) return;
+      chatState.listPending=true;const epoch=chatState.epoch,selection=chatState.selection;
+      try {
+        const data=await chatAPI('chat_list');if (!chatCurrent(epoch,selection)) return;
+        const previous=chatUnread();chatState.lists=(Array.isArray(data.chats) ? data.chats : []).filter(chat => chatBuses().includes(chat.bus));
+        updateInboxBadge();renderInbox();
+        if (chatUnread() > previous) $('chat-announcement').textContent=chatUnread() + ' unread agent replies in your inbox.';
+        if (graph) renderRows();
+        if (chatState.deepLink) {
+          const id=chatState.deepLink;chatState.deepLink=null;
+          const chat=chatState.lists.find(item => item.id === id);
+          if (chat) {selectChat(chat);return;}
+          openInbox();$('chat-error').textContent='This conversation is unavailable for your current account and bus access.';
+        }
+        if (chatState.active) {
+          const summary=chatState.lists.find(item => item.id === chatState.active.id);
+          if (!summary) {resetChatSelection();chatState.mode='inbox';$('chat-title').textContent='Inbox';$('chat-error').textContent='This conversation is no longer available.';return;}
+          chatState.active=summary;renderChatTarget(summary.agent,summary.bus);renderComposer();
+        }
+      } catch(error) {chatError(error,epoch,selection);}
+      finally {if (chatCurrent(epoch,selection)) chatState.listPending=false;}
+    }
+    function showChatDialog() {if (!$('chat-dialog').open) $('chat-dialog').showModal();}
+    function updateChatURL() {
+      const params=new URLSearchParams();if (state.bus !== null) params.set('bus',state.bus);
+      const id=chatState.active ? chatState.active.id : chatState.deepLink;if (id) params.set('chat',id);
+      history.replaceState(null,'',location.pathname + (params.toString() ? '?' + params.toString() : ''));
+    }
+    function openInbox() {
+      if (!chatBuses().length) return;
+      resetChatSelection();chatState.mode='inbox';$('chat-title').textContent='Inbox';updateChatURL();renderInbox();showChatDialog();pollChatList();
+    }
+    function nonlocallyURL(agent,bus) {return 'https://mit.nonlocally.org/?models=' + encodeURIComponent('communicate_bus.' + bus + '--' + agent.id);}
+    function renderChatTarget(agent,bus) {
+      $('chat-title').textContent=agent.name || 'Unnamed agent';$('chat-target').hidden=false;$('chat-back').hidden=false;
+      $('chat-intro').hidden=true;$('chat-inbox').hidden=true;
+      $('chat-identity').textContent=userLabel(agent) + ' · ' + deviceName(agent) + ' · ' + bus;
+      $('chat-presence').textContent=(agent.kind || 'Agent') + ' · ' + (agent.status === 'live' ? 'Live endpoint' : agent.status === 'queueable' ? 'Queueable · replies may take time' : 'Offline · delivery may be unavailable');
+      $('chat-registration').textContent='Agent ID: ' + agent.id;$('chat-device-id').textContent='Device ID: ' + (agent.device_id || 'Unknown');
+      $('chat-nonlocally').hidden=!canOpenWebUI(agent,bus);
+      $('chat-nonlocally').setAttribute('href',nonlocallyURL(agent,bus));
+    }
+    async function openAgentChat(agent,requestedBus) {
+      const visible=allAgents().find(value => value.id === agent.id && value.device_id === agent.device_id);
+      const permitted=visible ? agentChatBuses(visible) : [];
+      if (!permitted.length || (requestedBus && !permitted.includes(requestedBus))) return;
+      resetChatSelection();chatState.mode='conversation';chatState.target=visible;
+      const bus=requestedBus || (permitted.includes(state.bus) ? state.bus : permitted[0]);
+      renderChatTarget(visible,bus);showChatDialog();
+      $('chat-bus').replaceChildren();for (const name of permitted) {const option=node('option','',name);option.value=name;$('chat-bus').append(option);}
+      $('chat-bus').value=bus;$('chat-bus-field').hidden=Boolean(requestedBus) || permitted.length < 2;
+      if (!requestedBus && permitted.length > 1) {$('chat-start').hidden=false;$('chat-notice').textContent='Choose the bus for this conversation.';return;}
+      await startChat(visible,bus);
+    }
+    async function startChat(agent,bus) {
+      if (!agentChatBuses(agent).includes(bus)) return;
+      const epoch=chatState.epoch,selection=chatState.selection;$('chat-start').disabled=true;$('chat-error').textContent='';$('chat-notice').textContent='Opening conversation…';
+      try {
+        const data=await chatAPI('chat_open',{agent:agent.id,bus});if (!chatCurrent(epoch,selection)) return;
+        if (!data.chat || data.chat.agent.id !== agent.id || data.chat.bus !== bus) throw new Error('The broker returned a different conversation.');
+        await selectChat(data.chat);
+      } catch(error) {chatError(error,epoch,selection);}
+      finally {if (chatCurrent(epoch,selection)) $('chat-start').disabled=false;}
+    }
+    async function selectChat(summary) {
+      if (!chatBuses().includes(summary.bus)) return;
+      resetChatSelection();chatState.mode='conversation';chatState.active=summary;mergeChat(summary);updateChatURL();
+      $('chat-bus-field').hidden=true;$('chat-history').hidden=false;renderChatTarget(summary.agent,summary.bus);renderComposer();showChatDialog();
+      $('chat-notice').textContent='Loading conversation…';await loadChatMessages(false,true);
+    }
+    function renderComposer() {
+      const current=chatState.active;
+      const allowed=current && current.can_send && agentChatBuses(current.agent).includes(current.bus);
+      $('chat-form').hidden=!allowed;$('chat-input').disabled=chatState.sending;$('chat-send').disabled=chatState.sending || !$('chat-input').value.trim();
+      $('chat-send').textContent=chatState.sending ? 'Sending…' : chatState.pendingSend ? 'Retry send' : 'Send';
+      if (current && !allowed) $('chat-notice').textContent='Sending is unavailable for this session. Its retained conversation is still visible.';
+    }
+    function messageStatus(message) {
+      if (message.role === 'assistant') return message.in_reply_to ? 'Agent reply' : 'Agent message';
+      if ([...chatState.messages.values()].some(reply => reply.role === 'assistant' && reply.in_reply_to === message.id)) return 'Agent replied';
+      return ({accepted:'Accepted by broker · awaiting delivery',leased:'Delivery in progress',delivered:'Delivered to agent · awaiting reply',queued:'Queued for agent · awaiting reply',failed:'Delivery failed',expired:'Delivery expired',cancelled:'Delivery cancelled',replied:'Agent replied'})[message.status] || 'Transport status: ' + (message.status || 'unknown');
+    }
+    function renderMessages(scroll=false) {
+      const history=$('chat-history'),nearBottom=history.scrollHeight-history.scrollTop-history.clientHeight < 90;
+      $('chat-messages').replaceChildren();
+      for (const message of [...chatState.messages.values()].sort((a,b) => a.seq-b.seq)) {
+        const article=node('article','chat-message');article.dataset.role=message.role;article.dataset.seq=message.seq;
+        const heading=node('div','chat-message-header'),time=node('time','',new Date(message.created_at*1000).toLocaleString());
+        heading.append(node('strong','',message.role === 'user' ? 'You' : chatState.active.agent.name || 'Agent'),time);
+        article.append(heading,node('div','chat-message-content',message.content),node('p','chat-message-status',messageStatus(message)));
+        $('chat-messages').append(article);
+      }
+      if (!chatState.messages.size) $('chat-messages').append(node('p','chat-notice','No messages yet. Send a message to this exact agent session.'));
+      $('chat-more').hidden=!chatState.hasMore;
+      if (scroll || nearBottom) history.scrollTop=history.scrollHeight;
+    }
+    async function markChatRead() {
+      const current=chatState.active,history=$('chat-history');
+      if (!current || !chatState.cursor || document.hidden || !$('chat-dialog').open || history.scrollHeight-history.scrollTop-history.clientHeight > 40) return;
+      const epoch=chatState.epoch,selection=chatState.selection,through=chatState.cursor;
+      try {
+        const data=await chatAPI('chat_read',{chat:current.id,through});if (!chatCurrent(epoch,selection)) return;
+        current.unread=data.unread;mergeChat(current);renderInbox();
+      } catch(error) {chatError(error,epoch,selection);}
+    }
+    async function loadChatMessages(more=false,scroll=false) {
+      const current=chatState.active;if (!current || chatState.historyPending || chatState.sending || chatState.pendingSend) return;
+      chatState.historyPending=true;const epoch=chatState.epoch,selection=chatState.selection;
+      $('chat-more').disabled=true;
+      try {
+        // Refresh at most twenty nonterminal receipts per poll, in sequence
+        // rotation. Limit one avoids refetching large intervening reply bodies.
+        if (!more) {
+          const pending=[...chatState.messages.values()].filter(message => message.role === 'user' && message.seq <= chatState.cursor && ['accepted','leased'].includes(message.status)).sort((a,b) => a.seq-b.seq);
+          const ordered=[...pending.filter(message => message.seq > chatState.receiptSeq),...pending.filter(message => message.seq <= chatState.receiptSeq)];
+          for (const message of ordered.slice(0,20)) {
+            const receipt=await chatAPI('chat_messages',{chat:current.id,after:message.seq-1,limit:1});if (!chatCurrent(epoch,selection)) return;
+            if (!receipt.chat || receipt.chat.id !== current.id) throw new Error('The broker returned a different conversation.');
+            const updated=(receipt.messages || []).find(value => value.id === message.id && value.seq === message.seq && value.role === 'user');
+            if (updated) chatState.messages.set(updated.id,updated);
+            chatState.receiptSeq=message.seq;
+          }
+        }
+        // Only Load more advances an unfinished history page. A broker may
+        // shorten pages to its byte limit, so always follow next_after/has_more.
+        if (!more && chatState.hasMore) {renderMessages();renderComposer();markChatRead();return;}
+        const after=chatState.cursor;
+        const data=await chatAPI('chat_messages',{chat:current.id,after,limit:100});if (!chatCurrent(epoch,selection)) return;
+        if (!data.chat || data.chat.id !== current.id) throw new Error('The broker returned a different conversation.');
+        if (!Number.isSafeInteger(data.next_after) || data.next_after < after || (data.has_more && data.next_after === after)) throw new Error('The broker returned an invalid history page.');
+        mergeChat(data.chat);
+        for (const message of data.messages || []) if (Number.isSafeInteger(message.seq) && ['user','assistant'].includes(message.role)) chatState.messages.set(message.id,message);
+        chatState.cursor=data.next_after;chatState.hasMore=Boolean(data.has_more);
+        $('chat-notice').textContent=chatState.hasMore ? 'More retained messages are available below.' : 'Replies appear here when the agent explicitly responds.';
+        $('chat-error').textContent='';$('chat-retry').hidden=true;renderMessages(scroll);renderComposer();markChatRead();
+      } catch(error) {chatError(error,epoch,selection);}
+      finally {if (chatCurrent(epoch,selection)) {chatState.historyPending=false;$('chat-more').disabled=false;}}
+    }
+    async function sendChat() {
+      const current=chatState.active,message=$('chat-input').value;
+      if (!current || !current.can_send || !agentChatBuses(current.agent).includes(current.bus) || !message.trim() || chatState.sending) return;
+      const epoch=chatState.epoch,selection=chatState.selection;
+      if (!chatState.pendingSend || chatState.pendingSend.message !== message) chatState.pendingSend={request_id:crypto.randomUUID(),message};
+      const pending=chatState.pendingSend;chatState.sending=true;renderComposer();$('chat-error').textContent='';$('chat-retry').hidden=true;
+      $('chat-notice').textContent='Sending to the broker…';
+      try {
+        const data=await chatAPI('chat_send',{chat:current.id,...pending});if (!chatCurrent(epoch,selection)) return;
+        if (data.chat !== current.id || !data.message || data.message.role !== 'user') throw new Error('The broker returned an unexpected send receipt.');
+        chatState.messages.set(data.message.id,data.message);chatState.pendingSend=null;$('chat-input').value='';renderMessages(true);
+        $('chat-notice').textContent=messageStatus(data.message) + '. Replies will appear in this inbox.';
+      } catch(error) {
+        chatError(error,epoch,selection);
+        if (chatCurrent(epoch,selection)) $('chat-notice').textContent='Send not confirmed. Retry the same message safely; the broker prevents duplicate requests.';
+      } finally {if (chatCurrent(epoch,selection)) {chatState.sending=false;renderComposer();}}
     }
     function browserMode(active) {
       state.browserSession=active;
@@ -433,7 +726,7 @@
       } catch (_) {return false;} finally {clearTimeout(timeout);}
     }
     function disconnect(message='', preserveBrowser=false) {
-      state.epoch++; state.token = ''; state.data = null;
+      state.epoch++; state.token = ''; state.data = null;resetChat();
       if (graph) {
         try {graph.clear();}
         catch (_) {try {graph.destroy();} catch (_) {} graph=null;$('graph-panel').replaceChildren();}
@@ -580,7 +873,8 @@
         deviceLine.append(node('span','identity-key','Device'),node('span','',deviceName(agent)));deviceLine.title=deviceTitle(agent);
         location.append(ownerLine,deviceLine);
         if (deviceDetails(agent)) location.append(node('div','device-details',deviceDetails(agent)));
-        text.append(name,description,location); info.append(text); cell.append(info); row.append(cell);
+        if (agentChatBuses(agent).length) {const launch=node('button','button small chat-launch','Chat');launch.setAttribute('aria-label','Chat with ' + (agent.name || 'Unnamed agent'));launch.setAttribute('aria-haspopup','dialog');launch.addEventListener('click',() => openAgentChat(agent));text.append(name,description,location,launch);}
+        else text.append(name,description,location); info.append(text); cell.append(info); row.append(cell);
         const userCell=node('td','user-col'), owner=node('div','user-name' + (agent.user ? '' : ' unassigned'),userLabel(agent));owner.title=userLabel(agent);userCell.append(owner);row.append(userCell);
         const device=node('td','device-col'), label=node('div','device-name',deviceName(agent));label.title=deviceTitle(agent);
         device.append(label);
@@ -630,14 +924,14 @@
       if (!graphPage) {state.view='list';$('graph-panel').hidden=true;return;}
       try {
         state.view='graph';
-        if (!graph && typeof CommunicateGraph !== 'undefined') graph=CommunicateGraph.mount($('graph-panel'));
+        if (!graph && typeof CommunicateGraph !== 'undefined') graph=CommunicateGraph.mount($('graph-panel'),{onchat:openAgentChat,oninbox:openInbox});
         if (!graph) throw new Error('Graph assets unavailable');
         $('view-switch').hidden=false;$('graph-unavailable').hidden=true;
         $('graph-panel').hidden=state.view !== 'graph';
         // Pass only this reader's visible snapshot, never credentials or admin records.
         // Clear scope when identity or bus admission changes, even if IDs overlap.
         const visible=buses().filter(bus => state.bus === null || bus.name === state.bus);
-        graph.update({scope:JSON.stringify([state.data.server_id,state.data.principal,state.bus,buses().map(bus => bus.name).sort()]),agents,buses:visible,standalone:true});
+        graph.update({scope:JSON.stringify([state.data.server_id,state.data.principal,state.bus,buses().map(bus => bus.name).sort()]),agents,buses:visible,standalone:true,chat:graphChatConfig()});
       } catch (_) {
         if (graph) {try {graph.destroy();} catch (_) {} graph=null;}
         $('graph-panel').replaceChildren();
@@ -650,11 +944,11 @@
     function render() {
       if (!state.data) return;
       if (state.bus !== null && !buses().some(bus => bus.name === state.bus)) state.bus=null;
+      syncChatPermission();
       const admin=Boolean(state.data.is_admin);
       if (graphPage) {
         setFilterOptions('graph-bus',buses().map(bus => [bus.name,bus.name]),state.bus || '', 'All buses');
-        const path='/graph' + (state.bus === null ? '' : '?bus=' + encodeURIComponent(state.bus));
-        history.replaceState(null,'',path);
+        updateChatURL();
         document.title=(state.bus || 'All buses') + ' · Agent graph';
       }
       for (const element of document.querySelectorAll('.admin')) element.hidden=!admin;
@@ -684,7 +978,7 @@
         $('login').hidden=true;$('app').hidden=false;$('login-error').hidden=true;$('login-token').value='';
         $('stale-notice').hidden=true;$('connection-dot').className='dot live';$('connection-text').textContent='Connected to broker';
         $('graph-connection').textContent='Connected';
-        $('updated-at').textContent='Updated just now';render();
+        $('updated-at').textContent='Updated just now';render();pollChatList();if ($('chat-dialog').open && chatState.active) loadChatMessages();
       } catch(error) {
         if (epoch !== state.epoch) return;
         if (error.status === 401 || error.status === 403) {
@@ -765,6 +1059,17 @@
         row.append(info,revoke);list.append(row);
       }
     }
+    $('inbox-button').addEventListener('click',openInbox);
+    $('chat-back').addEventListener('click',openInbox);
+    $('chat-dialog').addEventListener('close',() => {if (!$('chat-dialog').open) {resetChatSelection();chatState.mode='inbox';updateChatURL();}});
+    $('chat-start').addEventListener('click',() => {if (chatState.target) startChat(chatState.target,$('chat-bus').value);});
+    $('chat-bus').addEventListener('change',() => {if (chatState.target) renderChatTarget(chatState.target,$('chat-bus').value);});
+    $('chat-form').addEventListener('submit',event => {event.preventDefault();return sendChat();});
+    $('chat-input').addEventListener('input',() => {if (chatState.pendingSend && chatState.pendingSend.message !== $('chat-input').value) chatState.pendingSend=null;renderComposer();});
+    $('chat-input').addEventListener('keydown',event => {if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {event.preventDefault();sendChat();}});
+    $('chat-more').addEventListener('click',() => loadChatMessages(true));
+    $('chat-history').addEventListener('scroll',() => {if (chatState.active && chatState.active.unread) markChatRead();});
+    $('chat-retry').addEventListener('click',() => chatState.pendingSend ? sendChat() : chatState.active ? loadChatMessages(chatState.hasMore) : chatState.target ? startChat(chatState.target,$('chat-bus').value) : pollChatList());
     $('login-form').addEventListener('submit',async event => {
       event.preventDefault();state.epoch++;state.token=$('login-token').value.trim();
       if (!state.token) return;
