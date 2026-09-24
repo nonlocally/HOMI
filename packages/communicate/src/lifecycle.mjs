@@ -208,9 +208,19 @@ export function unloadService(definition) {
   if (definition.platform === "darwin") {
     if (status.active) serviceRun("launchctl", ["bootout", `gui/${process.getuid()}/${definition.label}`]);
   } else if (status.active || status.enabled) serviceRun("systemctl", ["--user", "disable", ...(status.unitFileState === "enabled-runtime" ? ["--runtime"] : []), "--now", definition.label]);
-  const after = serviceState(definition);
-  if (after.active || after.enabled)
-    throw new Error("Service manager did not stop and disable the owned service; ownership retained");
+  // launchd can accept bootout before the job disappears from its domain.
+  // Poll only inspection, checking the owned path every time; a successful
+  // stop command alone is not permission to remove the unit or its ledger.
+  const deadline = performance.now() + 3000;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const after = serviceState(definition);
+    if (!after.active && !after.enabled) return;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0)
+      throw new Error("Service manager did not stop and disable the owned service; ownership retained");
+    Atomics.wait(sleeper, 0, 0, Math.min(100, remaining));
+  }
 }
 export function loadService(definition, activation = { active: true, enabled: true }) {
   serviceState(definition); // A colliding manager label is never ours to replace.

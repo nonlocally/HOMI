@@ -59,13 +59,23 @@ else if(a.includes('daemon-reload'))process.exit(0);
 if(op==='print'){
  if(process.env.FAIL_INSPECT==='1'){console.error('manager unavailable');process.exit(9);}
  const job=jobs[label];
+ if(job?.unloadPolls){
+  if(process.env.FAIL_PENDING_INSPECT==='1'){console.error('manager unavailable during removal');process.exit(9);}
+  if(process.env.FOREIGN_PENDING_UNIT==='1')job.path+='.foreign';
+  job.unloadPolls--;
+  if(!job.unloadPolls){job.active=false;job.enabled=false;}
+  fs.writeFileSync(file,JSON.stringify(jobs));
+ }
  if(!job||(a[0]==='print'&&!job.active)){console.error('Could not find service');process.exit(113);}
  console.log(a[0]==='print'?'path = '+job.path:'FragmentPath='+(process.env.EMPTY_FRAGMENT==='1'?'':job.path)+'\\nActiveState='+(job.active?'active':'inactive')+'\\nUnitFileState='+(job.enabled?(job.runtime?'enabled-runtime':'enabled'):'disabled'));process.exit(0);
 }
 if(op==='bootout'){
  if(process.env.FAIL_UNLOAD==='1'){console.error('manager refused unload');process.exit(9);}
  if(process.env.NOOP_UNLOAD==='1')process.exit(0);
- if(jobs[label]){jobs[label].active=false;if(a[0]!=='bootout')jobs[label].enabled=false;}
+ if(jobs[label]){
+  if(process.env.DELAY_UNLOAD_POLLS)jobs[label].unloadPolls=Number(process.env.DELAY_UNLOAD_POLLS);
+  else{jobs[label].active=false;if(a[0]!=='bootout')jobs[label].enabled=false;}
+ }
 }
 if(op==='enable'){
  jobs[label]??={active:false,path:path.join(process.env.XDG_CONFIG_HOME,'systemd/user',label)};
@@ -240,6 +250,40 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   assert.equal(readRegistry()[definition.label].active, true);
   assert.deepEqual(readRegistry()[standard.label], production, "isolated service changed production manager job");
 
+  // A successful manager command may return before the job is gone. Keep the
+  // owned file and ledger until subsequent inspection confirms removal.
+  process.env.DELAY_UNLOAD_POLLS = "3";
+  const delayedCallsStart = fs.readFileSync(calls, "utf8").length;
+  writeJson(ledger, { service: missingRecord });
+  await uninstallRecorded();
+  delete process.env.DELAY_UNLOAD_POLLS;
+  assert(!fs.existsSync(definition.path), "confirmed delayed unload retained the owned unit");
+  assert(!JSON.parse(fs.readFileSync(ledger)).service);
+  assert.equal(readRegistry()[definition.label].active, false);
+  const delayedCalls = fs.readFileSync(calls, "utf8").slice(delayedCallsStart).trim().split("\n").map(JSON.parse);
+  const unloadIndex = delayedCalls.findIndex((a) => a.includes("bootout") || a.includes("disable"));
+  assert(unloadIndex >= 0);
+  assert.equal(delayedCalls.filter((a) => a.includes("bootout") || a.includes("disable")).length, 1,
+    "asynchronous removal repeated a manager mutation");
+  assert.equal(delayedCalls.slice(unloadIndex + 1).filter((a) => a.includes("print") || a.includes("show")).length, 3,
+    "ownership released before the manager confirmed removal");
+  assert.deepEqual(readRegistry()[standard.label], production);
+
+  for (const failure of ["FAIL_PENDING_INSPECT", "FOREIGN_PENDING_UNIT"]) {
+    fs.writeFileSync(definition.path, record.content);
+    restoreManager();
+    writeJson(ledger, { service: missingRecord });
+    process.env.DELAY_UNLOAD_POLLS = "3";
+    process.env[failure] = "1";
+    await assert.rejects(uninstallRecorded(), /verify service ownership|another\/unknown unit/);
+    delete process.env[failure]; delete process.env.DELAY_UNLOAD_POLLS;
+    assert.deepEqual(JSON.parse(fs.readFileSync(ledger)).service, missingRecord);
+    assert.equal(fs.readFileSync(definition.path, "utf8"), record.content,
+      "unverified pending removal deleted the owned unit");
+    assert.equal(readRegistry()[definition.label].active, true);
+    assert.deepEqual(readRegistry()[standard.label], production);
+  }
+
   // Managed-path guards must stop aliases before writes; system /tmp aliases and
   // the intentional current release symlink are not mistaken for config files.
   const outside = path.join(temp, "outside"); fs.mkdirSync(outside);
@@ -254,7 +298,7 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   process.env.COMMUNICATE_DATA = alias;
   await assert.rejects(withInstallLock(() => {}), /symlink/);
   assert.deepEqual(fs.readdirSync(outside), []);
-  console.log(`PASS (${process.platform} fixture): scoped service ownership, explicit environment, unchanged refresh, original lineage/activity/enablement, missing-unit/rejected-unload ownership, restoration failure, and symlink boundaries`);
+  console.log(`PASS (${process.platform} fixture): scoped service ownership, explicit environment, unchanged refresh, original lineage/activity/enablement, missing-unit/rejected/delayed-unload ownership, restoration failure, and symlink boundaries`);
 } finally {
   if (server) await new Promise((resolve) => server.close(resolve));
   for (const key of Object.keys(process.env)) if (!(key in priorEnv)) delete process.env[key];
