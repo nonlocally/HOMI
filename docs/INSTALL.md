@@ -14,7 +14,7 @@ open a fresh session and ask your agent to create peers, send messages, or
 coordinate work. See the [Quickstart](QUICKSTART.md) for examples and
 [Homebrew](#homebrew) below for upgrades and removal.
 
-You can also install from the [HOMI 0.4.0 release archive](https://github.com/nonlocally/HOMI/releases/tag/v0.4.0).
+You can also install from the [HOMI 0.5.0 release archive](https://github.com/nonlocally/HOMI/releases/tag/v0.5.0).
 
 ## Requirements
 
@@ -39,10 +39,10 @@ The release provides `homi-VERSION.tar.gz` and its matching `.sha256` file.
 Download both, then verify the archive before extracting it:
 
 ```sh
-curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.4.0/homi-0.4.0.tar.gz
-curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.4.0/homi-0.4.0.tar.gz.sha256
-shasum -a 256 -c homi-0.4.0.tar.gz.sha256
-tar -xzf homi-0.4.0.tar.gz
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.5.0/homi-0.5.0.tar.gz
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.5.0/homi-0.5.0.tar.gz.sha256
+shasum -a 256 -c homi-0.5.0.tar.gz.sha256
+tar -xzf homi-0.5.0.tar.gz
 ```
 
 The archive contains the CLI, the MCP server, the plugin, the daemon, and its
@@ -56,7 +56,7 @@ to a machine over SSH installs exactly like a downloaded one.
 For Homebrew, run `homi setup`. From an extracted archive, use:
 
 ```sh
-./homi-0.4.0/bin/homi setup
+./homi-0.5.0/bin/homi setup
 ```
 
 With no flags in an interactive terminal, `setup` guides you through the clients,
@@ -69,13 +69,13 @@ For automation or a selection you already know, use explicit flags:
 
 ```sh
 # Preview only: no downloads, login, package installation or configuration writes.
-./homi-0.4.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --dry-run
+./homi-0.5.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --dry-run
 
 # Apply that selection; omit either client or profile you do not want.
-./homi-0.4.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --yes
+./homi-0.5.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --yes
 
 # CLI-only configuration, including on a server:
-./homi-0.4.0/bin/homi setup --no-clients --no-service
+./homi-0.5.0/bin/homi setup --no-clients --no-service
 ```
 
 Add `--ghostty` on macOS to select the application, the configured Nerd Font,
@@ -125,8 +125,8 @@ private file or stdin through `homi model add`.
 
 Setup saves the connection without making a model request. `homi model doctor`
 checks catalog access separately; an actual coding task establishes inference
-and tool use. See [model connections](MODELS.md). These commands are on the
-v0.5 development branch and are not included in the v0.4 archive above.
+and tool use. See [model connections](MODELS.md) for the nonlocally endpoint
+and client requirements. Model connections require HOMI 0.5 or later.
 
 ### Choosing a bus
 

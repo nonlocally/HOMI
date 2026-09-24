@@ -38,9 +38,14 @@ compatibility. Use the central inference API rather than the website's
 settings. The central path does not require an OpenWeb browser, terminal or
 computer to perform the coding work: that work runs through your local client.
 
-The URLs below are placeholders, not an announcement of a public model
-service. Obtain the actual endpoint and access from its operator. Availability
-and supported client/model combinations depend on that deployment.
+For the nonlocally deployment, use `https://mit.nonlocally.org/v1` with model
+`glm`. Claude's compatible base origin is `https://mit.nonlocally.org`, so its
+requests reach `/v1/messages`. Obtain an ordinary scoped inference credential
+from the service; installing HOMI does not grant model access. The older
+`llm.nonlocally.org` route is not the connection to use for this release.
+
+For another deployment, obtain its endpoint and access from its operator.
+Availability and supported client/model combinations depend on that deployment.
 
 ## Save a connection privately
 
@@ -56,8 +61,8 @@ with no access for other users, normally mode `0600`.
 
 ```sh
 homi model add research-glm \
-  --base-url https://models.example.invalid/v1 \
-  --anthropic-base-url https://models.example.invalid \
+  --base-url https://mit.nonlocally.org/v1 \
+  --anthropic-base-url https://mit.nonlocally.org \
   --model glm \
   --key-file /absolute/private/model-key
 ```
@@ -73,8 +78,8 @@ For a secret supplied on stdin:
 
 ```sh
 homi model add research-glm \
-  --base-url https://models.example.invalid/v1 \
-  --anthropic-base-url https://models.example.invalid \
+  --base-url https://mit.nonlocally.org/v1 \
+  --anthropic-base-url https://mit.nonlocally.org \
   --model glm \
   --key-stdin < /absolute/private/model-key
 ```

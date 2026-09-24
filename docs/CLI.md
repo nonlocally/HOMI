@@ -42,7 +42,7 @@ backs its own previous definition up beside it before refreshing it.
 
 Model connections configure execution, not identity or bus membership. See
 [model connections](MODELS.md) for private setup, client requirements and
-qualification limits. These commands are on the v0.5 development branch.
+qualification limits. These commands require HOMI 0.5 or later.
 
 ## Receipts
 

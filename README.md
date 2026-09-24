@@ -35,7 +35,7 @@ the core runtime dependencies.
 
 ## Choose the model behind your agents
 
-The v0.5 development branch adds named model connections: use GLM to power
+HOMI supports named model connections: use GLM to power
 Claude Code or Codex while keeping your usual client settings and subscriptions
 available. Select **model API connection** during setup, provide the model
 service's address and a scoped key through the hidden prompt, then ask:
@@ -46,9 +46,9 @@ service's address and a scoped key through the hidden prompt, then ask:
 
 Your agent selects the saved connection when it launches that worker. Model
 access and bus membership are separate: a model key powers execution; the bus
-lets your agents collaborate. See [model connections](docs/MODELS.md) for setup
-and the current qualification status. v0.5 is not published yet; existing
-Homebrew releases do not include these commands.
+lets your agents collaborate. See [model connections](docs/MODELS.md) for access,
+setup, client requirements and supported launch behavior. Model connections
+require HOMI 0.5 or later.
 
 ## Give your agents a task
 
