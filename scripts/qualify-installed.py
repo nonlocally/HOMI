@@ -174,7 +174,7 @@ class Qualification:
                     "CLAUDE_CONFIG_DIR": str(self.home / ".claude"), "CODEX_HOME": str(self.home / ".codex"),
                     "XDG_RUNTIME_DIR": str(base / "run"), "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "XDG_STATE_HOME": str(self.home / ".local/state"), "XDG_CACHE_HOME": str(self.home / ".cache"),
-                    "PYTHONDONTWRITEBYTECODE": "1", "HOMI_QUALIFY_BLOCKED": str(self.blocked)}
+                    "HOMI_QUALIFY_BLOCKED": str(self.blocked)}
         self.report["paths"] = {"temporary_home": str(self.home), "state": str(self.state), "installation": str(self.data), "executables": resolved}
 
     @contextlib.contextmanager
@@ -328,9 +328,11 @@ class Qualification:
             row["installed"] = str(installed)
             self.report["paths"]["installed"] = str(installed)
         with self.check("installed daemon and actual MCP mailbox") as row:
+            payload_before = files(installed)
             row["daemon"] = self.start(installed)
             row["mcp"] = self.mcp(installed, mail=True)
             self.stop()
+            require(files(installed) == payload_before, "daemon or MCP modified the installed payload")
         mail = self.state / "homi/mail/qualification-receiver/inbox.jsonl"
         mail_before = mail.read_bytes()
         self.profile()

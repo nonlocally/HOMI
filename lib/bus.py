@@ -31,6 +31,8 @@ import urllib.request
 import uuid
 import webbrowser
 
+# Worker and broker imports must not add cache files to an installed release.
+sys.dont_write_bytecode = True
 LIB = Path(__file__).resolve().parent
 # Captured once: a running worker must not mistake changed source for code it loaded.
 WORKER_RUNTIME = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()

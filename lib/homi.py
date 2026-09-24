@@ -49,6 +49,9 @@ import time
 import uuid
 import zlib
 
+# Installed release payloads are immutable. Service managers invoke this file
+# directly, so correctness cannot depend on a shell setting Python's -B flag.
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cc_peer  # deliver, _sidecar_obj, _read_line, _extract_text, _addr_from
 import homi_seat  # the seat plane (tmux driver); imported lazily-usable, no tmux at import
