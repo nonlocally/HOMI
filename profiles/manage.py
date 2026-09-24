@@ -109,7 +109,7 @@ class Profile:
 
     def payload_id(self):
         h = hashlib.sha256()
-        for p in sorted((HERE / "runtime").rglob("*")):
+        for p in sorted([*(HERE / "runtime").rglob("*"), HERE / "manage.py", HERE / "NOTICE.md"]):
             if p.is_file():
                 h.update(str(p.relative_to(HERE)).encode() + b"\0" + p.read_bytes())
         return VERSION + "-" + h.hexdigest()[:16]
@@ -244,12 +244,15 @@ class Profile:
                 try:
                     shutil.copytree(HERE / "runtime", tmp / "runtime")
                     shutil.copy2(HERE / "NOTICE.md", tmp / "NOTICE.md")
+                    # The optional scheduler shares our ownership machinery.
+                    # Keep it self-contained after the source/release moves.
+                    shutil.copy2(HERE / "manage.py", tmp / "manage.py")
                     os.replace(tmp, dest)
                 finally:
                     if tmp.exists():
                         shutil.rmtree(tmp)
             else:
-                for source in (HERE / "runtime").rglob("*"):
+                for source in [*(HERE / "runtime").rglob("*"), HERE / "manage.py", HERE / "NOTICE.md"]:
                     if source.is_file():
                         installed = dest / source.relative_to(HERE)
                         self.check_parent(installed)

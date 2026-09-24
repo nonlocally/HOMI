@@ -180,6 +180,10 @@ class Profiles(unittest.TestCase):
         wrapper = self.home / ".local/bin/homi-snapshot"
         self.assertEqual(wrapper.read_text(), self.profile.snapshot_schedule(runtime).wrapper_text())
         self.assertIn("homi-snapshot", self.run_tool(str(wrapper), "help").stdout)
+        self.assertEqual((runtime.parent / "manage.py").read_bytes(), (ROOT / "profiles/manage.py").read_bytes())
+        env = dict(self.env, COMMUNICATE_DATA=str(self.home / "no-core-install"))
+        preview = self.run_tool(str(wrapper), "schedule", "preview", env=env)
+        self.assertTrue(json.loads(preview.stdout)["read_only"])
         self.assertFalse((self.home / "Library/LaunchAgents").exists())
         self.assertFalse((self.home / ".config/systemd").exists())
         self.assertTrue(self.profile.uninstall()["ok"])
