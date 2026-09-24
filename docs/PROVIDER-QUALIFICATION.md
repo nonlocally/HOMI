@@ -180,3 +180,8 @@ Use `pass`, `fail`, `unqualified`, or `not tested` explicitly. The release suppo
 matrix must be no broader than these measured results. Keep different-release
 upgrade/rollback and legacy retirement as separate gates; repeated setup of one
 artifact cannot qualify them.
+
+The separate [installed durable seat acceptance](SEAT-PROVIDER-QUALIFICATION.md)
+uses a real Claude terminal in an isolated tmux server to qualify identity
+creation, generic command spawning, literal input/read and an explicit-token
+durable reply. It does not replace the client-discovery or two-device checks.
