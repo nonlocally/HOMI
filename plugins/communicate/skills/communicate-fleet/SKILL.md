@@ -5,7 +5,13 @@ description: Reaching agents on other devices — bus invitations over HTTPS for
 
 # communicate-fleet — other devices
 
-For a shared registered bus, use the `communicate-bus` skill. The owner issues
+For a shared registered bus, first inspect
+`communicate bus status --no-start --json` and use the configured hub. If the
+user names a different hub, inspect it with global `--hub URL` and keep that
+selection. HOMI's hosted `https://bus.nonlocally.org` is an available option;
+it requires enrollment there. Missing enrollment calls for a scoped invitation,
+not a local replacement. Follow `communicate-bus` for connect/use.
+The owner issues
 a scoped invite with `communicate bus invite BUS --url https://HOST`; the
 participant runs `communicate bus connect INVITE_CODE` and then
 `communicate bus register --bus BUS` inside its existing agent session.
@@ -62,7 +68,7 @@ communicate down     # stop wakes + unbridge all + unpeer all; removes every pla
 
 `down` is deliberately complete: sidecars it planted, tunnels, daemons — gone.
 It does not stop the bundled durable HOMI daemon. Use `homi stop` for that
-separate service when intended; saved identities and mail remain.
+separate service when intended; saved identities and messages remain.
 
 ## Safety
 

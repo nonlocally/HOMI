@@ -1,9 +1,9 @@
 ---
 name: homi-core
-description: Create persistent HOMI agents, give them work and collect their answers. Use for requests such as "create a Claude researcher", "ask my worker to investigate this", persistent mailboxes, or explicit terminal-seat control. Existing native sessions and registered buses use their own supported routes.
+description: Create persistent HOMI agents, give them work and collect their answers. Use for requests such as "create a Claude researcher", "ask my worker to investigate this", saved agent messages, or explicit terminal-seat control. Existing native sessions and registered buses use their own supported routes.
 ---
 
-# HOMI identities, mail and execution
+# HOMI agents, messages and execution
 
 The user states the outcome; you perform the HOMI operations with MCP tools or
 the installed CLI. For example, "Create a Claude agent called researcher,
@@ -15,7 +15,7 @@ path that owns the target; a matching label in another path is not a substitute.
 
 | Target | Commands | Meaning |
 | --- | --- | --- |
-| Durable identity | `homi agents`, `claim`, `send`, `ask`, `inbox` | A saved address/mailbox with an optional current execution. |
+| Durable identity | `homi agents`, `claim`, `send`, `ask`, `inbox` | A persistent name with saved messages and optional current execution. |
 | Existing native session | `homi native agents`, `route`, `ask`, `codex queue` | An exact supported Claude Code socket or Codex queue target; no pane required. |
 | Registered bus agent | `homi bus status`, `register`, `agents`, `send`, `reply` | Exact registrations under the selected hub's membership rules. |
 | Terminal seat | `homi seat spawn`, `read`, `send`, `state`, `bind` | Explicit terminal control on the configured tmux server or granted remote link. |
@@ -51,7 +51,7 @@ alone does not start it, and neither action joins a remote bus.
    unambiguous; `ok:true` from spawning alone is insufficient. If adoption is
    incomplete, inspect that returned seat for startup, trust or login prompts.
    Resolve only actions already authorized; do not substitute another session
-   or automatically enable terminal mail relay. Codex spawning does not bind
+   or automatically enable keyboard relay. Codex spawning does not bind
    its durable name to a queue. Establish the exact thread belonging to the
    returned seat, then use its verified native or bus queue and reply mechanism.
    Do not guess from the newest transcript or shared cwd; report the blocker if
@@ -107,7 +107,7 @@ return token. Existing ask also supports a best-effort natural-reply fallback;
 do not describe such a match as explicitly correlated. Timeout means the wait
 ended, not that the request was never stored or will never receive a reply.
 
-Stored, submitted, and replied are different evidence. Mail can persist while
+Stored, submitted, and replied are different evidence. Messages can persist while
 its execution is absent. A socket write or Codex queue receipt does not prove
 the model consumed the turn. Reading terminal output does not prove a reply.
 Follow the adapter's reported state, including held, unavailable and unknown.
@@ -124,13 +124,13 @@ homi seat bind %ID reviewer
 
 Panes are scoped to their device and tmux server lifetime. A pane ID is not a
 globally durable identity, an authenticated principal, or a sandbox boundary.
-Ordinary shell input can execute commands. Do not deliver agent mail into a
-shell just because native messaging is unavailable. Mail relay requires the
+Ordinary shell input can execute commands. Do not deliver agent messages into a
+shell just because native messaging is unavailable. Keyboard relay requires the
 existing explicit `seat bind --relay` opt-in and agent-surface checks.
 
 `homi seat interrupt` sends Escape; `seat kill` terminates a pane. `homi release`
 releases a durable claim, and `homi stop` stops the daemon. These are distinct
-from deleting saved mail/state. Do not use them interchangeably.
+from deleting saved messages and state. Do not use them interchangeably.
 
 ## Other devices and the bus
 
@@ -139,8 +139,12 @@ devices use `homi pair USER@HOST`. Provisioning and SSH access are intentional
 operations, not consequences of discovering a hostname. Remote seat control is
 separately granted with the existing `--allow-seats` option.
 
-Use `communicate-bus` for local, self-hosted or invited HTTPS buses, graph and
-human inbox. A bus registration is not automatically a durable HOMI claim.
+Before bus discovery or registration, inspect `homi bus status --no-start --json`
+and use the configured hub. For an explicit hosted request, inspect
+`homi bus --hub https://bus.nonlocally.org status --no-start --json`; it requires
+enrollment there, never a local fallback. Use `communicate-bus` for the existing
+connect/use flow, local or self-hosted buses, graph and human inbox.
+A bus registration is not automatically a durable HOMI claim.
 Bus replies must retain their hub/registration/message identity; durable HOMI
 replies must retain their return token. Remote enrollment, publication and
 compute-control permission remain distinct.

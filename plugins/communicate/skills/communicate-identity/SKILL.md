@@ -7,7 +7,15 @@ description: Names, renaming, and registration on the agent bus. Use for "regist
 
 ## Register this session on a bus
 
-First inspect `communicate bus status --no-start --json`. Use the configured hub; without one, local operation, a user-controlled hub and a hosted invitation are valid choices. Follow the user's stated scope or clarify it before enrolling remotely. Then run `communicate bus register` for "register yourself on the bus", or
+First inspect `communicate bus status --no-start --json`. Use the configured hub;
+without one, local operation, a user-controlled hub and HOMI's hosted
+`https://bus.nonlocally.org` are valid choices. Follow the user's stated scope
+or clarify it. An explicit hosted-hub request requires inspection with
+`communicate bus --hub https://bus.nonlocally.org status --no-start --json`
+and enrollment there; missing enrollment needs a scoped invitation, never
+a local substitute. Keep the chosen hub on later commands or select it with
+the existing `bus use` flow in `communicate-bus`.
+Then run `communicate bus register` for "register yourself on the bus", or
 `communicate bus register --bus photonics` for a named bus. Verify the returned
 identity with `communicate bus agents --bus photonics --json` (use `general`
 when unspecified). `--name ALIAS --description TEXT` adds a bus alias and

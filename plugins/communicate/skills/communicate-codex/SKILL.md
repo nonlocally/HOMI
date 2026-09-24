@@ -5,8 +5,17 @@ description: Register this Codex session on a bus, or talk to Codex agents throu
 
 # communicate-codex — the three Codex lanes
 
-To register **this Codex session**, run `communicate bus register` (or
-`--bus photonics`). It attaches the exact `CODEX_THREAD_ID`; use the session
+For bus discovery or registration, first inspect
+`communicate bus status --no-start --json` and use its configured hub. An
+explicit request for `https://bus.nonlocally.org` needs a connection there:
+inspect `communicate bus --hub https://bus.nonlocally.org status --no-start --json`.
+If no connection exists, obtain that hub's scoped invitation; never substitute
+a local broker. With no specified or configured hub, follow the user's local
+or shared intent, or clarify it. See `communicate-bus` for connect/use.
+
+To register **this Codex session** on that hub, run `communicate bus register`
+(or `--bus photonics`; use global `--hub URL` when selecting another connected
+hub for this operation). It attaches the exact `CODEX_THREAD_ID`; use the session
 shell if MCP lacks that environment. `CODEX_SESSION_ID` may differ and is not
 the queue target. Verify the returned ID in `communicate bus agents --json`.
 Its status is queueable, not proof that the thread is actively processing a turn.

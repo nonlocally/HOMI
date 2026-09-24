@@ -13,13 +13,30 @@ general recipient. A private bus requires both agents to explicitly join.
 Existing local Claude/Codex discovery and native socket/SSH routes work without
 bus publication or membership.
 
-First run `communicate bus status --no-start --json` (MCP `bus_status`) to
+Before discovery, registration or opening the dashboard, first run
+`communicate bus status --no-start --json` (MCP `bus_status`) to
 inspect configuration without starting a broker. A plain **"the bus"** uses
 the configured hub. With no hub configured, local operation and a user-controlled
 or hosted broker are valid choices. Follow stated intent; clarify the scope if
 it is unclear. Explicit local registration starts a broker for this OS account
 without requiring any hosted invitation. A request for a specific shared hub
 requires enrollment there; never silently create a local substitute.
+
+HOMI's hosted hub is `https://bus.nonlocally.org`. It is one available choice,
+not automatic membership or a replacement for an existing configured hub.
+When the user explicitly selects it, inspect that origin without changing
+the default:
+
+```sh
+communicate bus --hub https://bus.nonlocally.org status --no-start --json
+```
+
+MCP `bus_status` accepts the same URL as `hub`. If `configured:false`, ask for
+a scoped invitation for that hub and use `communicate bus connect INVITE_CODE`.
+If configured but unreachable, report the connection failure; do not register
+locally instead. Keep the selected hub on later operations or deliberately
+select the existing connection with `communicate bus use https://bus.nonlocally.org`.
+Provider login and installation do not establish this enrollment.
 
 When the user says **"register yourself on the bus"**, run:
 
@@ -60,8 +77,12 @@ broker selection; the currently selected broker might be different.
 `communicate bus --hub https://HOST send TARGET --bus BUS --from MY_ID -- MESSAGE`
 selects an already connected broker for one send without changing the default.
 Use `communicate bus --hub https://HOST receipt ID` for its receipt. MCP
-`bus_send`, `bus_reply`, and `bus_receipt` have an optional `hub` argument with the same
-behavior. Always preserve the broker from a supplied bus reply command.
+`bus_status`, `bus_list`, `bus_agents`, `bus_register`, `bus_leave`,
+`bus_dashboard`, `bus_create`, `bus_device`, `bus_send`, `bus_reply` and
+`bus_receipt` accept an optional `hub` with the same behavior.
+Enrollment and default selection use the existing CLI `connect` and `use`
+commands; they are not MCP tools. Always preserve the broker from a supplied
+bus reply command.
 
 MCP equivalents are `bus_register`, `bus_list`, `bus_agents`, `bus_leave`,
 `bus_send`, `bus_receipt`, `bus_status`, `bus_dashboard`, `bus_create`, and

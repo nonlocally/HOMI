@@ -17,13 +17,18 @@ and explicit registered buses (`homi bus`, compatible `communicate bus`).
 Choose the path that owns the requested target; do not substitute a new agent
 or silently switch namespaces to make a send appear successful.
 
-For **"register yourself on the bus"**, inspect
+Before bus discovery, registration or opening the dashboard, inspect
 `communicate bus status --no-start --json` first. Use the configured hub. With
 none configured, follow the user's choice of local operation, their own hub,
-or a hosted invitation; clarify scope if the intended bus is unclear. Local
+or HOMI's hosted hub at `https://bus.nonlocally.org`; clarify scope if the
+intended bus is unclear. For an explicit hosted-hub request, inspect
+`communicate bus --hub https://bus.nonlocally.org status --no-start --json`
+and keep that hub on subsequent commands. If it reports `configured:false`,
+obtain a scoped invitation and use the existing `bus connect` flow. Local
 operation needs no hosted account. A request for a particular shared hub needs
 that hub's enrollment; do not silently satisfy it with a local broker.
-Then run `communicate bus register`, or `--bus photonics` for a named bus.
+Then run `communicate bus register`, or `--bus photonics` for a named bus,
+on the selected hub. See `communicate-bus` for hub selection and enrollment.
 `general` belongs to the selected broker, not a global public directory.
 
 Use `communicate bus send TARGET --bus BUS -- MESSAGE` for bus messages.
@@ -116,14 +121,14 @@ address; answering "in place" only reaches them if the block says so.
 Claude Code guards inbound peer messages. Default is **mode parity**: a message
 auto-delivers only when sender and receiver are in the same permission class
 (bypass↔bypass or prompting↔prompting); mismatched or unattested senders are
-HELD for the human, and held mail EXPIRES (~5 min default). The receiving
+HELD for the human, and held messages EXPIRE (~5 min default). The receiving
 user's `~/.claude/settings.json` can set `"crossSessionInbound": "accept"`
 (deliver everything), `"hold"`, or `"refuse"`. If your message seems ignored,
 suspect the gate or its expiry — say so instead of retrying blindly.
 
 ## Safety model
 
-Transport is your own filesystem + ssh. Anyone who can write the socket can
+The native session routes use your own filesystem and SSH. Anyone who can write the socket can
 message the agent; bridging widens that to whoever holds the ssh login. Only
 bridge to ends you trust. `communicate down` tears down everything communicate
 started; `communicate status` shows what is up.
@@ -133,6 +138,6 @@ The wire protocol itself (frame JSON, sidecar schema, liveness rules) is in
 hand-rolling a listener or planting sidecars.
 
 The bundled bus gateway supports scoped registration and invitations over
-HTTPS. The same installation also supplies durable HOMI identities, mailboxes,
+HTTPS. The same installation also supplies durable HOMI identities, saved messages,
 device links and seats. See `homi-core` for those workflows; `communicate down`
-does not stop the durable daemon or erase its mail.
+does not stop the durable daemon or erase its messages.

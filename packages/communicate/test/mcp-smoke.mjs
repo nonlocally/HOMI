@@ -90,10 +90,28 @@ try {
   assert(/NAME|no reachable agents/.test(await call("agents_list")), "legacy agents_list output");
   const fresh = await jsonCall("bus_status");
   assert(fresh.configured === false && fresh.hub === null, "first-use bus_status must not invent a local hub");
+  for (const hub of ["local", "https://unconnected.invalid"]) {
+    const scoped = await jsonCall("bus_status", { hub });
+    assert(scoped.configured === false && scoped.hub === null, "scoped first-use status must not invent an enrollment");
+  }
   assert(!existsSync(path.join(env.COMM_STATE, "bus", "server.json")), "first-use bus_status started a local broker");
+  assert(!existsSync(path.join(env.COMM_STATE, "bus", "worker.json")), "first-use bus_status started a worker");
+  for (const [tool, args] of [
+    ["bus_list", {}],
+    ["bus_agents", { bus: "general" }],
+    ["bus_register", { kind: "codex", session: senderThread }],
+    ["bus_dashboard", {}],
+    ["bus_create", { name: "must-not-exist" }],
+    ["bus_leave", { target: "unknown", bus: "general" }],
+  ]) {
+    assert(/not connected/.test(await call(tool, { ...args, hub: "https://unconnected.invalid" }, true)),
+      `${tool} must reject an unconnected explicit hub instead of choosing a local broker`);
+  }
+  assert(!existsSync(path.join(env.COMM_STATE, "bus", "server.json")), "explicit-hub operations started a fallback local broker");
+  assert(!existsSync(path.join(env.COMM_STATE, "bus", "registrations.json")), "unconnected-hub registration created an adapter");
   assert(/cannot identify this session/.test(await call("bus_register", {}, true)), "missing self must fail without creating an agent");
-  await call("bus_create", { name: "photonics" });
-  const sender = await jsonCall("bus_register", { bus: "photonics", kind: "codex", session: senderThread, description: "Sender fixture" });
+  await call("bus_create", { name: "photonics", hub: "local" });
+  const sender = await jsonCall("bus_register", { bus: "photonics", kind: "codex", session: senderThread, description: "Sender fixture", hub: "local" });
   const recipient = await jsonCall("bus_register", { bus: "photonics", kind: "codex", session: recipientThread });
   assert(sender.id && recipient.id && sender.id !== recipient.id, "distinct current-session registrations");
   const roster = await jsonCall("bus_agents", { bus: "photonics" });
@@ -102,6 +120,21 @@ try {
   assert(!JSON.stringify(general).includes(sender.id), "private registration leaked into general");
   const message = "literal quotes ' \" $HOME `touch nope` $(touch nope)\nsecond line";
   const hub = (await jsonCall("bus_status")).hub;
+  const selectedBefore = readFileSync(path.join(env.COMM_STATE, "bus", "client.json"), "utf8");
+  assert((await jsonCall("bus_status", { hub })).hub === hub, "bus_status did not inspect the explicit connected hub");
+  assert(JSON.stringify(await jsonCall("bus_list", { hub })).includes("photonics"), "bus_list did not reach the explicit connected hub");
+  assert(JSON.stringify(await jsonCall("bus_agents", { hub, bus: "photonics" })).includes(sender.id), "bus_agents did not reach the explicit connected hub");
+  const unconnected = await jsonCall("bus_status", { hub: "https://unconnected.invalid" });
+  assert(unconnected.configured === false && unconnected.hub === null, "explicit-hub status incorrectly reported the configured default");
+  for (const [tool, args] of [
+    ["bus_list", {}], ["bus_agents", { bus: "photonics" }], ["bus_dashboard", {}],
+    ["bus_create", { name: "must-not-exist" }], ["bus_leave", { target: recipient.id, bus: "photonics" }],
+  ]) {
+    assert(/not connected/.test(await call(tool, { ...args, hub: "https://unconnected.invalid" }, true)),
+      `${tool} must not fall back to an existing default broker`);
+  }
+  assert(readFileSync(path.join(env.COMM_STATE, "bus", "client.json"), "utf8") === selectedBefore,
+    "scoped status/discovery changed the saved broker selection");
   const device = await jsonCall("bus_device", { name: "MCP device fixture", hub });
   assert(device.device === "MCP device fixture", "bus_device failed to update this device label");
   assert(device.device_id === sender.device_id && device.user === sender.user, "device update changed enrollment identity or account");
@@ -134,11 +167,11 @@ try {
   }
   assert(replyQueued, "scoped MCP reply did not queue to original sender");
   assert((await jsonCall("bus_status")).hub === hub, "operation-specific hub changed the default connection");
-  const dashboard = await call("bus_dashboard");
+  const dashboard = await call("bus_dashboard", { hub });
   assert(/^http:\/\/127\.0\.0\.1:\d+\/#token=\S+\s*$/.test(dashboard), "dashboard must return authenticated loopback URL");
   const page = await fetch(dashboard.split("#")[0]);
   assert(page.status === 200 && (await page.text()).includes("<html"), "dashboard asset missing");
-  await call("bus_leave", { target: recipient.id, bus: "photonics" });
+  await call("bus_leave", { target: recipient.id, bus: "photonics", hub });
   const after = await jsonCall("bus_agents", { bus: "photonics" });
   assert(!JSON.stringify(after).includes(recipient.id), "leave did not remove membership");
   await call("bus_status");
