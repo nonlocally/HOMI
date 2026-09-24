@@ -50,6 +50,17 @@ paths in a fresh client: falling back to an old checkout does not qualify the ne
 installation. Disable conflicting legacy integration reversibly only on designated
 test machines, preserving their configuration and active work.
 
+Claude setup records whether the previous user-scope plugin was installed,
+separately from whether it was enabled. Uninstall restores an installed but
+disabled original through the Claude CLI, then restores the owned settings keys.
+First originals survive updates and rollback. A later change to the owned
+enablement, an earlier ledger lacking installed-state evidence, or another scope
+using the same marketplace requires reconciliation before replacement.
+If a previous Claude marketplace points through this installer's mutable
+`current` link, setup records its resolved old payload before changing the link.
+Restoration uses that retained payload's path and original plugin version; the
+literal old path remains in the ledger. Unrelated user symlinks are not changed.
+
 Codex setup records the previous local marketplace, installed/enabled state and
 the exact user configuration for `communicate@communicate` in its private install
 ledger. It retains custom tool policies while enabling the new installation, and

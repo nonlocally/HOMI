@@ -19,12 +19,16 @@ fs.writeFileSync(settings, JSON.stringify({ sentinel: "keep", enabledPlugins: { 
 fs.writeFileSync(path.join(home, "bin/claude"), `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path');
 const a=process.argv.slice(2), home=process.env.HOME;
+const installed=path.join(home,'claude-installed');
 if (a[0]==='--version') { console.log('fixture'); process.exit(0); }
 if (fs.existsSync(path.join(home,'fail-client'))) process.exit(9);
+if(a[0]==='plugin'&&['update','install'].includes(a[1]))fs.writeFileSync(installed,'user');
+if(a[0]==='plugin'&&a[1]==='uninstall')fs.rmSync(installed,{force:true});
 if (a[0]==='plugin' && a[1]==='list') {
+ if(!fs.existsSync(installed)){console.log('[]');process.exit(0);}
  const market=JSON.parse(fs.readFileSync(path.join(home,'.claude/settings.json'))).extraKnownMarketplaces.communicate.source.path;
  const p=path.join(market,'communicate/.claude-plugin/plugin.json');
- console.log(JSON.stringify([{id:'communicate@communicate',scope:'user',version:JSON.parse(fs.readFileSync(p)).version}]));
+ console.log(JSON.stringify([{id:'communicate@communicate',scope:'user',enabled:true,version:JSON.parse(fs.readFileSync(p)).version}]));
 }
 `, { mode: 0o755 });
 const env = { ...process.env, HOME: home, COMMUNICATE_DATA: data, COMM_STATE: state,

@@ -20,13 +20,14 @@ args = sys.argv[1:]
 root = pathlib.Path(os.environ['HOME'])
 with (root / 'claude.log').open('a') as f: f.write(json.dumps(args) + '\\n')
 cached = root / 'claude-cached-version'
+if args[:2] == ['plugin', 'uninstall']: cached.unlink(missing_ok=True)
 if args[:2] == ['plugin', 'update'] and not cached.exists(): sys.exit(1)
 if args[:2] in (['plugin', 'update'], ['plugin', 'install']):
     if (root / 'claude-fail-refresh').exists(): sys.exit(1)
     if args[1] == 'update' and (root / 'claude-skip-update').exists(): sys.exit(0)
     if not (root / 'claude-keep-stale').exists(): cached.write_text(json.loads((pathlib.Path(json.loads((root / ".claude/settings.json").read_text())["extraKnownMarketplaces"]["communicate"]["source"]["path"]) / "communicate/.claude-plugin/plugin.json").read_text())["version"])
 if args == ['plugin', 'list', '--json']:
-    print(json.dumps([{'id': 'communicate@communicate', 'scope': 'user', 'version': cached.read_text()}]))
+    print(json.dumps([{'id': 'communicate@communicate', 'scope': 'user', 'enabled': True, 'version': cached.read_text()}] if cached.exists() else []))
 `, {mode: 0o755});
 const sp = path.join(fakeHome, ".claude", "settings.json");
 writeFileSync(sp, JSON.stringify({ sentinel: "keep-me", enabledPlugins: { "existing@mkt": true }, permissions: { allow: ["Read"] } }, null, 2));
@@ -111,6 +112,9 @@ writeFileSync(path.join(fakeHome, "claude-cached-version"), "0.1.0");
 writeFileSync(path.join(fakeHome, "claude-keep-stale"), "");
 if (runCli("setup", "--claude").status === 0) die("stale Claude cache reported a successful refresh");
 rmSync(path.join(fakeHome, "claude-keep-stale"));
+// The persistent failure fixture also prevented compensating cache installation.
+// Restore that external prerequisite before exercising ordinary removal.
+writeFileSync(path.join(fakeHome, "claude-cached-version"), installedVersion);
 
 // 3. uninstall restores
 r = runCli("setup", "--claude", "--uninstall");

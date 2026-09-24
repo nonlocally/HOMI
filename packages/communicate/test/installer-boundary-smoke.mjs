@@ -23,11 +23,14 @@ function fixture(name) {
 const fs=require('node:fs'),path=require('node:path'),a=process.argv.slice(2),h=process.env.HOME;
 fs.appendFileSync(path.join(h,'calls'),JSON.stringify(a)+'\\n');
 const market=path.join(h,'registered-market');
+const installed=path.join(h,'claude-installed');
 if(a[0]==='--version') {console.log('fixture');process.exit(0);}
 if(a[1]==='marketplace'&&a[2]==='add') fs.writeFileSync(market,a[3]);
 if(a[1]==='marketplace'&&a[2]==='remove') fs.rmSync(market,{force:true});
 if(['update','install'].includes(a[1])&&fs.existsSync(path.join(h,'fail-refresh')))process.exit(9);
-if(a[1]==='list')console.log(JSON.stringify([{id:'communicate@communicate',scope:'user',version:JSON.parse(fs.readFileSync(path.join(JSON.parse(fs.readFileSync(path.join(h,'.claude/settings.json'))).extraKnownMarketplaces.communicate.source.path,'communicate/.claude-plugin/plugin.json'))).version}]));
+if(['update','install'].includes(a[1]))fs.writeFileSync(installed,'user');
+if(a[1]==='uninstall')fs.rmSync(installed,{force:true});
+if(a[1]==='list')console.log(JSON.stringify(fs.existsSync(installed)?[{id:'communicate@communicate',scope:'user',enabled:true,version:JSON.parse(fs.readFileSync(path.join(JSON.parse(fs.readFileSync(path.join(h,'.claude/settings.json'))).extraKnownMarketplaces.communicate.source.path,'communicate/.claude-plugin/plugin.json'))).version}]:[]));
 `, { mode: 0o755 });
   fs.writeFileSync(path.join(home, 'bin/codex'), '#!/bin/sh\nprintf \'[]\\n\'\n', { mode: 0o755 });
   return { home, env, settings: path.join(home, '.claude/settings.json') };

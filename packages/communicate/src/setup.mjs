@@ -121,6 +121,48 @@ function writeSettings(obj, dry, why) {
   log(`${why} in ${p} (${hadSettings ? "private backup written" : "private file created"})`);
 }
 
+function claudePlugin() {
+  const result = clientExec("claude", ["plugin", "list", "--json"]);
+  let rows;
+  try { rows = result.status === 0 ? JSON.parse(result.stdout) : null; } catch {}
+  if (!Array.isArray(rows)) throw new Error("Could not inspect Claude user-scope installed plugin state; no client changes made");
+  if (rows.some((row) => row.id === PLUGIN_ID && row.scope !== "user"))
+    throw new Error("Another Claude scope uses the HOMI plugin marketplace; preserve/manage that scope before replacing its shared registration");
+  const matches = rows.filter((row) => row.id === PLUGIN_ID && row.scope === "user");
+  if (matches.length > 1 || (matches.length && typeof matches[0].enabled !== "boolean"))
+    throw new Error("Claude user-scope installed/enabled state is ambiguous; no client changes made");
+  return { installed: matches.length === 1, enabled: matches[0]?.enabled ?? false };
+}
+
+function snapshotClaude() {
+  const settings = readSettings();
+  if (!executable("claude")) return { settings, available: false };
+  const state = claudePlugin();
+  if (state.installed && !settings.extraKnownMarketplaces?.[MARKET_ID])
+    throw new Error("Installed Claude HOMI plugin has no restorable user marketplace; preserve its registration before setup");
+  const restoreMarket = structuredClone(settings.extraKnownMarketplaces?.[MARKET_ID]);
+  const source = restoreMarket?.source?.path;
+  const mutable = path.resolve(currentLink());
+  const aliases = [mutable];
+  if (existsSync(path.dirname(mutable))) aliases.push(path.join(realpathSync(path.dirname(mutable)), path.basename(mutable)));
+  // Old packages registered through `current`. Pin that managed pointer before
+  // switching it, or uninstall would reinstall the new package as the original.
+  // Ordinary user symlinks elsewhere remain entirely user-controlled.
+  if (source && aliases.some((base) => path.resolve(source).startsWith(base + path.sep)))
+    restoreMarket.source.path = realpathSync(source);
+  return { settings, restoreMarket, ...state, available: true };
+}
+
+function checkClaudeOwnership(record, snapshot) {
+  if (!record) return;
+  if (typeof record.previousInstalled !== "boolean" || typeof record.previousPluginEnabled !== "boolean")
+    throw new Error("Earlier installer did not record original Claude installed/enabled state. Preserve and manage that registration manually before retrying; no client changes made.");
+  if (!snapshot.available || !snapshot.installed || !snapshot.enabled ||
+      snapshot.settings.enabledPlugins?.[PLUGIN_ID] !== true ||
+      snapshot.settings.extraKnownMarketplaces?.[MARKET_ID]?.source?.path !== record.marketRoot)
+    throw new Error("Claude plugin registration or enablement changed after setup; user changes are preserved. Reconcile the owned registration before setup, rollback or uninstall.");
+}
+
 function claudeInstall(dry, integration) {
   const marketRoot = integration ? path.join(integration.root, "plugins") : path.join(currentLink(), "vendor", "plugins");
   log(`Claude configuration: ${path.dirname(settingsPath())}${process.env.CLAUDE_CONFIG_DIR ? " (CLAUDE_CONFIG_DIR)" : ""}`);
@@ -166,6 +208,8 @@ function claudeUninstall(dry, record = {}) {
     log("kept Claude registration and released installer ownership: it no longer points at this installation"); return true;
   }
   if (!dry && !executable("claude")) { log("kept Claude registration: its CLI is unavailable to remove the registry entry"); return false; }
+  const before = snapshotClaude();
+  checkClaudeOwnership(record, before);
   const original = structuredClone(s);
   if (record.previousMarket) s.extraKnownMarketplaces[MARKET_ID] = record.previousMarket;
   else delete s.extraKnownMarketplaces[MARKET_ID];
@@ -174,10 +218,12 @@ function claudeUninstall(dry, record = {}) {
     else delete s.enabledPlugins[PLUGIN_ID];
   }
   if (!dry) {
-    const failures = restoreClaude({ extraKnownMarketplaces: { [MARKET_ID]: record.previousMarket }, enabledPlugins: { [PLUGIN_ID]: record.previousEnabled } });
+    const failures = restoreClaude({ settings: { extraKnownMarketplaces: { [MARKET_ID]: record.previousMarket }, enabledPlugins: { [PLUGIN_ID]: record.previousEnabled } },
+      installed: record.previousInstalled, enabled: record.previousPluginEnabled, available: true });
     if (failures.length) {
+      const compensation = restoreClaude(before);
       writeSettings(original, false, "retain installer ownership after incomplete Claude registry removal");
-      throw new Error(`Claude registry restoration failed: ${failures.join("; ")}`);
+      throw new Error(`Claude registry restoration failed: ${failures.join("; ")}${compensation.length ? "; current registration recovery needs attention: " + compensation.join("; ") : "; current registration restored"}`);
     }
   }
   writeSettings(s, dry, "remove owned HOMI plugin settings (restore previous values)");
@@ -317,7 +363,9 @@ async function restoreCodex(snapshot) {
   return failures;
 }
 
-function restoreClaude(settings) {
+function restoreClaude(snapshot) {
+  if (!snapshot?.available) return [];
+  const settings = snapshot.settings;
   const failures = [];
   const run = (args) => {
     if (clientExec("claude", args).status !== 0) failures.push(`claude ${args.join(" ")}`);
@@ -326,15 +374,28 @@ function restoreClaude(settings) {
   // is the registration boundary whose success must be checked.
   clientExec("claude", ["plugin", "uninstall", PLUGIN_ID, "--scope", "user"]);
   run(["plugin", "marketplace", "remove", MARKET_ID]);
-  const market = settings.extraKnownMarketplaces?.[MARKET_ID];
+  const market = snapshot.restoreMarket || settings.extraKnownMarketplaces?.[MARKET_ID];
   if (market) {
     const source = market.source?.path || market.source?.repo || market.source?.url;
     if (!source) failures.push("previous Claude marketplace has an unsupported source; restore its saved settings manually");
     else {
       run(["plugin", "marketplace", "add", source]);
-      if (settings.enabledPlugins?.[PLUGIN_ID]) run(["plugin", "install", PLUGIN_ID, "--scope", "user"]);
+      if (snapshot.installed) {
+        run(["plugin", "install", PLUGIN_ID, "--scope", "user"]);
+        try {
+          const state = claudePlugin();
+          // Claude treats an already-enabled/disabled operation as an error.
+          if (state.installed && state.enabled !== snapshot.enabled)
+            run(["plugin", snapshot.enabled ? "enable" : "disable", PLUGIN_ID, "--scope", "user"]);
+        } catch (error) { failures.push(error.message); }
+      }
     }
   }
+  try {
+    const restored = claudePlugin();
+    if (restored.installed !== snapshot.installed || restored.enabled !== snapshot.enabled)
+      failures.push("Claude user-scope installed/enabled state did not restore exactly");
+  } catch (error) { failures.push(error.message); }
   return failures;
 }
 
@@ -428,7 +489,9 @@ export async function runSetup(argv) {
       return;
     }
     const previous = linkTarget();
-    const before = f.claude ? readSettings() : {};
+    const claudeBefore = f.claude ? snapshotClaude() : null;
+    const before = claudeBefore?.settings || {};
+    if (claudeBefore) checkClaudeOwnership(saved.clients.claude, claudeBefore);
     const codexBefore = f.codex ? await snapshotCodex() : null;
     if (f.codex && codexBefore) checkCodexOwnership(saved.clients.codex, codexBefore);
     const dest = stabilize(false);
@@ -455,15 +518,15 @@ export async function runSetup(argv) {
       linksBefore.set(file, existing);
       next.links[file] = target;
     }
-    let serviceChanged = false, codexChanged = false;
+    let serviceChanged = false, codexChanged = false, claudeChanged = false;
     try {
       switchCurrent(dest);
+      claudeChanged = !!claudeBefore?.available;
       if (f.claude && claudeInstall(false, integration)) {
-        const priorRoot = before.extraKnownMarketplaces?.[MARKET_ID]?.source?.path;
-        const adoptingCurrent = priorRoot === path.join(currentLink(), "vendor/plugins") || priorRoot === saved.clients.claude?.marketRoot ||
-          saved.integrations.some((item) => priorRoot === path.join(item.root, "plugins"));
-        next.clients.claude ||= { previousMarket: adoptingCurrent ? undefined : before.extraKnownMarketplaces?.[MARKET_ID],
-          previousEnabled: adoptingCurrent ? undefined : before.enabledPlugins?.[PLUGIN_ID] };
+        next.clients.claude ||= { previousMarket: claudeBefore.restoreMarket,
+          previousMarketLiteral: isDeepStrictEqual(claudeBefore.restoreMarket, before.extraKnownMarketplaces?.[MARKET_ID]) ? undefined : before.extraKnownMarketplaces?.[MARKET_ID],
+          previousEnabled: before.enabledPlugins?.[PLUGIN_ID], previousInstalled: claudeBefore.installed,
+          previousPluginEnabled: claudeBefore.enabled };
         next.clients.claude.marketRoot = path.join(integration.root, "plugins");
       }
       if (f.codex) {
@@ -504,8 +567,8 @@ export async function runSetup(argv) {
       }
       if (serviceChanged) restoreService(next.service);
       // Restore just the keys this installer owns, preserving unrelated edits.
-      const recoveryFailures = f.claude ? restoreClaude(before) : [];
-      if (f.claude) {
+      const recoveryFailures = claudeChanged ? restoreClaude(claudeBefore) : [];
+      if (claudeChanged) {
         const now = readSettings();
         for (const [parent, key] of [["extraKnownMarketplaces", MARKET_ID], ["enabledPlugins", PLUGIN_ID]]) {
           now[parent] ||= {};
@@ -536,17 +599,20 @@ export async function runRollback(argv = []) {
   if (argv.includes("--dry-run")) { log(`[dry-run] would restore ${saved.previous}; identities and mail stay at ${stateRoot()}`); return; }
   await withInstallLock(async () => {
     const from = linkTarget();
-    const before = saved.clients?.claude ? readSettings() : null;
+    const claudeBefore = saved.clients?.claude ? snapshotClaude() : null;
+    if (claudeBefore) checkClaudeOwnership(saved.clients.claude, claudeBefore);
+    const before = claudeBefore?.settings;
     const codexBefore = saved.clients?.codex ? await snapshotCodex() : null;
     if (saved.clients?.codex) {
       if (!codexBefore) throw new Error("Codex CLI is required to restore its owned registration; no changes made");
       checkCodexOwnership(saved.clients.codex, codexBefore);
     }
     const integration = Object.keys(saved.clients || {}).length ? buildIntegration(saved.previous) : null;
-    let codexChanged = false;
+    let codexChanged = false, claudeChanged = false;
     try {
       switchCurrent(saved.previous);
       if (saved.clients?.claude) {
+        claudeChanged = true;
         claudeInstall(false, integration);
         saved.clients.claude.marketRoot = path.join(integration.root, "plugins");
       }
@@ -567,8 +633,8 @@ export async function runRollback(argv = []) {
       if (legacy) log(`legacy Communicate ${priorPackage.version} restored; it has no combined homi entry point. Use the retained new archive's bin/homi for doctor, update, rollback or uninstall.`);
     } catch (error) {
       switchCurrent(from);
-      const failures = before ? restoreClaude(before) : [];
-      if (before) {
+      const failures = claudeChanged ? restoreClaude(claudeBefore) : [];
+      if (claudeChanged) {
         const now = readSettings();
         for (const [parent, key] of [["extraKnownMarketplaces", MARKET_ID], ["enabledPlugins", PLUGIN_ID]]) {
           now[parent] ||= {};
