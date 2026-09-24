@@ -2,6 +2,8 @@
 # This file is never installed over user configuration. Shell code here is trusted.
 # Native provider authentication is the default. An optional account adapter is a
 # single executable that accepts: launch --provider claude|codex [--box] -- ARGS.
+# Select --accounts / --box to use HOMI's packaged adapters. The overrides below
+# are only for an existing private adapter; they are not required for the modules.
 # export HOMI_ACCOUNT_LAUNCHER="$HOME/.local/libexec/private-account"
 # export HOMI_BOX_LAUNCHER="$HOME/.local/bin/box"
 # export HOMI_PANE_WATCHER="$HOME/.local/libexec/private-pane"

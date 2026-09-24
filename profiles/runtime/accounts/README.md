@@ -42,7 +42,12 @@ be selected without copying credentials into the package.
 local token cache first. An automatic pick consults the configured usage API;
 the existing bounded last-pick and native-keychain fallback behavior is retained
 when that API is unavailable. An exhausted pool remains distinct from an
-unreachable API. Add and remote sync are explicit writes. Codex login is per
+unreachable API. Add and remote sync are explicit writes. With no sync host
+configured, `homi-account sync` only warms the local cache. Use
+`homi-account add --no-register NAME` when no usage registry is configured.
+A named remote sync writes that remote host's default HOMI cache path; if its
+private launcher selects a custom `ANU_ACCOUNT_CACHE`, run `homi-account sync cache`
+on that host to warm the selected path. Codex login is per
 device; its account homes share conversations with `~/.codex` while retaining
 separate authentication and rendered configuration. Add, launch, and explicit
 doctor repair can reconcile those homes; profile installation itself cannot.

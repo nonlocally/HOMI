@@ -117,6 +117,21 @@ class Accounts(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("executable ANU_ACCOUNT_BOX_BIN", result.stderr)
 
+    def test_unconfigured_sync_host_keeps_sync_and_unregistered_add_local(self):
+        self.install("accounts")
+        self.stub("fixture-secrets", """
+if sys.argv[1] == 'env': print('{"FIXTURE":"fixture-cached-token"}')
+elif sys.argv[1] == 'set': assert sys.stdin.read().strip() == 'fixture-new-token'
+elif sys.argv[1] != 'mkdir': raise SystemExit('unexpected credential operation')
+""")
+        self.env["HOMI_SECRETS_BIN"] = str(self.bin / "fixture-secrets")
+        self.run_tool("homi-account", "sync")
+        cache = self.home / ".local/state/homi/accounts/tokens.json"
+        self.assertEqual(json.loads(cache.read_text())["FIXTURE"], "fixture-cached-token")
+        self.run_tool("homi-account", "add", "--no-register", "fixture", input="fixture-new-token\n")
+        self.assertEqual(json.loads(cache.read_text())["FIXTURE"], "fixture-new-token")
+        self.assertEqual(cache.stat().st_mode & 0o077, 0)
+
     def test_codex_hooks_are_runnable_with_spaces_in_installed_home(self):
         self.install("accounts")
         self.stub("codex", "Path(os.environ['CODEX_HOME'], 'auth.json').write_text('{}')")

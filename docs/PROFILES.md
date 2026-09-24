@@ -1,4 +1,4 @@
-# Optional terminal and mesh profiles
+# Optional workstation profiles
 
 HOMI works without a terminal profile. These profiles retain selected, proven
 Anu shell/tmux/Ghostty and mesh helpers. They are not installed by core setup and
@@ -13,10 +13,13 @@ homi profile uninstall
 
 The standalone equivalent is `python3 profiles/manage.py ...` in a source tree.
 `preview` is the default action. All commands return JSON; `--home PATH` selects
-an isolated home for testing. The installer never runs a package manager, changes
-the login shell, reloads tmux, starts services, connects to a device, or installs
-model runtimes. Open a new Bash shell after installation. Load the generated
-tmux configuration deliberately in the server you intend to configure.
+an isolated home for testing. Profile installation never runs a package manager,
+changes the login shell, reloads tmux, starts services, connects to a device, or
+installs model runtimes. Open a new Bash shell after installation. Load the
+generated tmux configuration deliberately in the server you intend to configure.
+If you separately installed an owned snapshot schedule, profile uninstall asks
+its service manager to unload that job before removing the owned files. It
+refuses removal when ownership or unloading cannot be verified.
 
 The terminal module uses Bash 4+, tmux, and fzf for pickers. The mesh module uses
 Bash 4+, jq, SSH, and fzf for its hub. Tailscale is optional for manual hosts.
@@ -27,6 +30,16 @@ full Linux runtime coverage. On a nonstandard Bash installation, put its bin
 directory on PATH. No default-shell changes are made for you.
 Fresh zsh sessions do not load these Bash helpers; run Bash explicitly or configure
 your terminal's command deliberately. The installer does not write zsh startup files.
+
+The account module uses Bash 4+, Python 3, jq, curl, and `column` for tables;
+Codex account hooks also require `shasum`. Its optional credential client needs
+the Infisical CLI and the selected existing credential-store client. SSH is used
+only for explicitly configured remote sync/registration. Provider CLIs and
+authentication are separate prerequisites. The box module needs Apple/container
+on a supported Mac and an explicitly built image; selecting it on Linux does
+not install a different backend. Snapshot scheduling needs the platform's user
+service manager. `homi profile status` reports executable discovery, not proof
+of authentication, service access, or a compatible installed version.
 
 ## What is retained
 
@@ -133,6 +146,14 @@ or leaving dangling startup references. Original bytes are restored when there
 are no later adjacent edits. Private overlays, snapshots, identities, provider
 data, backups, and immutable payloads are retained. To roll back a normal
 installation, use uninstall; then reinstall the previous release if needed.
+
+File uninstall does not remove hooks already loaded into a running tmux server,
+stop an account observer, or change existing shells. Before removing a profile
+that you activated, deliberately stop its observer and remove/reconfigure its
+loaded tmux hooks in each affected server. Otherwise those processes can retain
+old state or reference removed helper paths. Preserve active panes and workloads;
+the installer does not infer ownership of a whole tmux server or kill it. This
+runtime retirement check is separate from the owned snapshot schedule handling.
 
 Symlinked configuration files require a separate reviewed migration. The
 installer intentionally refuses to write through a link into an existing Anu

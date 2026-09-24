@@ -2272,7 +2272,9 @@ cmd_sync() {
   # successful write.
   _cache_write "$json"
   [ "$_cache_write_ok" = 1 ] && printf 'cached %s\n' "$ACCOUNT_CACHE" >&2
-  case "$dev" in cache|local|self) return 0 ;; esac
+  # No hosted account service is a valid installation. With no configured
+  # sync host, keep this operation local instead of invoking ssh with "".
+  case "$dev" in ''|cache|local|self) return 0 ;; esac
   # A named device gets ITS OWN launcher cache warmed over ssh — the same
   # shape and path `_cache_write` uses on this device
   # (${XDG_STATE_HOME:-~/.local/state}/homi/accounts/tokens.json), resolved

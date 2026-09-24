@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Optional HOMI workstation profiles. Preview by default; no service control.
+"""Optional HOMI workstation profiles. Preview by default; install starts no services.
 
 Only explicit install/uninstall mutate files. Managed blocks preserve adjacent
 user text; exact hashes protect generated files. Original backups survive repeat
 installs. Payloads are immutable snapshots, independent of source checkouts.
+Uninstall delegates removal of a separately installed, owned snapshot schedule.
 """
 import argparse
 import contextlib
