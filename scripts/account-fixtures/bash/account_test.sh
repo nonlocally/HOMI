@@ -1225,28 +1225,71 @@ DET_LOCKS="$(mktmp)/locks"
 mkdir -p "$DET_LOCKS/default-4"
 printf '999999 %s\n' "$(( $(date +%s) - 700 ))" > "$DET_LOCKS/default-4/holder"
 detA="$(mktmp)/detA"; detB="$(mktmp)/detB"
-# A: no pause, holds its fresh lock for 3s — long enough to still be live
-# when B wakes AND when this test inspects the holder file a moment later
-# (checked against B's own exit, below, never A's: A's own EXIT trap would
-# otherwise have already cleaned its holder file up by the time a plain
-# `wait` for everything returns, making "survives" untestable).
-( ANU_ACCOUNT_TEST=1 ANU_ACCOUNT_LOCKDIR="$DET_LOCKS" "$ACCOUNT" __test_lock_hold %4 3 > "$detA" 2>&1; echo $? >> "$detA" ) &
-apid=$!
-# B: pauses 1s between its staleness verdict and its own `mv` — comfortably
-# longer than A's entire (unpaused) reclaim sequence, which is pure
-# filesystem + string work, no network — then exits almost immediately, long
-# before A's 3s hold is up.
-( ANU_ACCOUNT_TEST=1 ANU_ACCOUNT_TEST_PAUSE_AFTER_STALE_CHECK=1 ANU_ACCOUNT_LOCKDIR="$DET_LOCKS" "$ACCOUNT" __test_lock_hold %4 0.2 > "$detB" 2>&1; echo $? >> "$detB" ) &
+# Synchronize at the EXISTING test hook via the fixture's sleep command.
+# Starting A and B together is insufficient: B can win the initial mkdir
+# during A's rename-away gap and never reach its stale-check pause at all.
+# B must have judged the old lock stale BEFORE A starts, and A must still
+# hold its fresh lock until B's result and the restored holder are checked.
+DET_GATE="$(mktmp)/barrier"; mkdir "$DET_GATE"
+export DET_GATE REAL_SLEEP
+_det_wait() {
+  local n
+  for ((n=0; n<1000; n++)); do
+    [ -f "$1" ] && return 0
+    "$REAL_SLEEP" 0.01
+  done
+  return 1
+}
+apid=""; bpid=""
+_det_cleanup() {
+  # Release only these two bounded fixture barriers, then reap our children
+  # before the enclosing harness removes their directories. No signals.
+  touch "$DET_GATE/release-B" "$DET_GATE/release-A"
+  [ -z "$bpid" ] || wait "$bpid" 2>/dev/null || true
+  [ -z "$apid" ] || wait "$apid" 2>/dev/null || true
+}
+trap '_det_cleanup; _anu_cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+stub "$SD" sleep '
+case "$1" in
+  stale-barrier) side=B ;;
+  holder-barrier) side=A ;;
+  *) exec "$REAL_SLEEP" "$@" ;;
+esac
+: > "$DET_GATE/ready-$side"
+for ((n=0; n<4000; n++)); do
+  [ -f "$DET_GATE/release-$side" ] && exit 0
+  "$REAL_SLEEP" 0.01
+done
+echo "fixture barrier timed out: $side" >&2
+exit 99'
+( ANU_ACCOUNT_TEST=1 ANU_ACCOUNT_TEST_PAUSE_AFTER_STALE_CHECK=stale-barrier ANU_ACCOUNT_LOCKDIR="$DET_LOCKS" "$ACCOUNT" __test_lock_hold %4 0.2 > "$detB" 2>&1; echo $? >> "$detB" ) &
 bpid=$!
+_det_wait "$DET_GATE/ready-B"; b_ready=$?
+assert_ok "$b_ready" "B reaches its stale verdict before A starts"
+fresh_holder=""
+if [ "$b_ready" = 0 ]; then
+  ( ANU_ACCOUNT_TEST=1 ANU_ACCOUNT_LOCKDIR="$DET_LOCKS" "$ACCOUNT" __test_lock_hold %4 holder-barrier > "$detA" 2>&1; echo $? >> "$detA" ) &
+  apid=$!
+  _det_wait "$DET_GATE/ready-A"; a_ready=$?
+  assert_ok "$a_ready" "A holds its fresh lock before B is released"
+  fresh_holder="$(cat "$DET_LOCKS/default-4/holder" 2>/dev/null)"
+  assert_match "$fresh_holder" '^[0-9]+ [0-9]+$' "A published a complete holder line"
+fi
+touch "$DET_GATE/release-B"
 wait "$bpid"
 detB_out="$(sed -n '1p' "$detB")"; detB_rc="$(sed -n '2p' "$detB")"
 assert_eq "busy" "$detB_out" "the paused racer (B), waking after A already re-locked, loses honestly"
 assert_eq "1" "$detB_rc" "…exit 1, not a second winner"
-# A is still holding (asleep, well short of its 3s) — inspect its lock NOW,
-# before A's own exit would otherwise release it.
+# A stays at its barrier while B exits and we inspect the restored lock.
 assert_file "$DET_LOCKS/default-4/holder" "A's holder file survives — B restored it instead of discarding it"
-assert_not_contains "$(cat "$DET_LOCKS/default-4/holder")" "999999" "…and it's A's own fresh line, not the original stale one"
-wait "$apid"
+assert_eq "$fresh_holder" "$(cat "$DET_LOCKS/default-4/holder" 2>/dev/null)" "…and it is exactly A's fresh holder line"
+_det_cleanup
+trap _anu_cleanup EXIT
+trap - INT TERM
+unset -f _det_wait _det_cleanup
+unset DET_GATE
 stub "$SD" sleep 'exit 0'
 detA_out="$(sed -n '1p' "$detA")"; detA_rc="$(sed -n '2p' "$detA")"
 assert_eq "locked" "$detA_out" "the non-paused racer (A) wins the stale lock"
