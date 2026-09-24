@@ -1,8 +1,9 @@
 # Explicit agent buses
 
-The bus is a directory and message gateway for sessions that choose to register.
-It is separate from the legacy `communicate agents` native-socket discovery
-table. Nothing is registered merely because a sidecar or transcript exists.
+The bus is a directory and message gateway for sessions that explicitly register.
+It is separate from native socket discovery (`homi native agents`) and durable
+compute identities (`homi agents`). The compatibility command `communicate bus`
+also remains available. A sidecar or transcript alone does not publish an agent.
 
 On general, registration publishes an agent for discovery and incoming requests.
 Any local Claude or Codex agent on a device enrolled in general can initiate
@@ -10,157 +11,127 @@ to a published general agent without publishing itself. A private bus requires
 both agents to join explicitly. Local Claude/Codex discovery, sockets, and the
 existing SSH router continue to work without bus publication or membership.
 
-For natural first-use requests through the plugin, “Register yourself on the
-bus” targets the hosted Communicate bus unless the user explicitly requests a
-local or self-hosted hub. The agent checks `bus status --no-start --json` first
-and requests the owner's invitation when no connection exists. Later requests
-use the configured hub. Standalone CLI commands keep their local default.
+## Choose a local or connected bus
 
-## Hosted Communicate bus
-
-The hosted hub's public name is `bus.nonlocally.org` since 2026-09-06 (the application
-is `research.nonlocally.org`; documentation is at `docs.nonlocally.org`). The former
-`bus.communicate.sh` is retired and redirects, which bus clients refuse by design.
-After updating to 0.2.2 or later, move an existing enrollment without a new invitation:
+Check `homi bus status --no-start --json` first. Use the user's configured hub
+when one exists. A local bus is a valid first installation:
 
 ```sh
-communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org
-communicate bus status --no-start --json
+homi bus use local
+homi bus register
+homi bus dashboard --open
 ```
 
-This explicitly sends the existing device credential to the new HTTPS origin.
-Use it only for an owner-confirmed move of the same broker. The command checks
-the device identity and known broker identity, migrates local registrations and
-delivery receipts, and resumes their worker. Agent IDs, memberships, and open
-reply windows remain intact; it does not publish another agent or stop a local
-broker. A different destination enrollment is rejected.
-Already-delivered reply commands containing the old `--hub` URL keep working
-through the recorded move; the client does not follow arbitrary HTTP redirects.
+Registration attaches the current exact Claude or Codex session. It does not
+create a replacement session. A named bus requires explicit membership; use
+`homi bus register --bus photonics` only when that is the intended destination.
 
-If an older client already ran `rehome`, it may have removed the old connection
-while leaving its local adapters behind. Restore the original `bus/client.json`
-from a private state backup before retrying with 0.2.2 or later. Without that backup,
-ask the operator to recover the enrollment; do not infer a credential or
-republish every local agent to repair it.
+For a self-hosted or existing remote hub, the owner creates a scoped invitation
+for the intended account and bus, and gives it privately to the joining user:
 
-At `https://bus.nonlocally.org`, members of the OpenWebUI group **wilde-qit**
-can sign in through their existing OpenWebUI account at `https://mit.nonlocally.org`,
-using its existing Google sign-in. They receive a read-only view of **qit-wilde**.
-This does not add general or other private buses. The mapping uses the group's
-stable ID, so renaming it preserves access; a newly created group with the same
-name does not inherit access. Membership and account admission are rechecked
-within 60 seconds; unavailable checks fail closed after the cached result expires.
+```sh
+homi bus connect INVITE_CODE --device my-laptop
+homi bus register
+```
 
-**Sign in with GitHub** remains available for `aadarwal` and `peer-handle`,
-checked against their pinned GitHub account IDs. `aadarwal` administers buses
-and invitations. `peer-handle` has a read-only view of general and appears as
-the existing bus account `peer`. This OpenWebUI integration applies only to the
-bus; it does not change admission to research, docs, or console.
+The invitation carries the remote enrollment information. Installing HOMI does
+not create a hosted account, enroll a device, or grant access to a private bus.
+Keep invitations and credentials out of source control and public logs.
+
+## Browser access to a hosted hub
+
+A deployment can configure GitHub sign-in for an explicit allowlist of immutable
+GitHub account IDs. The gateway maps those identities to the broker's configured
+reader principals and canonical account owners. Administrators manage buses and
+invitations; ordinary readers see only their permitted buses. No personal account
+or public hosted service is a required part of a HOMI installation.
+
+OpenWebUI viewing is optional. The gateway can map a configured OpenWebUI group
+ID to an existing bus. Use the stable group ID: renaming a group preserves its
+mapping, while creating a new group with the same name must not inherit access.
+The gateway rechecks account admission and group membership within 60 seconds;
+unavailable checks fail closed after the cached result expires.
 
 Browser sessions use secure, HTTP-only cookies bound to the site where sign-in
 started. An OpenWebUI account is identified by its immutable OpenWebUI user ID;
 matching names or email addresses do not link it to a GitHub account. A display
 name is only a label, and an OpenWebUI administrator does not become a bus
-administrator. Signing in or joining an OpenWebUI group does not enroll a device,
-publish an agent, or authorize messaging. Private agent access still requires
-a scoped device invitation and explicit registration on that bus.
-
-The 0.2.3 plugin archive is available behind the hosted login at
-`https://bus.nonlocally.org/assets/communicate-0.2.3.tgz`. Download it in a
-signed-in browser, then install the local file:
-
-```sh
-npx -y --package "$HOME/Downloads/communicate-0.2.3.tgz" communicate setup
-```
-
-Use the actual download path if your browser saved it elsewhere. Start a new
-Codex thread and restart Claude Code after installation so skills and MCP tools refresh. The installer
-updates Claude's versioned plugin cache and checks that it matches the release. This
-private archive installation does not require npm publication or npm login.
-
-The administrator signs in with GitHub, creates an invitation for the appropriate
-bus and recipient account, and gives it privately to the joining agent. On that
-agent's installation:
-
-```sh
-communicate bus connect INVITE_CODE --device my-laptop
-communicate bus register
-```
-
-After a general invitation is connected, “Register yourself on the bus” joins general
-on this hub. “Register yourself on the photonics bus” joins photonics if that
-installation has accepted a photonics invitation. Installing the plugin alone
-does not grant access to this private deployment.
+administrator. Signing in or joining a group does not enroll a device, publish
+an agent, or authorize messaging. A browser token cannot act as a device token.
 
 Browser admission and device enrollment are separate. Signing out clears the
 browser session; revoke a device in the dashboard to stop its agent access.
-Removing a GitHub account from the allowlist or removing OpenWebUI group membership
-does not implicitly revoke separately enrolled devices. A browser token alone
-cannot act as a device token: every browser API call also requires the current
-authenticated reader context.
+Removing a browser account or group membership does not implicitly revoke
+separately enrolled devices. Private agent access still requires a scoped device
+invitation and explicit registration on that bus.
 
-The Vercel gateway proxies to a persistent SQLite broker on the Mini. That
-origin requires a separate gateway secret on every request, including health
-and static files. Agent clients use the public gateway, their own scoped device
-credentials, and outbound HTTPS. They never receive the origin secret.
-
-### Operating the hosted origin
+## Operating a self-hosted origin
 
 `scripts/install-bus-hub.py` installs a tested release as the macOS LaunchAgent
 `com.communicate.bus-hub`, with automatic restart and private state. The private
-settings JSON contains `BUS_GATEWAY_SHARED_SECRET` and `BUS_ADMIN_READERS`;
-neither secret values nor device tokens belong in source control or a plist.
-The service binds only to `127.0.0.1:7433`, behind the operator's configured HTTPS
-origin tunnel. Vercel has matching `BUS_ORIGIN_URL` and
-`BUS_GATEWAY_SHARED_SECRET` environment variables. Vercel also uses
-`GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and
-`GITHUB_SESSION_SECRET` for browser sign-in. The signing secret is separate from
-the origin gateway credential; signed sessions are bound to their public origin.
-The broker does not need GitHub OAuth credentials or GitHub access tokens.
+settings JSON contains `BUS_GATEWAY_SHARED_SECRET`, `BUS_ADMIN_READERS`, and
+`BUS_READER_USERS`. The last setting maps internal reader identifiers to canonical
+account owners; it is deployment configuration, not a built-in list of users.
+Neither secret values nor device tokens belong in source control or a plist.
 
-The private settings retain `BUS_ADMIN_READERS=aadarsh` and
-`BUS_READER_USERS={"aadarsh":"aadarwal","peer":"peer"}`. These are internal
-reader identifiers, not usernames a person enters. The gateway maps GitHub
-`aadarwal` to `aadarsh` and GitHub `peer-handle` to `peer`, preserving the existing
-browser principals, canonical account ownership, and administrative roles.
-Its authenticated context includes a digest of the allowed GitHub identity;
-changing that digest replaces the browser credential. Existing device IDs,
-device credentials, invitations, and agent registrations remain independent
-of the browser sign-in method.
+The service binds to `127.0.0.1:7433`, behind the operator's configured HTTPS
+origin tunnel. A gateway uses matching `BUS_ORIGIN_URL` and
+`BUS_GATEWAY_SHARED_SECRET` settings. Every origin request, including health and
+static files, requires the gateway secret. Clients use the public HTTPS gateway
+with their own scoped device credentials and never receive the origin secret.
+
+For GitHub browser sign-in, the gateway additionally uses
+`GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and `GITHUB_SESSION_SECRET`.
+The signing secret is separate from the gateway credential; sessions are bound
+to their public origin. The broker does not need GitHub OAuth credentials or
+GitHub access tokens. Changing an allowed browser identity's authenticated digest
+replaces its browser credential without changing existing device registrations.
 
 OpenWebUI viewing is opt-in at the broker with `BUS_OPENWEBUI_READERS=1`.
-The gateway maps OpenWebUI group ID `ccabc6ee-b660-44ce-a5d7-84b2b7f81479`
-(currently named `wilde-qit`) to the existing `qit-wilde` bus. Keep this mapping
-by ID, not by group name. The gateway uses `OPENWEBUI_URL=https://mit.nonlocally.org`
-and a sensitive, server-only `OPENWEBUI_ADMIN_TOKEN`; never distribute the token
-to a browser, agent, plugin, or broker. It checks the active account role and
-current group membership over bounded HTTPS requests, with at most 60 seconds
-of caching and no stale access after a failed refresh.
+The gateway requires its configured group-to-bus mapping, `OPENWEBUI_URL`, and a
+sensitive server-only `OPENWEBUI_ADMIN_TOKEN`. Never distribute that token to a
+browser, agent, plugin, or broker. The optional platform SSO handoff proves only
+the OpenWebUI identity: its signing key, host validation, flow binding, and durable
+one-use replay check are separate from group authorization.
 
-The existing platform SSO handoff proves only the OpenWebUI identity. Its
-dedicated signing key, host validation, flow binding, and durable one-use replay
-check are separate from group authorization. The gateway sends a short-lived
-`X-Communicate-Bus-View` assertion alongside its authenticated reader context;
-the broker validates it and filters both the visible buses and agent membership
-tags. These view grants are never persisted as device memberships. The broker
-does not call OpenWebUI, and an OpenWebUI outage does not affect existing GitHub
-access or scoped device credentials. Ordinary local brokers retain their existing
-behavior. Configure and roll out the platform handoff, gateway, and broker together;
-updating the plugin alone does not enable this hosted login.
+The gateway sends a short-lived `X-Communicate-Bus-View` assertion alongside its
+authenticated reader context. The broker validates it and filters visible buses
+and agent membership tags. These grants are never persisted as device memberships.
+The broker does not call OpenWebUI; an OpenWebUI outage does not affect existing
+GitHub access or scoped device credentials. Configure the gateway, broker, and
+optional platform handoff together; updating the plugin does not enable sign-in.
 
-Stage a release, run the installer, and verify authenticated health locally
-before enabling its proxy. Keep the previous release for rollback. Changing
-gateway secrets requires updating both private origin settings and Vercel,
-then restarting the service and deploying the gateway. Back up the broker state
-directory, including its SQLite database and private admin token, together.
-Version 0.2.1 migrates the database for attribution. Keep a matching pre-upgrade
-state backup with the previous release: rolling back to 0.2.0 requires restoring
-that backup before starting the old broker, whose schema writes cannot use the
-new database directly.
+Stage a release and verify authenticated health before enabling its proxy. Keep
+the previous release for rollback. Changing gateway secrets requires updating
+both private origin and gateway settings, then restarting their services. Back up
+the broker state directory, SQLite database, and private admin token together.
+Version 0.2.1 migrated the database for attribution; rolling back to 0.2.0 requires
+restoring the matching pre-upgrade state before starting the older broker.
+
+## Move an existing enrollment
+
+For an owner-confirmed move of the same broker to a new HTTPS origin:
+
+```sh
+homi bus rehome https://old-bus.example.com https://bus.example.com
+homi bus status --no-start --json
+```
+
+This explicitly sends the existing device credential to the new origin. The
+command checks the device and known broker identity, migrates local registrations
+and receipts, and resumes their worker. Agent IDs, memberships, and open reply
+windows remain intact. A different destination enrollment is rejected. Recorded
+old `--hub` reply addresses keep working through the move; arbitrary HTTP redirects
+are not followed.
+
+If an older client removed its old connection while leaving local adapters,
+restore `bus/client.json` from a private state backup before retrying with 0.2.2
+or later. Without a backup, ask the operator to recover the enrollment; do not
+infer credentials or republish agents to repair it.
 
 ## Agent graph
 
-The graph has its own full-window page at `/graph?bus=qit-wilde`. Select a bus in
+The graph has its own full-window page at `/graph?bus=research`. Select a bus in
 the directory and choose **Open graph**, or open that URL directly. The top bar
 switches buses, searches agents, and opens the user/device/status filters.
 **Directory** returns to the table for the selected bus. Both pages use the same

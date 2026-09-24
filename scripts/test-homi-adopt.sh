@@ -3,7 +3,7 @@
 # provisioning this fleet needed by hand (reverse keys, dial alias from
 # SSH_CONNECTION, per-user runtime dir, CLI shim, kernel hash-refresh),
 # execute, pair, spawn. The planner is PURE (facts in, actions out) — these
-# tests encode the field lessons: peer-device, mw83, mini-1, studio-2.
+# tests cover shared hosts, missing DNS, stale kernels, and file ownership.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pass=0; fail=0
@@ -49,7 +49,7 @@ print(len(acts), len(checklist))")"
 if [ "$r" = "0 0" ]; then ok "adopting twice is a no-op"
 else bad "idempotence (got: $r)"; fi
 
-echo "== plan: the peer-device scenario (shared mac, bash, no MagicDNS, stale kernel)"
+echo "== plan: a shared mac (bash, no MagicDNS, stale kernel)"
 r="$(PY "
 f = dict(os='Darwin', login_shell='/opt/homebrew/bin/bash', home='/Users/a', xdg='',
          ssh_ip='203.0.113.8', cc_collision=True, own_key=True, reverse_ok=False,
@@ -65,7 +65,7 @@ print('authorize_key_here' in steps, 'gen_fabric_key' in steps,
       'kernel_refresh' in steps, 'restart_daemon' in steps, 'shim' in steps)")"
 if [ "$r" = "True True 203.0.113.8 ['~/.bash_profile', '~/.bashrc'] True True True" ]; then
   ok "candidates offered; bash profiles; a fabric key is minted even though a personal key exists; kernel refreshed"
-else bad "peer-device plan (got: $r)"; fi
+else bad "shared mac plan (got: $r)"; fi
 
 echo "== plan: the mw83 scenario (linux, xdg fine, bare box: no tmux/claude/shim)"
 r="$(PY "
@@ -174,14 +174,6 @@ if [ "$r" = "True False True True True True" ]; then
 else bad "spawn cmds (got: $r)"; fi
 
 echo "== settings file writer: emits exact JSON via printf-safe encoding"
-r="$(PY "
-line = ha.settings_file_cmd()
-import subprocess
-out = subprocess.run(['sh','-c', line + '; cat ~/.homi-settings.json'],
-                     capture_output=True, text=True,
-                     env={'HOME': '$T_HOME', 'PATH': '/usr/bin:/bin'})
-import json; d = json.loads(out.stdout)
-print(d.get('crossSessionInbound'))" 2>&1 | tail -1)"
 export T_HOME="$(mktemp -d /tmp/homi-adopt.XXXXXX)"
 r="$(T_HOME="$T_HOME" PY "
 line = ha.settings_file_cmd()

@@ -9,7 +9,7 @@ test, not tribal knowledge:
     during adopt over the already-authenticated channel (never a laptop's
     forwarded agent — mini-1 died of that).
   - dial address: when the hub's bare device name doesn't resolve from the
-    far side (off-tailnet peer-device, MagicDNS-less mw83), the address
+    far side (off-tailnet or without MagicDNS), the address
     that provably works is the one this very ssh connection came from —
     $SSH_CONNECTION — written as a Host alias.
   - runtime dir: claude puts its cross-session socket in
@@ -18,7 +18,7 @@ test, not tribal knowledge:
     Darwin has no systemd runtime dirs, so provision ~/.local/run always;
     Linux only when $XDG_RUNTIME_DIR is unset (Termux).
   - kernel: hash-compared, never version-string-compared (pair kept stale
-    bytes on peer-device AND mw83); refresh restarts the far daemon.
+    bytes on multiple hosts); refresh restarts the far daemon.
   - CLI shim + spawn (settings via a FILE — inline JSON dies in nested
     shell quoting, proven twice).
 Steps that genuinely need the human (claude /login, a Tailscale SSH check)
@@ -376,7 +376,7 @@ def runtime_profile_lines():
 
 def settings_file_cmd():
     """Shell line writing ~/.homi-settings.json — printf-encoded so the
-    JSON never meets nested shell quoting (the peer-device lesson)."""
+    JSON never meets nested shell quoting."""
     return (r'printf "{\"crossSessionInbound\":\"accept\"}\n" '
             r'> "$HOME/.homi-settings.json"')
 

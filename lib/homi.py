@@ -3513,7 +3513,7 @@ def _cli_adopt(args):
 
     # Pin the hub->device link to the hub's own key: without this the dial
     # inherits whatever agent the operator's shell had, and dies the moment
-    # the daemon is restarted by launchd (mini-1/peer-device/mw83, live).
+    # the daemon is restarted by launchd.
     if hub_pub and os.path.exists(hub_priv):
         links_now = _read_json(os.path.join(state_root(), "links.json"), {})
         for dev, ent in (links_now or {}).items():
@@ -3725,7 +3725,7 @@ def _cli_pair(args):
             _pair_ssh(addr, "ln -sfn ~/.local/share/homi/daemon/%s "
                       "~/.local/share/homi/daemon/current" % HOMI_VERSION)
             # SHARED machine: a foreign-owned default sockdir makes the daemon
-            # refuse to start (ensure_dir_0700 — the peer-device case, live).
+            # refuse to start (ensure_dir_0700 on a shared host).
             # Detect it once and bake a per-uid dir into whatever starts it.
             rc_s, sock_d = _pair_ssh(
                 addr, 'o=$(stat -f %u /tmp/cc-socks 2>/dev/null || '
@@ -3906,9 +3906,8 @@ def _cli_pair(args):
 
     # [5/7] link there -> here. The far side must link us REGARDLESS of
     # reverse reachability: linking is what binds its in/<mydev>.sock — the
-    # arrival line MY forward mail lands on. (peer-device, live: skipping
-    # the far link when reverse ssh failed left the forward path acking
-    # nothing.) The reverse check only decides whether their link gets a
+    # arrival line MY forward mail lands on. Skipping the far link when
+    # reverse ssh failed previously left the forward path acking nothing. The reverse check only decides whether their link gets a
     # usable outbound addr; without one, there->here queues honestly.
     my_addr = addr_me or ("%s@%s" % (getpass_user(), "localhost" if far_home else mydev))
     if far_home:
