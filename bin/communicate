@@ -40,7 +40,8 @@
 #                       start|stop|status|agents  claim [--boxed]|release|adopt|retitle
 #                       send|ask|reply|wait|group|notify|inbox   seat {ls|spawn|send|read|state|wait|respond|bind|kill}
 #                       spawn|fan|consult   move <name> <device>   link|unlink [--allow-seats]
-#                       grant|ungrant|grants|card|federate {invite|accept|revoke|status}   install|uninstall
+#                       grant|ungrant|grants|card|federate {invite|accept|revoke|status}
+#   homi setup --service                         managed daemon persistence
 #
 set -o pipefail
 # Resolve symlinks so `ln -s .../bin/communicate ~/.local/bin/` works: lib/

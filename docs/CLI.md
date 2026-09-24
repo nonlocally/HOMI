@@ -20,10 +20,13 @@ a substitute agent or target another route silently.
 | `homi profile preview --terminal --mesh` | Preview optional configuration. |
 
 Run `homi start` for an unmanaged daemon or `homi setup --service` for persistence.
-A supervisor may restart a managed daemon after `homi stop`; use service uninstall
-to remove persistence. `homi daemon install|uninstall` selects the compatible daemon
-lifecycle. `homi uninstall` is package lifecycle. Ordinary uninstall preserves saved
-identities, mail, histories and credentials.
+A supervisor may restart a managed daemon after `homi stop`. `homi uninstall`
+removes the owned service, client integrations and executable links while preserving
+saved identities, mail, histories and credentials. `--no-clients` preserves client
+registrations during removal, but still removes owned executable links; it is not
+a daemon-only operation. Legacy `homi daemon install|uninstall` and
+`communicate homi install|uninstall` refuse service changes because they lack the
+managed lifecycle's ownership record. Use `homi setup --service` for persistence.
 
 `homi daemon pair USER@HOST` enrolls another of your devices. It discovers the far
 daemon in this order: an installed HOMI release (`~/.local/share/communicate/current`,

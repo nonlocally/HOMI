@@ -40,7 +40,6 @@ HOMI — persistent agent identities, communication, and execution
   homi inbox NAME                  read stored messages
   homi ask | reply | wait ...       request and receive replies
   homi seat ...                    observe and control execution
-  homi daemon install|uninstall    manage daemon persistence
 
   homi bus ...                     register, discover, and message on a bus
   homi native ...                  existing communicate native/session commands
