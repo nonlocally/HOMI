@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { modelOrigin, addModelConnection, prepareModelChoice } from "../src/model-setup.mjs";
-import { runOnboarding, shouldGuide } from "../src/onboarding.mjs";
+import { runOnboarding, shouldGuide, parseOnboardingArgs, planOnboarding } from "../src/onboarding.mjs";
 
 const key = 'fixture-key-$HOME-`inert`';
 assert.deepEqual(modelOrigin("https://models.example.test/v1/"), {
@@ -53,6 +53,10 @@ for (const invalidKey of ["key with spaces", "clé"])
 const tools = Object.fromEntries(Object.entries({ node: "22.0.0", python3: "3.12.0", bash: "5.2.0", claude: "2.1.281", tmux: "3.5" })
   .map(([id, version]) => [id, { path: `/fixture/bin/${id}`, version }]));
 const logs = [], calls = [];
+const oldCodexPlan = planOnboarding(parseOnboardingArgs(["--model", "--codex", "--install-missing"]), {
+  platform: "linux", uid: 501, tools: { ...tools, codex: { path: "/fixture/bin/codex", version: "0.151.0" } },
+});
+assert(oldCodexPlan.blocked.some((reason) => reason.includes("0.156")), "model setup must report older Codex before activation");
 const fixture = { stdinTTY: true, stdoutTTY: true,
   probe: async () => ({ platform: "linux", tools, uid: 501 }),
   log: (line) => logs.push(line), confirm: async () => true,

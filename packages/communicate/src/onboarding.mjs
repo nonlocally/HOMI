@@ -64,7 +64,7 @@ export function requirementMet(requirement, snapshot) {
   if (requirement.id === "claude") return major(tool.version) >= 2;
   if (requirement.id === "codex") {
     const [a, b] = String(tool.version || "").match(/\d+(?:\.\d+)*/)?.[0].split(".").map(Number) || [];
-    return a > 0 || (a === 0 && b >= 151);
+    return a > 0 || (a === 0 && b >= (requirement.modelConnection ? 156 : 151));
   }
   return !requirement.minimum || major(tool.version) >= requirement.minimum;
 }
@@ -75,7 +75,9 @@ export function planOnboarding(options, snapshot) {
     { id: "python3", label: "Python 3.9+" }, { id: "bash", minimum: o.terminal || o.mesh ? 4 : 3, label: o.terminal || o.mesh ? "Bash 4+" : "Bash" }];
   for (const [id, selected] of [["claude", o.claude], ["codex", o.codex], ["tmux", o.terminal || o.claude || o.codex],
     ["fzf", o.terminal || o.mesh], ["jq", o.mesh], ["ssh", o.mesh], ["ghostty", o.ghostty],
-    ["font", o.ghostty]]) if (selected) requirements.push({ id, label: id === "font" ? "JetBrainsMono Nerd Font" : id === "tmux" ? "tmux (agent seats)" : id });
+    ["font", o.ghostty]]) if (selected) requirements.push({ id,
+      ...(id === "codex" && o.model ? { modelConnection: true } : {}),
+      label: id === "font" ? "JetBrainsMono Nerd Font" : id === "tmux" ? "tmux (agent seats)" : id === "codex" && o.model ? "Codex 0.156+ (model connections)" : id });
   const missing = requirements.filter((r) => !requirementMet(r, snapshot));
   const steps = [], blocked = [];
   const add = (step) => { if (!steps.some((s) => s.id === step.id)) steps.push(step); };
