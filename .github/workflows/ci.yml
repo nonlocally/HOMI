@@ -14,13 +14,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14]
+        node: ['20', '22']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: packages/communicate/package-lock.json
       - uses: actions/setup-python@v5
@@ -44,8 +45,19 @@ jobs:
         run: python3 scripts/test-profiles.py
       - name: Build immutable runtime
         run: python3 scripts/build-release.py
+      - name: Qualify the extracted runtime without checkout fallback
+        run: |
+          mkdir -p "$RUNNER_TEMP/homi-artifact"
+          tar -xzf "dist/homi-$(cat VERSION).tar.gz" -C "$RUNNER_TEMP/homi-artifact"
+          python3 scripts/qualify-installed.py "$RUNNER_TEMP/homi-artifact/homi-$(cat VERSION)" > "$RUNNER_TEMP/homi-artifact-qualification.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: homi-runtime-${{ runner.os }}
+          name: homi-runtime-${{ runner.os }}-node${{ matrix.node }}
           path: dist/homi-*.tar.gz*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: homi-qualification-${{ runner.os }}-node${{ matrix.node }}
+          path: ${{ runner.temp }}/homi-artifact-qualification.json
+          if-no-files-found: warn

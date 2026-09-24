@@ -12,6 +12,9 @@ export PYTHONDONTWRITEBYTECODE=1
 python3 "$ROOT/scripts/test-homi-entrypoint.py"
 python3 "$ROOT/scripts/test-homi-interface.py"
 python3 "$ROOT/scripts/test-homi-seat-unit.py"
+python3 "$ROOT/scripts/test-provider-qualification.py"
+bash "$ROOT/scripts/test-native-fixtures.sh"
+bash "$ROOT/scripts/test-homi-adopt.sh"
 for suite in homi-seat-menu homi-core homi-seat homi-spawn homi-ask homi-link homi-seat-link; do
   bash "$ROOT/scripts/test-$suite.sh"
 done

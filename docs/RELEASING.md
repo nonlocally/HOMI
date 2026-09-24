@@ -39,6 +39,14 @@ Use isolated fixtures on the developer's working Mac. Do not disable its existin
 integrations for qualification; actual legacy-disabled installation testing belongs
 on designated test devices.
 
+CI runs the retained core gate on Linux and macOS with Node 20 and 22, then extracts
+the built archive and runs `scripts/qualify-installed.py` against it. Its JSON
+report is retained independently from the archive. Any explicitly unqualified
+upgrade check remains open; a successful process exit does not turn omitted live
+provider or previous-release checks into passes. See
+[Provider and client qualification](PROVIDER-QUALIFICATION.md) for the opt-in
+artifact harness, fresh installed-plugin acceptance, and two-device proof.
+
 ## Publication
 
 Audit all retained Git refs/history, current source and archive. Verify historical
