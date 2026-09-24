@@ -1,18 +1,22 @@
-# HOMI — the combined communication package
+# HOMI — agents that can work together
 
-This package is HOMI's installable unit: the `homi` command, the compatible
-`communicate` command, the MCP server, the Claude Code/Codex plugin, and the
-durable daemon, with production Node dependencies included in the release
-archive. The npm name `@aadarwal/communicate`, the plugin identity
-`communicate@communicate`, and the state directory are kept for compatibility
-with earlier Communicate installations. Version 0.3.0 uses a release archive;
-the npm name is not a claim that 0.3.0 is published to npm. Download the archive
-and checksum from the [HOMI 0.3.0 release](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0),
-or install with [Homebrew](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/INSTALL.md#homebrew).
-See [RELEASING.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/RELEASING.md)
-for the validation process.
+Create Claude or Codex agents, ask them to work on a task, and send messages
+between sessions or devices. HOMI gives your agents the tools to find one
+another, exchange questions and replies, and keep messages under persistent
+identities.
 
 ## Install
+
+With Homebrew installed:
+
+```sh
+brew install nonlocally/tap/homi
+homi setup
+homi doctor
+```
+
+For an archive installation, download the archive and checksum from the
+[HOMI 0.3.0 release](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0), then:
 
 ```sh
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
@@ -63,6 +67,7 @@ homi setup --service                             # per-user launchd or systemd -
 homi setup --dry-run                             # show every change without making it
 /path/to/new-release/bin/homi update             # activate a newer release
 homi rollback                                    # retained previous release
+homi profile uninstall                          # remove selected profiles separately, if installed
 homi uninstall --claude                         # restore this client's previous registration
 homi uninstall --purge                          # remove owned integrations/payloads; state preserved
 ```
@@ -74,11 +79,11 @@ for scripts and debugging:
 
 ```sh
 homi start | status | agents                     # daemon and durable roster
-homi claim NAME                                  # a durable identity with a mailbox
-homi send NAME 'message' --from NAME             # stored mail
+homi claim NAME                                  # create a persistent identity
+homi send NAME 'message' --from NAME             # send and save a message
 homi ask NAME 'question' --timeout SEC           # blocks for a correlated reply
 homi reply TOKEN 'answer' --from NAME            # answer a received question
-homi wait NAME --timeout SEC --json              # wait for mail arriving after this call starts
+homi wait NAME --timeout SEC --json              # wait for messages arriving after this call starts
 homi inbox NAME                                  # stored JSONL; reading does not acknowledge it
 homi spawn NAME --cli claude|codex --cwd DIR     # run a model as an identity in a seat
 homi seat ls | read | send | state | interrupt | kill
@@ -91,11 +96,18 @@ Default verbs address durable identities. `homi bus` addresses registered
 sessions on the configured broker with membership checks and receipts.
 `homi native` addresses local sockets, existing-session queues, and SSH routes.
 The three address spaces are explicit, so a failed lookup never targets another
-agent. A stored mailbox message, a bus receipt, a native submission, and a
+agent. A saved message, a bus receipt, a native submission, and a
 correlated reply keep their distinct meanings; none says a model finished the
 task. See [docs/CLI.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/CLI.md).
 
 ## Plugin and MCP
+
+This package includes the `homi` command, the compatible `communicate` command,
+the MCP server, the Claude Code/Codex plugin, and the daemon. Production Node
+dependencies are included in the release archive. The npm name
+`@aadarwal/communicate`, the plugin identity `communicate@communicate`, and the
+state directory remain compatible with earlier Communicate installations.
+Version 0.3.0 is distributed through Homebrew and release archives, not npm.
 
 The plugin carries skills, slash commands, and MCP tools. Native and bus tools
 keep their existing names and order; durable tools use `homi_` names. `homi serve`

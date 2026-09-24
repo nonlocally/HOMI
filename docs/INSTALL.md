@@ -1,7 +1,20 @@
 # Installation
 
-Install from the [HOMI 0.3.0 release](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
-or use [Homebrew](#homebrew). Setup lets you choose clients and optional tools.
+With Homebrew installed, start here:
+
+```sh
+brew install nonlocally/tap/homi
+homi setup
+homi doctor
+```
+
+Setup lets you choose Claude Code, Codex, and optional tools, and review any
+missing software before installing it. Sign into your selected provider, then
+open a fresh session and ask your agent to create peers, send messages, or
+coordinate work. See the [Quickstart](QUICKSTART.md) for examples and
+[Homebrew](#homebrew) below for upgrades and removal.
+
+You can also install from the [HOMI 0.3.0 release archive](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0).
 
 ## Requirements
 
@@ -38,6 +51,8 @@ tools does need network access to their installation sources. An archive copied
 to a machine over SSH installs exactly like a downloaded one.
 
 ## Run setup
+
+For Homebrew, run `homi setup`. From an extracted archive, use:
 
 ```sh
 ./homi-0.3.0/bin/homi setup
@@ -189,6 +204,9 @@ backed up before replacement. Only one daemon owns a state root at a time.
 
 ## Update, roll back, uninstall
 
+If you installed optional profiles, remove their configuration separately with
+`homi profile uninstall` before removing HOMI itself.
+
 ```sh
 /path/to/homi-0.3.1/bin/homi update     # from the newly verified archive
 homi rollback --dry-run
@@ -205,9 +223,9 @@ Rules that hold throughout:
   release and re-registers clients on it.
 - Setup only ever replaces what it still owns. A client registration, executable
   link, or service file that someone else changed is kept, and setup says so.
-- Uninstall preserves identities, mail, credentials, and configuration under
-  `~/.local/state/communicate/`. `--purge` removes release payloads only, and
-  refuses while any owned integration remains.
+- Uninstall preserves identities, saved messages, credentials, and configuration
+  under `~/.local/state/communicate/`. `--purge` removes release payloads only,
+  and refuses while any owned integration remains.
 - An interrupted run leaves `~/.local/share/communicate/install.lock` with the
   owner's PID and start time. `doctor` shows it. After confirming that process is
   gone, rename that exact directory out of the way and retry; HOMI never removes
@@ -224,7 +242,7 @@ Nothing personal ships in the package. Where your settings go:
 | Purpose | Location |
 |---|---|
 | Installed releases, `current`, `bin/` | `~/.local/share/communicate/` (`COMMUNICATE_DATA`) |
-| Identities, mail, daemon and bus state, device links | `~/.local/state/communicate/` (`COMM_STATE`) |
+| Identities, saved messages, daemon and bus state, device links | `~/.local/state/communicate/` (`COMM_STATE`) |
 | Bus broker selection, enrollment, device credential | `~/.local/state/communicate/bus/` |
 | Optional profile files, `local.sh`, tmux/Ghostty overrides, mesh hosts | `~/.config/homi/profiles/` |
 | Python for the daemon | `HOMI_PYTHON=/path/to/python3` |
@@ -294,7 +312,8 @@ Calling the formula's full path ensures that `update` uses the new installer
 even if an older HOMI launcher comes first on PATH. Runtime commands continue
 using the release selected by setup or rollback until you activate another one.
 
-Remove HOMI's owned client registrations and service before removing the formula:
+If you selected profiles, run `homi profile uninstall` first. Then remove HOMI's
+owned client registrations and service before removing the formula:
 
 ```sh
 "$(brew --prefix nonlocally/tap/homi)/bin/homi" uninstall
@@ -302,8 +321,8 @@ brew uninstall nonlocally/tap/homi
 ```
 
 Use `uninstall --purge` in the first command if you also want to remove retained
-release copies. Identities, mail and credentials remain preserved. Homebrew alone
-does not remove HOMI's per-user integrations or state.
+release copies. Identities, saved messages and credentials remain preserved.
+Homebrew alone does not remove HOMI's per-user integrations or state.
 
 ## Qualification
 

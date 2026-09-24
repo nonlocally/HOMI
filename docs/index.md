@@ -1,5 +1,17 @@
 # HOMI documentation
 
+Use HOMI to create Claude or Codex agents, give them work, and exchange messages
+between sessions and devices. Start with Homebrew and guided setup:
+
+```sh
+brew install nonlocally/tap/homi
+homi setup
+```
+
+After signing into your selected provider, open a fresh agent session and ask
+for the work you want done. The [Quickstart](QUICKSTART.md) gives example requests;
+the [installation guide](INSTALL.md) also covers release archives and servers.
+
 Start here:
 
 - [Quickstart](QUICKSTART.md) — guided setup, provider sign-in, and asking your
