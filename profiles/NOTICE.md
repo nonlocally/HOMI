@@ -15,6 +15,12 @@ Adaptations separate package/config/state paths, select shell modules explicitly
 use native agent authentication by default, preserve SSH configuration, and add
 ownership-aware configuration installation. See the repository MIT license.
 
+The optional containment adapter (`runtime/box` and `runtime/fns/box`) is adapted
+from `config/bash/fns/box` and `config/box/Containerfile` at the same donor commit.
+Its selected image excludes notebook/browser applications; package paths,
+explicit credential mounts, and a read-only command preview replace source-tree
+coupling. The container runtime and image build remain separate opt-in steps.
+
 The optional snapshot module (`runtime/modules/snapshots`) is adapted from the
 same Anu commit: `config/bash/bin/anu-snapshot` and
 `config/launchd/com.anu.snapshot.plist` (the 03/09/15/21 cadence and the
