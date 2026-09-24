@@ -19,6 +19,14 @@ TEMPLATE = '''class Homi < Formula
   # Homebrew's shebang rewrite would invalidate the installed archive.
   skip_clean "libexec"
 
+  def skip_clean?(path)
+    # Reinstall can expose prefix through opt while Cleaner walks its real
+    # Cellar path. Protect either spelling of the immutable runtime directory.
+    return true if path == libexec || (libexec.directory? && path == libexec.realpath)
+
+    super
+  end
+
   def install
     libexec.install Dir["*"]
     # Homebrew moves metafiles out of libexec when the prefix has none.
