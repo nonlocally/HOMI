@@ -13,11 +13,29 @@ python3 scripts/build-release.py
 python3 scripts/render-homebrew-formula.py VERSION SHA256 /path/to/tap/Formula/homi.rb
 ```
 
-The builder uses the committed lockfile and includes production dependencies and
-notices. Archive metadata is normalized; the manifest records source commit,
-dependency integrity and file hashes. `--allow-dirty` is development-only. Publish
+The builder captures the current commit and uses an owned detached temporary Git
+worktree, with checkout hooks disabled. Vendoring runs there; production npm
+dependencies are installed only in the temporary archive stage. The development
+checkout's `vendor/` and `node_modules/` are never rebuilt or replaced. The owned
+worktree and staging directories are removed after success or a build exception;
+unrelated worktrees are never pruned.
+
+The committed lockfile supplies production dependencies and notices. Archive
+metadata is normalized; the manifest records the actual source commit,
+dependency integrity and file hashes. `--allow-dirty` is development-only: it
+freezes tracked files and nonignored untracked files, including deletions,
+rejects concurrent changes detected during capture, and records a source snapshot
+digest and dirty markers in both manifests. Ignored dependencies/vendor output
+are not source inputs. Edits after capture cannot change the packaged snapshot.
+Publish
 only the immutable archive whose checksum was actually tested. Formula installation
 must not configure the user's machine automatically.
+
+Run `python3 -B scripts/test-build-release.py --real-builds` from a clean commit
+to verify two actual npm-backed builds have identical checksums, unchanged source
+dependency/vendor fingerprints, and no temporary worktree registrations left
+behind. Without `--real-builds`, it runs isolated fixture tests for source capture,
+checkout-hook suppression, failure cleanup, and development provenance.
 
 ## Qualification
 
