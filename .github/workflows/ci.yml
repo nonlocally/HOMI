@@ -96,22 +96,24 @@ jobs:
           if-no-files-found: warn
 
   homebrew:
-    needs: core
     runs-on: macos-14
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: packages/communicate/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
-        with:
-          name: homi-runtime-macOS-node20
-          path: ${{ runner.temp }}/homi-brew-artifact
+      - name: Build the immutable runtime independently of the core test matrix
+        run: python3 scripts/build-release.py
       - name: Qualify canonical Homebrew install and reinstall on the disposable runner
         run: |
           version="$(cat VERSION)"
-          archive="$RUNNER_TEMP/homi-brew-artifact/homi-$version.tar.gz"
+          archive="$GITHUB_WORKSPACE/dist/homi-$version.tar.gz"
           sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
           python3 scripts/render-homebrew-formula.py "$version" "$sha" "$RUNNER_TEMP/homi.rb"
           python3 scripts/qualify-homebrew.py "$archive" "$RUNNER_TEMP/homi.rb" \
