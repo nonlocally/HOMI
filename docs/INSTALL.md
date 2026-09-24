@@ -33,7 +33,12 @@ core upgrades do not silently update the workstation profile.
 ## Upgrade and removal
 
 Obtain the new version through the installation channel, then run its setup/update
-operation to activate selected integrations. Keep the previous payload available
+operation to activate selected integrations. A Homebrew upgrade downloads the new
+package; `homi update` activates it. Runtime commands continue using the installed
+active release until activation succeeds, and follow that release after rollback.
+Setup/update and doctor run from the invoked package so a newer download can
+activate or diagnose an older installation. Source checkouts execute their own code.
+Keep the previous payload available
 until acceptance. Rollback preserves user data and restores the former payload.
 
 Ordinary uninstall removes only owned integration objects and preserves state.

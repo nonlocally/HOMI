@@ -4,9 +4,14 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pkgDir, homiCli, packageVersion } from "./paths.mjs";
+import { dispatchActive } from "./runtime-selection.mjs";
 
 const [command = "help", ...args] = process.argv.slice(2);
 try {
+  if (!["setup", "update", "uninstall", "rollback", "doctor"].includes(command) &&
+      dispatchActive("homi.mjs", [command, ...args])) {
+    // The selected release supplied the result and exit status.
+  } else {
   switch (command) {
     case "setup": case "update":
       await (await import("./setup.mjs")).runSetup(args);
@@ -35,6 +40,7 @@ try {
       if (result.error) throw result.error;
       process.exitCode = result.status ?? 1;
     }
+  }
   }
 } catch (error) {
   console.error(`homi: ${error.message}`);

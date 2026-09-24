@@ -13,7 +13,7 @@ const fakeHome = mkdtempSync(path.join(os.tmpdir(), "comm-setup-home-"));
 const data = path.join(fakeHome, "data");
 mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
 mkdirSync(path.join(fakeHome, "bin"));
-const pluginVersion = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8")).version;
+const pluginVersion = JSON.parse(readFileSync(path.join(pkgDir, "vendor/plugins/communicate/.claude-plugin/plugin.json"), "utf8")).version;
 writeFileSync(path.join(fakeHome, "bin", "claude"), `#!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]

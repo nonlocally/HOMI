@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -7,8 +7,11 @@ export const packageVersion = JSON.parse(readFileSync(path.join(pkgDir, "package
 // Checkout MCP must execute checkout code, even when a stale vendor/ or a
 // frozen npm installation exists. Published packages only have vendor/.
 const checkout = path.resolve(pkgDir, "..", "..");
-export const communicateCli = existsSync(path.join(checkout, "lib", "common.sh")) &&
-  existsSync(path.join(checkout, "packages", "communicate", "package.json"))
+const checkoutPackage = path.join(checkout, "packages", "communicate");
+export const isSourceCheckout = path.resolve(pkgDir) === checkoutPackage &&
+  existsSync(path.join(checkout, "lib", "common.sh")) &&
+  realpathSync(pkgDir) === realpathSync(checkoutPackage);
+export const communicateCli = isSourceCheckout
   ? path.join(checkout, "bin", "communicate")
   : path.join(pkgDir, "vendor", "bin", "communicate");
 export const homiCli = path.join(path.dirname(communicateCli), "homi");

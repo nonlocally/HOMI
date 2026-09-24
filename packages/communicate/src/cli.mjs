@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { pkgDir, communicateCli } from "./paths.mjs";
+import { dispatchActive } from "./runtime-selection.mjs";
 
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -14,7 +15,11 @@ const version = () => {
   console.log(`@aadarwal/communicate ${v} (payload ${stamp})`);
 };
 
-switch (cmd) {
+try {
+if (!["setup", "update", "uninstall", "rollback", "doctor"].includes(cmd) &&
+    dispatchActive("cli.mjs", process.argv.slice(2))) {
+  // The selected release supplied the result and exit status.
+} else switch (cmd) {
   case undefined:
   case "help":
   case "--help":
@@ -50,4 +55,8 @@ switch (cmd) {
     const r = spawnSync(communicateCli, [cmd, ...rest], { stdio: "inherit" });
     process.exit(r.status ?? 1);
   }
+}
+} catch (error) {
+  console.error(`communicate: ${error.message}`);
+  process.exitCode = 1;
 }

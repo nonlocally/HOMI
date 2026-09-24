@@ -72,6 +72,18 @@ const dirty = Boolean(git("status", "--porcelain", "--untracked-files=no"));
 const files = {};
 const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
   entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
+// Client caches key plugins by version. Include a deterministic content stamp
+// so two candidates of the same product version cannot reuse stale instructions.
+const pluginContent = createHash("sha256").update(commit);
+for (const file of [...walk(vendor), ...walk(path.join(pkgDir, "src"))].sort())
+  pluginContent.update(path.relative(pkgDir, file)).update("\0").update(readFileSync(file)).update("\0");
+const pluginVersion = `${pkg.version}+${pluginContent.digest("hex").slice(0, 12)}`;
+for (const kind of [".claude-plugin", ".codex-plugin"]) {
+  const file = path.join(vendor, "plugins/communicate", kind, "plugin.json");
+  const plugin = JSON.parse(readFileSync(file, "utf8"));
+  plugin.version = pluginVersion;
+  writeFileSync(file, JSON.stringify(plugin, null, 2) + "\n");
+}
 for (const file of walk(vendor).sort()) files[path.relative(vendor, file)] =
   createHash("sha256").update(readFileSync(file)).digest("hex");
 const daemonVersion = readFileSync(path.join(vendor, "lib/homi.py"), "utf8").match(/^HOMI_VERSION = "([^"]+)"/m)?.[1];
@@ -80,6 +92,6 @@ for (const file of [...walk(path.join(pkgDir, "src")), path.join(pkgDir, "packag
   packageFiles[path.relative(pkgDir, file)] = createHash("sha256").update(readFileSync(file)).digest("hex");
 writeFileSync(path.join(vendor, "release.json"), JSON.stringify({ schema: 1, product: "HOMI", version: pkg.version,
   source: { repository: "https://github.com/nonlocally/HOMI", commit, dirty },
-  components: { package: pkg.name, plugin: "communicate@communicate", daemon: daemonVersion }, files, packageFiles }, null, 2) + "\n");
+  components: { package: pkg.name, plugin: "communicate@communicate", pluginVersion, daemon: daemonVersion }, files, packageFiles }, null, 2) + "\n");
 writeFileSync(path.join(vendor, "VERSION"), `${pkg.version}+${commit.slice(0, 12)}${dirty ? ".dirty" : ""}\n`);
 console.log(`vendored HOMI ${pkg.version} (${Object.keys(files).length} files, ${commit.slice(0, 12)})`);

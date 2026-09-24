@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // A checkout (including paths with spaces) must win over an older npm install.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, cpSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -28,5 +28,53 @@ try {
   const cli = spawnSync(path.join(root, "plugins/communicate/bin/communicate"), ["--help"], { env, encoding: "utf8" });
   if (cli.status !== 0 || cli.stdout.includes("stale-install") || !cli.stdout.includes("communicate bus"))
     throw new Error("neighboring checkout CLI not selected: " + cli.stdout + cli.stderr);
-  console.log("PASS: launcher-smoke — checkout MCP and CLI win over stale installs; spaced paths remain literal");
+  // A normal tar extraction in checkout/dist must never inherit that checkout.
+  const shaped = path.join(temp, "checkout-shaped parent");
+  const archive = path.join(shaped, "dist/homi-0.3.0");
+  mkdirSync(path.join(shaped, "lib"), { recursive: true });
+  mkdirSync(path.join(shaped, "packages/communicate"), { recursive: true });
+  writeFileSync(path.join(shaped, "lib/common.sh"), "source-only marker");
+  writeFileSync(path.join(shaped, "packages/communicate/package.json"), "{}");
+  mkdirSync(path.join(archive, "vendor/bin"), { recursive: true });
+  cpSync(path.join(pkg, "src"), path.join(archive, "src"), { recursive: true });
+  cpSync(path.join(pkg, "package.json"), path.join(archive, "package.json"));
+  for (const name of ["homi", "communicate"])
+    writeFileSync(path.join(archive, "vendor/bin", name), '#!/bin/sh\nprintf "artifact:%s\\n" "$@"\n', { mode: 0o755 });
+  const run = (entry, args) => spawnSync(process.execPath, [path.join(archive, "src", entry), ...args], { env, encoding: "utf8" });
+  const artifactRun = run("homi.mjs", ["status", "--json"]);
+  if (artifactRun.status || artifactRun.stdout !== "artifact:status\nartifact:--json\n")
+    throw new Error("archive selected checkout code: " + artifactRun.stdout + artifactRun.stderr);
+  const resolved = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `import {communicateCli,isSourceCheckout} from ${JSON.stringify(path.join(archive, "src/paths.mjs"))}; console.log(JSON.stringify({communicateCli,isSourceCheckout}));`], { env, encoding: "utf8" });
+  const selection = JSON.parse(resolved.stdout);
+  if (selection.isSourceCheckout || selection.communicateCli !== path.join(realpathSync(archive), "vendor/bin/communicate"))
+    throw new Error("archive MCP CLI resolution escaped its package");
+
+  // An upgraded package-manager executable follows the activated release.
+  // Lifecycle commands still belong to the newly downloaded package.
+  const active = path.join(data, "retained release");
+  mkdirSync(path.join(active, "src"), { recursive: true });
+  writeFileSync(path.join(active, "package.json"), '{"type":"module"}');
+  for (const entry of ["cli.mjs", "homi.mjs"])
+    writeFileSync(path.join(active, "src", entry), 'console.log(JSON.stringify({active:true,args:process.argv.slice(2)}));');
+  rmSync(path.join(data, "current"), { recursive: true });
+  symlinkSync(active, path.join(data, "current"));
+  writeFileSync(path.join(data, "install.json"), JSON.stringify({ current: active }));
+  for (const [entry, args] of [["homi.mjs", ["send", "name", "--", "literal $HOME `id`"]], ["cli.mjs", ["serve"]]]) {
+    const result = run(entry, args);
+    const actual = result.status === 0 && JSON.parse(result.stdout);
+    if (!actual?.active || JSON.stringify(actual.args) !== JSON.stringify(args))
+      throw new Error("package-manager invocation ignored active release: " + result.stdout + result.stderr);
+  }
+  const setup = run("homi.mjs", ["setup", "--no-clients", "--dry-run"]);
+  if (setup.status === 0 || !setup.stderr.includes("Release manifest missing"))
+    throw new Error("setup was redirected to the active old release");
+  const checkoutVersion = spawnSync(process.execPath, [path.join(pkg, "src/homi.mjs"), "version"], { env, encoding: "utf8" });
+  if (checkoutVersion.status || !checkoutVersion.stdout.startsWith("HOMI "))
+    throw new Error("source checkout incorrectly followed installed activation");
+  writeFileSync(path.join(data, "install.json"), JSON.stringify({ current: archive }));
+  const mismatch = run("homi.mjs", ["status"]);
+  if (!mismatch.status || !mismatch.stderr.includes("ownership record"))
+    throw new Error("inconsistent active runtime silently fell back");
+  console.log("PASS: launcher-smoke — exact checkout detection, extracted archive isolation, active release dispatch, literal arguments and lifecycle routing");
 } finally { rmSync(temp, { recursive: true, force: true }); }
