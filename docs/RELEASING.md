@@ -65,6 +65,12 @@ provider or previous-release checks into passes. See
 [Provider and client qualification](PROVIDER-QUALIFICATION.md) for the opt-in
 artifact harness, fresh installed-plugin acceptance, and two-device proof.
 
+Also run the opt-in [client restoration matrix](CLIENT-RESTORATION-QUALIFICATION.md)
+against the extracted release. It uses actual client registry commands in isolated
+homes to verify that setup and removal restore prior enabled, disabled and custom
+policy states. It makes no model requests; installed-provider acceptance remains
+a separate check.
+
 The dashboard job uses Playwright 1.63.0 with Chromium against the built archive's
 actual assets. Run the same gate locally with
 `uv run --with playwright==1.63.0 python scripts/qualify-browser.py /path/to/runtime --evidence /private/new-ui-evidence`
