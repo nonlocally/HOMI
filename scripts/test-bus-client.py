@@ -200,10 +200,27 @@ class BusClientTest(unittest.TestCase):
         cls.broker = Broker(cls.temp / "hub")
         cls.admin = cls.broker.admin_token
         cert, key = cls.temp / "cert.pem", cls.temp / "key.pem"
+        # Do not inherit the runner's openssl.cnf extensions. Different OpenSSL
+        # and LibreSSL defaults can produce a certificate Python's linked TLS
+        # library rejects. This isolated self-signed test CA also serves localhost.
+        cert_config = cls.temp / "openssl.cnf"
+        cert_config.write_text("""[req]
+prompt = no
+distinguished_name = subject
+x509_extensions = extensions
+[subject]
+CN = localhost
+[extensions]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,digitalSignature,keyEncipherment,keyCertSign
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:localhost
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+""")
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                         "-keyout", str(key), "-out", str(cert), "-days", "1",
-                        "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
-                        "-addext", "basicConstraints=critical,CA:TRUE"],
+                        "-sha256", "-config", str(cert_config)],
                        capture_output=True, check=True)
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_factory(cls.broker))
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
