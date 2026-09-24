@@ -44,6 +44,21 @@ files verify against it. Two rules are stricter than the Anu original:
   manifest). Nothing is written to the sessions directory; a good copy is
   restored through a temporary directory, verified, marked archived, and only
   then given its final name.
+- **A manifest is an exact inventory.** Verification requires every listed
+  path to be a safe relative path inside the snapshot, every listed file to
+  match, the regular files present (marker and manifest aside) to be exactly
+  the listing, and no symlink or special entry anywhere in the copy. A local
+  snapshot holding a symlink is never marked archived and never pruned; an
+  archive copy with an extra, special or traversing entry is refused for
+  restore and reported corrupt by `verify`. Existing text-mode and binary-mode
+  shasum manifests keep verifying.
+- **The archive configuration itself is checked** before anything is mirrored,
+  pruned, restored or verified: the volume must be exactly a mount point (the
+  whole mount-point field, never a prefix or a pattern), the archive directory
+  must resolve inside that volume, and the archive and the sessions directory
+  must be disjoint — neither the same directory nor an ancestor or descendant
+  of the other, with symlinks resolved through every existing ancestor. A
+  configuration that fails is refused with the reason and deletes nothing.
 
 Without a configured archive volume every snapshot stays local and the log
 says so; nothing is pruned.
@@ -86,6 +101,29 @@ is the user timer `communicate-homi-snapshots.timer` (`OnCalendar=*-*-*
 03,09,15,21:00:00`, `Persistent=true`). Both run the owned wrapper
 `~/.local/bin/homi-snapshot`.
 
+Ownership boundaries:
+
+- That compatible label is used only for the actual account home (from the
+  password database, not `$HOME`) with standard config and state roots. Any
+  other home, or an `XDG_CONFIG_HOME`/`XDG_STATE_HOME` override, gets a
+  stable scoped label (`com.communicate.homi.snapshots.<tag>`), so an isolated
+  or qualification installation can never reach the account's real job.
+- Before anything is loaded or unloaded, the service manager is asked which
+  file it loaded the label from. A job of our label loaded from another file
+  is a collision: install, update and uninstall refuse and change nothing.
+- An uninstall that finds no schedule-owned ledger entries is inert and never
+  calls the service manager.
+- An update that fails to activate restores the previous files and loads the
+  previous schedule again when one was loaded; an identical owned schedule
+  that is already loaded is neither rewritten nor restarted.
+- `--platform` renders either platform for `preview`, but `install` and
+  `uninstall` only drive the host's own manager unless an explicit
+  `--manager PATH` fixture is given (that is how the tests run a fake
+  launchd). On Linux, ownership of the unit files, enablement and activity are
+  reported separately, and only this timer is enabled or disabled.
+- A wrapper the profile installer owns is used as shared: never rewritten,
+  retagged or removed here. Only a wrapper this schedule created is removed.
+
 The files are owned through the profile ledger
 (`~/.local/state/homi/profiles/ownership.json`) using the installer's own
 conflict rules: an existing unowned file is never replaced, an owned file that
@@ -97,12 +135,19 @@ select an isolated home, a runtime payload, and a rendering for qualification.
 
 ## Qualification
 
-`bash scripts/test-snapshots.sh` runs under a temporary HOME with a fake
-`mount`, `launchctl` and `tmux` first on PATH and a fake snapshotter: ordering
-across both naming schemes, token resolution, both safety rules against a
-fixture archive (unmounted volume, marker without a copy, differing archive
-bytes, locally edited copy, corrupt restore), the unattended run, the retention
-default, and the schedule's preview, install, idempotent repeat, edited-file
-refusal, uninstall, and unowned-file refusal. It never touches real snapshots, a
-real volume, a tmux server, or a service manager. Real launchd firing, a real
-external volume, and Linux timers remain environment-specific checks.
+`bash scripts/test-snapshots.sh` runs under temporary homes with a fake
+`mount`, `tmux` and a fake snapshotter first on PATH and one global fake
+launchd named as an explicit `--manager` fixture: ordering across both naming
+schemes, token resolution, both safety rules against a fixture archive
+(unmounted volume, marker without a copy, differing archive bytes, locally
+edited copy, corrupt restore), refused archive configurations (same or nested
+directories, off-volume, symlink overlap, a longer volume name), symlink and
+inventory rules, the unattended run, the retention default, and the schedule
+across two isolated homes: scoped and default labels, install, identical-repeat
+without restart, uninstall of one home leaving the other loaded, an inert
+uninstall with nothing owned, a foreign loaded path refused, a failed
+reactivation restoring files and the previous job, a shared profile-owned
+wrapper retained, edited-file and unowned-file refusals, and a non-native
+platform refused for mutation. It never touches real snapshots, a real volume,
+a tmux server, or a service manager. Real launchd firing, a real external
+volume, and Linux timers remain environment-specific checks.

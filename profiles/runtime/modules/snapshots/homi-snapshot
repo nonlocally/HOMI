@@ -82,8 +82,8 @@ KEEP="${HOMI_SNAPSHOT_KEEP:-56}"
 VOL="${HOMI_SNAPSHOT_VOL:-}"
 ARCHIVE_DIR="${HOMI_SNAPSHOT_ARCHIVE:-${VOL:+$VOL/homi-snapshots}}"
 
-LABEL="com.communicate.homi.snapshots"
-TIMER="communicate-homi-snapshots.timer"
+# The schedule's label is scoped per installation home by schedule.py; the
+# status line asks it rather than guessing.
 
 # Current scheme, and the pre-cadence one that must keep working forever.
 SNAP_GLOB='snap-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]'
@@ -126,19 +126,70 @@ _logline() { # <status> <detail>
   printf '%s\n' "$line"
 }
 
+# Resolve symlinks in every existing ancestor of a path (the leaf may not
+# exist yet); the roots below are compared only in this form.
+_realpath() { python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+
+# 0 iff <path> is exactly a mount point in mount(8)'s table: the whole
+# mount-point field is compared, never a prefix or a pattern. The table is
+# read into a variable first — a pipe into grep -q can end with SIGPIPE, which
+# pipefail reports as "not mounted".
+_is_mounted() { # <path>
+  local want="$1" real table line mp
+  real="$(_realpath "$1")"
+  table="$(mount 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    mp="${line#* on }"; [[ "$mp" != "$line" ]] || continue
+    mp="${mp% (*}"            # macOS/BSD: "... on /path (opts)"
+    mp="${mp% type *}"        # Linux:     "... on /path type fs (opts)"
+    [[ "$mp" == "$want" || "$mp" == "$real" ]] && return 0
+  done <<< "$table"
+  return 1
+}
+
 # 0: the archive volume is genuinely mounted and writable (not a leftover empty
 # mount-point directory on the internal disk); 1: configured but not mounted;
 # 2: no archive volume configured at all.
 _drive_ready() {
   [[ -n "$VOL" ]] || return 2
   [[ -d "$VOL" && -w "$VOL" ]] || return 1
-  mount | grep -q " on $VOL " || return 1
+  _is_mounted "$VOL" || return 1
+}
+
+# 0 iff the archive directory resolves inside the mounted volume and the local
+# sessions directory and the archive are disjoint — neither is the other, an
+# ancestor or a descendant, symlinks resolved. Otherwise "archiving" would read
+# the very bytes prune is about to delete, or write off the volume it claims.
+# Sets $_ROOTS_WHY when it refuses.
+_ROOTS_WHY=""
+_archive_roots_ok() {
+  local vol arch sess
+  vol="$(_realpath "$VOL")"; arch="$(_realpath "$ARCHIVE_DIR")"; sess="$(_realpath "$SESS_DIR")"
+  case "$arch" in
+    "$vol"|"$vol"/*) ;;
+    *) _ROOTS_WHY="archive $ARCHIVE_DIR resolves to $arch, outside the archive volume $vol"; return 1 ;;
+  esac
+  case "$arch" in
+    "$sess"|"$sess"/*) _ROOTS_WHY="archive $arch is the local sessions dir $sess, or inside it"; return 1 ;;
+  esac
+  case "$sess" in
+    "$arch"|"$arch"/*) _ROOTS_WHY="local sessions dir $sess is inside the archive $arch"; return 1 ;;
+  esac
+  return 0
+}
+
+# 0 iff the archive can be used: mounted (1: not; 2: none configured) and its
+# roots sound (3: refused, see $_ROOTS_WHY). _archive_state says which.
+_archive_usable() {
+  _drive_ready || return $?
+  _archive_roots_ok || return 3
 }
 _archive_state() {
-  _drive_ready
+  _archive_usable
   case $? in
     0) printf 'archive volume mounted at %s' "$VOL" ;;
     2) printf 'no archive volume configured (HOMI_SNAPSHOT_VOL)' ;;
+    3) printf 'archive REFUSED: %s' "$_ROOTS_WHY" ;;
     *) printf 'archive volume %s not mounted' "$VOL" ;;
   esac
 }
@@ -175,23 +226,39 @@ _manifest() { # <dir>
       | sort -z | xargs -0 shasum -a 256 > .manifest.sha256 )
 }
 
-# 0 iff the dir's manifest exists and every file still matches it.
+# 0 iff <dir> is exactly what its manifest says: the manifest is a regular
+# file of "<sha256>  ./relative" lines (or "*./relative", shasum's binary mode
+# — both GNU formats existing manifests use) whose paths stay inside the
+# snapshot, every listed file matches, the regular-file inventory (marker and
+# manifest aside) is exactly the listing, and nothing else — no symlink, no
+# special entry — is present. 2 without a manifest.
 _verify_dir() { # <dir>
-  [[ -f "$1/.manifest.sha256" ]] || return 2
-  ( cd "$1" && shasum -a 256 -c --status .manifest.sha256 )
+  local dir="$1" m="$1/.manifest.sha256" want have stray
+  [[ -f "$m" && ! -L "$m" ]] || return 2
+  [[ -z "$(grep -Ev '^[0-9a-f]{64} [ *]\./[^/]' "$m")" ]] || return 1
+  want="$(sed -E 's/^[0-9a-f]{64} [ *]//' "$m")"
+  [[ -z "$(printf '%s\n' "$want" | grep -E '(^|/)\.\.(/|$)|/\./|//')" ]] || return 1
+  stray="$(cd "$dir" && find . -mindepth 1 ! -type f ! -type d | head -n 1)"
+  [[ -z "$stray" ]] || return 1
+  ( cd "$dir" && shasum -a 256 -c --status .manifest.sha256 ) || return 1
+  have="$(cd "$dir" && find . -type f ! -name '.manifest.sha256' ! -name '.archived' | sort)"
+  [[ "$(printf '%s\n' "$want" | sort)" == "$have" ]]
 }
 
-# 0 iff the archive holds <name> with a manifest it satisfies, AND the local
-# <dir> satisfies that same manifest, AND the local file set is exactly the
-# set the manifest covers: the archive copy is byte-identical to what would be
-# deleted. The caller has already checked that the archive volume is mounted.
+# 0 iff the archive holds <name> as an exact, verified copy of the local <dir>:
+# the archive copy passes _verify_dir, the local files satisfy that same
+# manifest, the local regular-file inventory is exactly its listing, and the
+# local copy holds no symlink or special entry (nothing the archive could have
+# carried). Only then is the archive copy byte-identical to what would be
+# deleted. The caller has already checked that the archive is usable.
 _archived_verified() { # <local_dir> <name>
-  local dest="$ARCHIVE_DIR/$2"
-  [[ -d "$dest" && -f "$dest/.manifest.sha256" ]] || return 1
+  local dest="$ARCHIVE_DIR/$2" stray want have
+  [[ -d "$dest" && ! -L "$dest" ]] || return 1
   _verify_dir "$dest" || return 1
+  stray="$(cd "$1" && find . -mindepth 1 ! -type f ! -type d | head -n 1)"
+  [[ -z "$stray" ]] || return 1
   ( cd "$1" && shasum -a 256 -c --status "$dest/.manifest.sha256" ) || return 1
-  local want have
-  want="$(sed -E 's/^[0-9a-f]+ [ *]//' "$dest/.manifest.sha256" | sort)"
+  want="$(sed -E 's/^[0-9a-f]{64} [ *]//' "$dest/.manifest.sha256" | sort)"
   have="$(cd "$1" && find . -type f ! -name '.manifest.sha256' ! -name '.archived' | sort)"
   [[ "$want" == "$have" ]]
 }
@@ -234,9 +301,9 @@ _take_snapshot() { # <name>  -> logs OK/SKIP/ERROR; returns 0 unless a hard erro
 
 # Mirror every not-yet-archived local snapshot to the archive, verified.
 cmd_archive() {
-  _drive_ready; local dr=$?
+  _archive_usable; local dr=$?
   if (( dr != 0 )); then
-    _logline ARCH "$(_archive_state) — keeping all local, nothing pruned"
+    _logline "$([[ $dr == 3 ]] && echo ERROR || echo ARCH)" "$(_archive_state) — keeping all local, nothing pruned"
     return 1
   fi
   mkdir -p "$ARCHIVE_DIR" || { _logline ERROR "cannot create archive dir $ARCHIVE_DIR"; return 1; }
@@ -265,7 +332,7 @@ cmd_prune() {
   local total=${#dirs[@]} n=0 removed=0 kept=0 i
   (( total > keep )) && n=$(( total - keep ))
   if (( n > 0 )); then
-    _drive_ready; local dr=$?
+    _archive_usable; local dr=$?
     if (( dr != 0 )); then
       echo "prune: $(_archive_state) — nothing deleted ($n older than the keep window kept locally)"
       return 0
@@ -300,8 +367,7 @@ cmd_restore() {
   if name="$(_resolve_snap "$SESS_DIR" "$tok" 2>/dev/null)" && [[ -d "$SESS_DIR/$name" ]]; then
     echo "restore: $name already present locally — run: tsr $name"; return 0
   fi
-  _drive_ready; local dr=$?
-  (( dr == 0 )) || { echo "restore: $(_archive_state)" >&2; return 1; }
+  _archive_usable || { echo "restore: $(_archive_state)" >&2; return 1; }
   name="$(_resolve_snap "$ARCHIVE_DIR" "$tok")" || return 1
   _safe_name "$name" || { echo "restore: bad name" >&2; return 1; }
   [[ -d "$ARCHIVE_DIR/$name" ]] || { echo "restore: $name not in the archive" >&2; return 1; }
@@ -314,7 +380,7 @@ cmd_restore() {
   mkdir -p "$SESS_DIR"
   local tmpname=".$name.restoring" tmp="$SESS_DIR/.$name.restoring"
   _drop_dir "$SESS_DIR" "$tmpname"
-  if rsync -a "$ARCHIVE_DIR/$name/" "$tmp/" 2>/dev/null && ( cd "$tmp" && shasum -a 256 -c --status .manifest.sha256 ); then
+  if rsync -a "$ARCHIVE_DIR/$name/" "$tmp/" 2>/dev/null && _verify_dir "$tmp"; then
     printf '%s\n' "$(_now)" > "$tmp/.archived"
     mv "$tmp" "$SESS_DIR/$name" \
       && echo "restored $name from the archive (verified) -> run: tsr $name   (or: homi-workstation shell tsr $name)"
@@ -326,7 +392,7 @@ cmd_restore() {
 }
 
 cmd_verify() {
-  _drive_ready || { echo "verify: $(_archive_state)" >&2; return 1; }
+  _archive_usable || { echo "verify: $(_archive_state)" >&2; return 1; }
   local d ok=0 bad=0 nomani=0
   while IFS= read -r d; do
     if _verify_dir "$d"; then ok=$((ok+1))
@@ -337,21 +403,25 @@ cmd_verify() {
   [[ $bad -eq 0 ]]
 }
 
-_schedule_loaded() {
-  if [[ "$(uname -s)" == Darwin ]]; then
-    launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1
-  else
-    systemctl --user is-active "$TIMER" >/dev/null 2>&1
-  fi
+# "<label> <yes|no|foreign <path>|unknown>" from schedule.py's read-only status.
+_schedule_brief() {
+  python3 "$_HS_HERE/schedule.py" status --home "$HOME" --brief 2>/dev/null \
+    || printf '%s unknown\n' "com.communicate.homi.snapshots"
 }
 
 cmd_status() {
-  local loaded="no  (run: homi-snapshot schedule install)"
-  _schedule_loaded && loaded="yes"
+  local brief label state loaded
+  brief="$(_schedule_brief)"; label="${brief%% *}"; state="${brief#* }"
+  case "$state" in
+    yes)       loaded="yes" ;;
+    foreign*)  loaded="a job with this label is loaded from another file: ${state#foreign }" ;;
+    unknown)   loaded="unknown (service manager not available)" ;;
+    *)         loaded="no  (run: homi-snapshot schedule install)" ;;
+  esac
   local local_n arch_n
   local_n=$(_snap_dirs "$SESS_DIR" | wc -l | tr -d ' ')
-  if _drive_ready; then arch_n=$(_snap_dirs "$ARCHIVE_DIR" | wc -l | tr -d ' '); else arch_n="?"; fi
-  printf 'label:     %s\n' "$LABEL"
+  if _archive_usable; then arch_n=$(_snap_dirs "$ARCHIVE_DIR" | wc -l | tr -d ' '); else arch_n="?"; fi
+  printf 'label:     %s\n' "$label"
   printf 'loaded:    %s\n' "$loaded"
   printf 'schedule:  %s\n' "$SCHEDULE_DESC"
   printf 'local:     %s  (keep newest %s snapshots in %s)\n' "$local_n" "$KEEP" "$SESS_DIR"
