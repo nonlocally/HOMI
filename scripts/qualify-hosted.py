@@ -244,6 +244,49 @@ class HostedBroker:
 
 
 class HostedWorker(fleet.DeviceWorker):
+    def codex_mcp_context(self, session):
+        require(session == self.session and str(uuid.UUID(session)) == session, "unverified MCP fixture session")
+        require(all(process.process.poll() is not None for process in self.active), "close prior provider before changing fixture context")
+        if getattr(self, "mcp_context", None):
+            require(self.mcp_context["session"] == session, "fixture MCP context cannot change identity")
+            return
+        root = self.home / ".codex/plugins/cache/communicate/communicate"
+        paths = list(root.glob("*/.mcp.json"))
+        require(len(paths) == 1, "installed Codex fixture cache missing or ambiguous")
+        path = paths[0]
+        require(not path.is_symlink() and path.resolve().is_relative_to(self.home.resolve()), "fixture cache escapes owned HOME")
+        original = path.read_bytes()
+        descriptor = json.loads(original)
+        server = descriptor["mcpServers"]["communicate"]
+        require(server.get("env", {}).get("HOME") == str(self.home), "fixture MCP descriptor belongs to another HOME")
+        require("CODEX_THREAD_ID" not in server["env"], "fixture MCP context was already set")
+        server["env"]["CODEX_THREAD_ID"] = session
+        updated = (json.dumps(descriptor, indent=2) + "\n").encode()
+        self.mcp_context = {"path": path, "original": original, "updated": updated, "session": session}
+        temporary = path.with_name(".mcp.homi-fixture.tmp")
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
+            stream.write(updated)
+        temporary.replace(path)
+        fleet.write_json(self.evidence / "fixture-mcp-context.json", {
+            "scope": "disposable installed Codex cache only; exact thread/start UUID supplied explicitly",
+            "path": str(path), "session": session, "command_args_tools": "unchanged",
+            "production_ambient_identity": "not claimed; documented in-session CLI fallback remains applicable"})
+
+    def restore_codex_mcp_context(self):
+        context = getattr(self, "mcp_context", None)
+        if context:
+            require(context["path"].read_bytes() in (context["original"], context["updated"]), "fixture MCP cache changed unexpectedly")
+            context["path"].write_bytes(context["original"])
+            self.mcp_context = None
+
+    def command(self, args, label, parse=False):
+        # The base cleanup reaches uninstall after attempting to stop owned
+        # model and adapter processes. A restore failure follows its existing
+        # failed-uninstall path without bypassing process cleanup.
+        if label == "uninstall":
+            self.restore_codex_mcp_context()
+        return super().command(args, label, parse=parse)
+
     def codex(self, label, session=None, reply=None):
         # Set the exact hosted scope before thread/resume can dispatch queued
         # work. The shared fixture helper remains unchanged.
@@ -257,6 +300,7 @@ class HostedWorker(fleet.DeviceWorker):
         if session:
             require(session == self.session, "resume identity differs from verified thread/start")
             env["CODEX_THREAD_ID"] = session
+            self.codex_mcp_context(session)
         process = fleet.FleetCodex(self.executable, env, self.work, self.evidence,
                                   str(self.sequence) + "-" + label, self.name, self.timeout, self.profile, allow_send=True)
         self.active.append(process)
@@ -374,6 +418,11 @@ class HostedWorker(fleet.DeviceWorker):
         require(len(sends) == 1 and sends[0][1].get("target") == target and sends[0][1].get("message") == message
                 and sends[0][1].get("from") is None and not any(name.endswith("bus_register") for name, _ in calls),
                 "hidden model sender must send exactly once without publishing")
+        items = [event.get("params", {}).get("item", {}) for event in process.events
+                 if event.get("method") == "item/completed"]
+        sent = [item for item in items if item.get("type") == "mcpToolCall" and item.get("tool", "").endswith("bus_send")]
+        require(len(sent) == 1 and sent[0].get("status") == "completed" and not sent[0].get("error")
+                and not (sent[0].get("result") or {}).get("isError"), "hidden sender tool call failed; inspect private model evidence")
         self.registration = self.own_registration(published=False)
         return self.registration
 

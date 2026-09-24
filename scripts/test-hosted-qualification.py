@@ -242,6 +242,75 @@ class HostedTests(unittest.TestCase):
         self.assertEqual(len(models), 1)
         self.assertFalse(any(name.endswith("bus_register") for name, _ in hosted.completed_calls(models[0].events)))
 
+    def context_worker(self):
+        worker = hosted.HostedWorker.__new__(hosted.HostedWorker)
+        worker.home, worker.evidence = self.root / "home", self.root / "evidence"
+        worker.evidence.mkdir()
+        worker.session = "b4b11bbd-a8ce-4227-9817-20366e7b3b9f"
+        worker.active = [SimpleNamespace(process=SimpleNamespace(poll=lambda: 0))]
+        path = worker.home / ".codex/plugins/cache/communicate/communicate/fixture/.mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcpServers": {"communicate": {"command": "node", "args": ["installed.mjs", "serve"],
+            "env": {"HOME": str(worker.home), "COMM_STATE": str(worker.home / "state")}}}}))
+        return worker, path
+
+    def test_verified_fixture_context_changes_only_cache_env_and_restores_exact_bytes(self):
+        worker, path = self.context_worker()
+        original = path.read_bytes()
+        worker.codex_mcp_context(worker.session)
+        expected = json.loads(original)
+        expected["mcpServers"]["communicate"]["env"]["CODEX_THREAD_ID"] = worker.session
+        self.assertEqual(json.loads(path.read_bytes()), expected)
+        worker.codex_mcp_context(worker.session)
+        worker.restore_codex_mcp_context()
+        self.assertEqual(path.read_bytes(), original)
+        worker.restore_codex_mcp_context()
+
+    def test_fixture_context_refuses_wrong_session_home_or_live_provider(self):
+        worker, path = self.context_worker()
+        original = path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "unverified"):
+            worker.codex_mcp_context("b4b11bbd-a8ce-4227-9817-20366e7b3b9a")
+        worker.active = [SimpleNamespace(process=SimpleNamespace(poll=lambda: None))]
+        with self.assertRaisesRegex(RuntimeError, "close prior"):
+            worker.codex_mcp_context(worker.session)
+        worker.active = []
+        descriptor = json.loads(original)
+        descriptor["mcpServers"]["communicate"]["env"]["HOME"] = "/another-home"
+        path.write_text(json.dumps(descriptor))
+        with self.assertRaisesRegex(RuntimeError, "another HOME"):
+            worker.codex_mcp_context(worker.session)
+
+    def test_fixture_context_never_overwrites_an_external_cache_edit(self):
+        worker, path = self.context_worker()
+        worker.codex_mcp_context(worker.session)
+        path.write_text("external-edit")
+        with self.assertRaisesRegex(RuntimeError, "changed unexpectedly"):
+            worker.restore_codex_mcp_context()
+        self.assertEqual(path.read_text(), "external-edit")
+
+    def test_hidden_send_reports_failed_tool_before_adapter_lookup(self):
+        worker, _ = self.model_worker("general")
+        worker.session, worker.registration = "verified", {"id": None}
+        events = [{"method": "item/completed", "params": {"item": {"type": "mcpToolCall", "tool": "bus_send",
+            "arguments": {"target": "peer", "message": "fixture"}, "status": "failed", "error": None}}}]
+        model = SimpleNamespace(events=events, prompt=lambda *a, **kw: None, wait_turn=lambda: None)
+        worker.codex = lambda *a: model
+        with patch.object(worker, "own_registration") as lookup, self.assertRaisesRegex(RuntimeError, "tool call failed"):
+            worker.send_hidden("peer", "fixture")
+        lookup.assert_not_called()
+
+    def test_command_preserves_parse_contract_and_restores_only_at_uninstall(self):
+        worker = hosted.HostedWorker.__new__(hosted.HostedWorker)
+        with patch.object(hosted.fleet.DeviceWorker, "command", return_value={"configured": False}) as command, \
+                patch.object(worker, "restore_codex_mcp_context") as restore:
+            self.assertEqual(worker.command(["bus", "status"], "status-before-enrollment", parse=True), {"configured": False})
+            command.assert_called_once_with(["bus", "status"], "status-before-enrollment", parse=True)
+            restore.assert_not_called()
+            worker.command(["uninstall", "--purge"], "uninstall")
+            restore.assert_called_once_with()
+            command.assert_called_with(["uninstall", "--purge"], "uninstall", parse=False)
+
     def test_extra_rejected_send_still_invalidates_model_proof(self):
         def calls(send, reply, register):
             return {"calls": [(tool, {}) for tool, count in (("bus_send", send), ("bus_reply", reply), ("bus_register", register))

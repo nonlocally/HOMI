@@ -365,7 +365,7 @@ test("unsupported flags and contradictory selections are rejected before plannin
 
 test("guided answers choose only the requested client and keep authentication separate", async () => {
   const state = snapshot(), plan = makePlan(state);
-  const answers = [true, false, false, false, false, false, false, false, true];
+  const answers = [true, false, false, false, false, false, false, false, false, true];
   const f = fixture(plan, state, { confirm: async () => {
     assert.ok(answers.length, "unexpected additional prompt");
     return answers.shift();

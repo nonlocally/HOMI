@@ -1,6 +1,6 @@
 {
   "name": "@aadarwal/homi",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "description": "homi \u2014 durable agent identity, mailboxes, and store-and-forward messaging for AI agents, as an MCP server. Two faces (CLI + MCP), one kernel.",
   "type": "module",
   "mcpName": "io.github.aadarwal/homi",
@@ -44,5 +44,9 @@
     "codex"
   ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/nonlocally/HOMI.git", "directory": "packages/homi" }
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nonlocally/HOMI.git",
+    "directory": "packages/homi"
+  }
 }

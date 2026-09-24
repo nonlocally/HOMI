@@ -132,7 +132,7 @@ def getpass_user():
 # The daemon's code version, surfaced in status so a stale running daemon is
 # detectable (a git pull or npm upgrade never restarts a KeepAlive'd daemon —
 # without this field nothing can even say the code on disk moved on).
-HOMI_VERSION = "2026.08.17"
+HOMI_VERSION = "0.5.0"
 # Resolve once at module load. A running daemon must continue to report its
 # actual code even after the installer's /current symlink changes underneath it.
 HOMI_SOURCE_FILE = os.path.realpath(__file__)
@@ -4896,6 +4896,9 @@ def cli_call(argv):
         sys.stderr.write("usage: homi.py call <op> [args...]\n")
         return 1
     op, args = argv[0], argv[1:]
+    if op == "model":
+        import model_connections
+        return model_connections.main(args)
     # status and agents MEASURE: one tmux round trip per seated identity, plus
     # a socket probe each. On a fleet that adds up, so give them real slack
     # instead of the 10s default meant for a bookkeeping call.
@@ -5139,6 +5142,7 @@ def cli_call(argv):
         timeout = 120.0
         want_json = "--json" in args
         worktree = False
+        model_connection = None
         rest = []
         i = 0
         while i < len(args):
@@ -5147,6 +5151,10 @@ def cli_call(argv):
                 worktree = True; i += 1; continue
             if a == "--cli" and i + 1 < len(args):
                 cli = args[i + 1]; i += 2; continue
+            if a == "--model-connection" and (i + 1 >= len(args) or args[i + 1].startswith("--")):
+                sys.stderr.write("--model-connection needs a value\n"); return 1
+            if a == "--model-connection":
+                model_connection = args[i + 1]; i += 2; continue
             if a == "--cwd" and i + 1 < len(args):
                 cwd = args[i + 1]; i += 2; continue
             if a == "--prefix" and i + 1 < len(args):
@@ -5162,7 +5170,18 @@ def cli_call(argv):
             rest.append(a); i += 1
         # Resolve the launch command + adopt default from --cli.
         adopt = False
-        if cmd is None and cli:
+        if model_connection is not None:
+            if cmd is not None or cli not in ("claude", "codex"):
+                sys.stderr.write("--model-connection requires --cli claude|codex and cannot accompany a raw command\n")
+                return 1
+            try:
+                import model_connections
+                cmd = model_connections.spawn_command(model_connection, cli)
+                adopt = cli == "claude"
+            except (model_connections.ConnectionError, OSError, ValueError, KeyError, TypeError):
+                sys.stderr.write("model connection unavailable or invalid; check homi model list and client setup before spawning\n")
+                return 1
+        elif cmd is None and cli:
             if cli == "claude":
                 cmd = os.environ.get("HOMI_CLAUDE_CMD", "claude"); adopt = True
                 # A homi-spawned worker must be able to RECEIVE homi mail as
@@ -5181,7 +5200,7 @@ def cli_call(argv):
         if op == "spawn":
             if not rest:
                 sys.stderr.write("usage: communicate homi spawn <name> --cli claude|codex "
-                                 "[--cwd DIR] [--worktree] [--json]\n")
+                                 "[--model-connection NAME] [--cwd DIR] [--worktree] [--json]\n")
                 return 1
             req = {"op": "spawn", "name": rest[0], "cmd": cmd, "cwd": cwd,
                    "adopt": adopt, "cli": cli, "worktree": worktree}

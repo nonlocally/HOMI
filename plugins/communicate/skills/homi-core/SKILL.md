@@ -1,6 +1,6 @@
 ---
 name: homi-core
-description: Create persistent HOMI agents, give them work and collect their answers. Use for requests such as "create a Claude researcher", "ask my worker to investigate this", saved agent messages, or explicit terminal-seat control. Existing native sessions and registered buses use their own supported routes.
+description: Create persistent HOMI agents, select a configured model such as GLM to power Claude Code or Codex, give workers tasks and collect their answers. Use for creating a researcher, asking a worker to investigate, saved agent messages, or explicit terminal-seat control. Existing sessions and registered buses use their own routes.
 ---
 
 # HOMI agents, messages and execution
@@ -40,6 +40,12 @@ alone does not start it, and neither action joins a remote bus.
    identity when appropriate; do not overwrite an unrelated agent with the same
    name. Start the local daemon if needed for the requested work.
 2. Use `homi_spawn` with the requested name, provider and project directory.
+   If the user selected GLM or another model connection, inspect
+   `homi_model_list` / `homi model list --json` and pass its exact name as
+   `model_connection` (`--model-connection` in the CLI). This chooses the model
+   powering the coding client itself, not a consultation tool or a bus agent.
+   If the requested connection is missing, explain the setup requirement;
+   do not fall back to a paid subscription or another model.
    The seat driver creates its session when needed, on the daemon's configured
    tmux server (default: named server `homi`, session `homi-seats`). It does not
    require the human to start tmux or put their current terminal into a pane.
@@ -83,6 +89,30 @@ Claim creates an address without launching a model. Spawn creates a claim and
 an execution using the configured provider; authentication remains the user's.
 Never spawn a replacement to satisfy a request to register an existing session.
 Do not infer the current session from a newest transcript or shared cwd.
+
+## Choosing a model
+
+Existing model connections are private local settings, separate from identities
+and bus registration. A request such as "Have a GLM-powered Codex worker review
+this change" selects the configured connection for that new execution:
+
+```sh
+homi model list --json
+homi model doctor glm --json
+homi spawn checker --cli codex --model-connection glm --cwd /path/to/project --json
+```
+
+`doctor` checks authenticated model discovery only; `inference_tested:false`
+must not be reported as a successful coding run. Verify the actual worker's
+task and reply normally. Per-launch selection preserves ordinary client defaults
+and logins. A running session's model is not changed by sending it a message.
+
+If configuration is requested, use `homi setup --model` for the human's hidden
+key prompt, or `homi model add` with an explicitly supplied private key file or
+stdin. Never ask for a key in chat, read an unrelated credential store, put keys
+in arguments or forward them to another agent. Use the model service's scoped
+key, not a bus invitation or provider/master credential. Connection metadata is
+safe to list; keys are not. CLI support does not establish desktop-app support.
 
 For a live Claude composer in the caller's tmux server, `homi adopt NAME --pane
 %ID` submits `/rename` using the existing seat driver and confirms that pane's

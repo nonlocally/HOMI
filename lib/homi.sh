@@ -27,7 +27,7 @@ homi_cmd() {
   case "$sub" in
     start)     homi_start "$@";;
     __daemon)  exec python3 "$HOMI_PY" daemon;;
-    stop|status|agents|wait|claim|release|describe|send|ask|reply|group|notify|seat|spawn|restart|fan|consult|link|unlink|grant|ungrant|grants|card|user|init|pair|connect|board|federate|statepath|premove|depart|arrive|move) python3 "$HOMI_PY" call "$sub" "$@";;
+    stop|status|agents|wait|claim|release|describe|send|ask|reply|group|notify|seat|spawn|restart|fan|consult|model|link|unlink|grant|ungrant|grants|card|user|init|pair|connect|board|federate|statepath|premove|depart|arrive|move) python3 "$HOMI_PY" call "$sub" "$@";;
     inbox)     homi_inbox "$@";;
     install)   homi_install "$@";;
     uninstall) homi_uninstall "$@";;

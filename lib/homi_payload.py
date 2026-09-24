@@ -11,6 +11,7 @@ KERNEL_FILES = tuple(sorted((
     "homi_payload.py",
     "homi_seat.py",
     "homi_workspace.py",
+    "model_connections.py",
 )))
 
 

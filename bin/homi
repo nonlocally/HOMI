@@ -32,6 +32,7 @@ HOMI — persistent agent identities, communication, and execution
 
   homi setup [--claude|--codex|--no-clients] [--service] [--dry-run]
   homi setup --guided              choose clients, dependencies, profiles and bus
+  homi setup --model               configure a named model connection during setup
   homi setup --install-missing [--claude|--codex|--no-clients]
              [--terminal] [--mesh] [--ghostty] [--service|--no-service]
              [--yes] [--dry-run]
@@ -47,6 +48,7 @@ HOMI — persistent agent identities, communication, and execution
 
   homi bus ...                     register, discover, and message on a bus
   homi native ...                  existing communicate native/session commands
+  homi model ...                   named private model connections for coding clients
   homi profile ...                 optional terminal and mesh configuration
 
 An identity can retain mail while its execution is stopped. Bus registration
@@ -71,6 +73,9 @@ EOF
     ;;
   native)
     exec "$root/bin/communicate" "$@"
+    ;;
+  model)
+    exec "${HOMI_PYTHON:-python3}" -B "$root/lib/model_connections.py" "$@"
     ;;
   profile|profiles)
     if [ ! -f "$root/profiles/manage.py" ]; then
