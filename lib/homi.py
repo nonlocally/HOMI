@@ -130,6 +130,15 @@ def getpass_user():
 # detectable (a git pull or npm upgrade never restarts a KeepAlive'd daemon —
 # without this field nothing can even say the code on disk moved on).
 HOMI_VERSION = "2026.08.17"
+# Resolve once at module load. A running daemon must continue to report its
+# actual code even after the installer's /current symlink changes underneath it.
+HOMI_SOURCE_FILE = os.path.realpath(__file__)
+try:
+    with open(os.path.join(os.path.dirname(os.path.dirname(HOMI_SOURCE_FILE)),
+                           "release.json")) as _release_file:
+        HOMI_RELEASE = json.load(_release_file)
+except (OSError, ValueError):
+    HOMI_RELEASE = {}
 
 # A handle names the PERSON (the operator/user); every device and agent hangs
 # under it, and other fleets reach local agents as <agent>@<handle>. Handles
@@ -2926,6 +2935,9 @@ class Homi:
                          "user": ({"handle": u.get("handle"),
                                    "display": u.get("display")} if u else None),
                          "version": HOMI_VERSION,
+                         "source_file": HOMI_SOURCE_FILE,
+                         "release": HOMI_RELEASE.get("version"),
+                         "source_commit": (HOMI_RELEASE.get("source") or {}).get("commit"),
                          "state_root": self.root, "sock_dir": self.sockdir,
                          "socks": socks},
                 "identities": idents,

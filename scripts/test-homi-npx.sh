@@ -10,6 +10,9 @@ PKG="$HERE/packages/homi"
 COMM="$HERE/bin/communicate"
 T="$(mktemp -d /tmp/homi-npx.XXXXXX)"
 export COMM_STATE="$T/state"
+export COMMUNICATE_DATA="$T/data"
+export CODEX_HOME="$T/codex"
+export CLAUDE_CONFIG_DIR="$T/claude"
 export HOMI_SOCK_DIR="$T/socks"
 export HOMI_SESSIONS_DIR="$T/sessions"
 export HOMI_SELF="npxhost"
@@ -65,20 +68,20 @@ echo "== doctor: the new checks"
 dout="$(HOME="$FAKEHOME" node "$PKG/dist/cli.js" doctor 2>&1)"
 drc=$?
 if [ $drc -eq 0 ]; then ok "doctor exits 0"; else bad "doctor exits 0 (got: $dout)"; fi
-if printf '%s' "$dout" | grep -q "ok   daemon version current"; then
+if printf '%s' "$dout" | grep -q "daemon release parity.*current"; then
   ok "doctor: version parity"
 else bad "doctor: version parity (got: $dout)"; fi
-if printf '%s' "$dout" | grep -q "ok   user claimed.*@npxsmoke"; then
+if printf '%s' "$dout" | grep -q "user claimed.*@npxsmoke"; then
   ok "doctor: user claimed"
 else bad "doctor: user claimed"; fi
-if printf '%s' "$dout" | grep -q "ok   no orphaned state root"; then
+if ! printf '%s' "$dout" | grep -q "orphaned legacy state"; then
   ok "doctor: no orphan under the isolated HOME"
 else bad "doctor: orphan check"; fi
 
 echo "== doctor detects an orphaned split-brain root (report, never delete)"
 mkdir -p "$FAKEHOME/.local/state/homi/mail/stranded"
 dout="$(HOME="$FAKEHOME" node "$PKG/dist/cli.js" doctor 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$dout" | grep -q "FAIL no orphaned state root"; then
+if [ $? -ne 0 ] && printf '%s' "$dout" | grep -q "orphaned legacy state"; then
   ok "orphan reported as a failure"
 else bad "orphan reported (got: $dout)"; fi
 if [ -d "$FAKEHOME/.local/state/homi/mail/stranded" ]; then

@@ -1,50 +1,85 @@
 #!/usr/bin/env node
-// Build vendor/ — the packaged payload. This list IS the allowlist: nothing
-// homi-flavored may land here (the package ships the communicate layer only).
+// The combined release allowlist. Never vendor live configuration or state.
 import { cpSync, mkdirSync, rmSync, writeFileSync, readdirSync, chmodSync, readFileSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const pkgDir = fileURLToPath(new URL("..", import.meta.url));
 const repo = path.resolve(pkgDir, "..", "..");
 const vendor = path.join(pkgDir, "vendor");
+const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
+const kernel = JSON.parse(execFileSync(process.env.HOMI_PYTHON || "python3", ["-B", "-c",
+  "import json,sys;sys.path.insert(0,sys.argv[1]);from homi_payload import KERNEL_FILES;print(json.dumps(KERNEL_FILES))",
+  path.join(repo, "lib")], { encoding: "utf8" }));
+const copy = (name, dest = name) => {
+  const source = path.join(repo, name), target = path.join(vendor, dest);
+  if (!existsSync(source)) throw new Error(`Required release file missing: ${name}`);
+  mkdirSync(path.dirname(target), { recursive: true });
+  cpSync(source, target, { recursive: true,
+    filter: (entry) => !entry.split(path.sep).includes("__pycache__") && !entry.endsWith(".pyc") });
+};
 
 rmSync(vendor, { recursive: true, force: true });
-mkdirSync(path.join(vendor, "bin"), { recursive: true });
-mkdirSync(path.join(vendor, "lib"), { recursive: true });
+mkdirSync(vendor, { recursive: true });
+for (const file of ["bin/communicate", "bin/homi", "bin/homi-boxed-init", "LICENSE"]) copy(file);
+for (const file of readdirSync(path.join(repo, "lib")))
+  if (file.endsWith(".sh")) copy("lib/" + file);
+for (const file of new Set([...kernel, "bus.py", "bus_broker.py", "bus_ui.html"])) copy("lib/" + file);
+for (const file of ["bus-graph.js", "bus-graph.css", "bus-graph.LICENSES.txt"]) copy("lib/assets/" + file);
+copy("plugins/.claude-plugin");
+copy("plugins/communicate");
+copy(".agents");
+if (existsSync(path.join(repo, "profiles"))) copy("profiles");
+cpSync(path.join(repo, "LICENSE"), path.join(pkgDir, "LICENSE"));
+// An installed artifact never falls back to an unrelated checkout or registry.
+// Resolve from this plugin when the host supplies its root; otherwise use the
+// installer-owned stable path. The source-checkout launcher remains unchanged.
+writeFileSync(path.join(vendor, "plugins/communicate/bin/communicate-mcp"), `#!/usr/bin/env bash
+set -euo pipefail
+here="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$here/../../../../src/cli.mjs" ] && [ -f "$here/../../../release.json" ]; then
+  exec node "$here/../../../../src/cli.mjs" serve
+fi
+data="\${COMMUNICATE_DATA:-$HOME/.local/share/communicate}"
+exec node "$data/current/src/cli.mjs" serve
+`);
+writeFileSync(path.join(vendor, "plugins/communicate/bin/communicate"), `#!/usr/bin/env bash
+set -euo pipefail
+here="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$here/../../../bin/communicate" ] && [ -f "$here/../../../release.json" ]; then
+  exec "$here/../../../bin/communicate" "$@"
+fi
+data="\${COMMUNICATE_DATA:-$HOME/.local/share/communicate}"
+exec "$data/current/vendor/bin/communicate" "$@"
+`);
+const mcpPath = path.join(vendor, "plugins/communicate/.mcp.json");
+const mcp = JSON.parse(readFileSync(mcpPath, "utf8"));
+mcp.mcpServers.communicate = { type: "stdio", command: "bash", args: ["-c", `for root in "$CLAUDE_PLUGIN_ROOT" "$PLUGIN_ROOT"; do
+  if [ -n "$root" ] && [ -f "$root/bin/communicate-mcp" ]; then exec bash "$root/bin/communicate-mcp"; fi
+done
+data=\${COMMUNICATE_DATA:-$HOME/.local/share/communicate}
+exec bash "$data/current/vendor/plugins/communicate/bin/communicate-mcp"`] };
+writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + "\n");
+for (const file of ["bin/communicate", "bin/homi", "bin/homi-boxed-init",
+  "plugins/communicate/bin/communicate", "plugins/communicate/bin/communicate-mcp"])
+  chmodSync(path.join(vendor, file), 0o755);
 
-cpSync(path.join(repo, "bin", "communicate"), path.join(vendor, "bin", "communicate"));
-for (const f of readdirSync(path.join(repo, "lib"))) {
-  const keep = (f.endsWith(".sh") && !/homi/.test(f)) ||
-    ["cc_peer.py", "bus.py", "bus_broker.py", "bus_ui.html"].includes(f);
-  if (!keep) continue;
-  if (/homi/.test(f)) throw new Error(`homi file escaped the filter: ${f}`);
-  cpSync(path.join(repo, "lib", f), path.join(vendor, "lib", f));
-}
-// The graph is built from packages/bus-graph. Ship only its reviewed browser
-// assets, never the asset directory wholesale (it can contain release archives).
-mkdirSync(path.join(vendor, "lib", "assets"), { recursive: true });
-for (const asset of ["bus-graph.js", "bus-graph.css", "bus-graph.LICENSES.txt"]) {
-  cpSync(path.join(repo, "lib", "assets", asset), path.join(vendor, "lib", "assets", asset));
-}
-// plugins/ may hold other planes (phone, ...) — vendor ONLY the communicate plugin.
-mkdirSync(path.join(vendor, "plugins"), { recursive: true });
-cpSync(path.join(repo, "plugins", ".claude-plugin"), path.join(vendor, "plugins", ".claude-plugin"), { recursive: true });
-cpSync(path.join(repo, "plugins", "communicate"), path.join(vendor, "plugins", "communicate"), { recursive: true });
-cpSync(path.join(repo, ".agents"), path.join(vendor, ".agents"), { recursive: true });
-
-// Belt and braces: nothing under vendor/ may mention a homi lib file.
-const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
-  e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
-for (const f of walk(vendor)) if (/homi.*\.(py|sh)$/.test(path.basename(f)))
-  throw new Error(`homi artifact in vendor: ${f}`);
-
-let sha = "unknown";
-try { sha = execSync("git rev-parse --short HEAD", { cwd: repo, encoding: "utf8" }).trim(); } catch {}
-const version = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8")).version;
-writeFileSync(path.join(vendor, "VERSION"), `${version}+${sha}\n`);
-chmodSync(path.join(vendor, "bin", "communicate"), 0o755);
-chmodSync(path.join(vendor, "plugins", "communicate", "bin", "communicate"), 0o755);
-console.log(`vendored ${version}+${sha} -> ${vendor}`);
-if (!existsSync(path.join(vendor, "lib", "codex.sh"))) throw new Error("codex.sh missing");
+const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+const commit = git("rev-parse", "HEAD");
+const dirty = Boolean(git("status", "--porcelain", "--untracked-files=no"));
+const files = {};
+const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+  entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
+for (const file of walk(vendor).sort()) files[path.relative(vendor, file)] =
+  createHash("sha256").update(readFileSync(file)).digest("hex");
+const daemonVersion = readFileSync(path.join(vendor, "lib/homi.py"), "utf8").match(/^HOMI_VERSION = "([^"]+)"/m)?.[1];
+const packageFiles = {};
+for (const file of [...walk(path.join(pkgDir, "src")), path.join(pkgDir, "package.json"), path.join(pkgDir, "LICENSE")].sort())
+  packageFiles[path.relative(pkgDir, file)] = createHash("sha256").update(readFileSync(file)).digest("hex");
+writeFileSync(path.join(vendor, "release.json"), JSON.stringify({ schema: 1, product: "HOMI", version: pkg.version,
+  source: { repository: "https://github.com/nonlocally/HOMI", commit, dirty },
+  components: { package: pkg.name, plugin: "communicate@communicate", daemon: daemonVersion }, files, packageFiles }, null, 2) + "\n");
+writeFileSync(path.join(vendor, "VERSION"), `${pkg.version}+${commit.slice(0, 12)}${dirty ? ".dirty" : ""}\n`);
+console.log(`vendored HOMI ${pkg.version} (${Object.keys(files).length} files, ${commit.slice(0, 12)})`);

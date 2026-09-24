@@ -1,21 +1,23 @@
 {
   "name": "@aadarwal/communicate",
-  "version": "0.2.3",
-  "description": "Register existing Claude and Codex agents on named buses, browse a live interface, and connect devices through scoped HTTPS invitations. Includes CLI, skills, and MCP tools.",
+  "version": "0.3.0",
+  "description": "HOMI: durable agents, terminal seats, and Claude/Codex communication through one CLI and plugin installation.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aadarwal/communicate.git",
+    "url": "https://github.com/nonlocally/HOMI.git",
     "directory": "packages/communicate"
   },
   "bin": {
-    "communicate": "src/cli.mjs"
+    "communicate": "src/cli.mjs",
+    "homi": "src/homi.mjs"
   },
   "files": [
     "src",
     "vendor",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -27,7 +29,7 @@
   "scripts": {
     "vendor": "node scripts/vendor.mjs",
     "prepack": "node scripts/vendor.mjs",
-    "test": "node test/mcp-smoke.mjs && node test/setup-smoke.mjs && node test/launcher-smoke.mjs"
+    "test": "node test/mcp-smoke.mjs && node test/setup-smoke.mjs && node test/launcher-smoke.mjs && node test/lifecycle-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

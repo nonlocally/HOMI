@@ -11,3 +11,4 @@ export const communicateCli = existsSync(path.join(checkout, "lib", "common.sh")
   existsSync(path.join(checkout, "packages", "communicate", "package.json"))
   ? path.join(checkout, "bin", "communicate")
   : path.join(pkgDir, "vendor", "bin", "communicate");
+export const homiCli = path.join(path.dirname(communicateCli), "homi");

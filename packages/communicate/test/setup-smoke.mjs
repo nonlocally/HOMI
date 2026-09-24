@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Sandboxed setup test: fake $HOME + $COMMUNICATE_DATA, assert merge-not-clobber,
 // backup, payload+symlink, uninstall restore, and dry-run writes nothing.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync, cpSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -61,9 +61,9 @@ for (const file of ["bus.py", "bus_broker.py", "bus_ui.html", "assets/bus-graph.
   if (!existsSync(path.join(data, "current", "vendor", "lib", file))) die(`bus payload missing: ${file}`);
 if (!existsSync(path.join(data, "current", "vendor", "plugins", "communicate", "skills", "communicate-bus", "SKILL.md"))) die("bus registration skill missing");
 if (!existsSync(path.join(data, "current", "vendor", "plugins", ".claude-plugin", "marketplace.json"))) die("marketplace file missing in payload");
-// stabilized .mcp.json must not depend on the registry when deps travelled
+// The packaged MCP launcher must never depend on a registry or old checkout.
 const mcp = JSON.parse(readFileSync(path.join(data, "current", "vendor", "plugins", "communicate", ".mcp.json"), "utf8"));
-if (mcp.mcpServers.communicate.command !== "node") die("stabilized .mcp.json must launch its local dependencies");
+if (JSON.stringify(mcp).includes("npx") || JSON.stringify(mcp).includes("repo-path")) die("packaged MCP can escape its installed artifact");
 // payload CLI actually runs
 const agents = spawnSync(path.join(data, "current", "vendor", "bin", "communicate"), ["agents"], { encoding: "utf8", env });
 if (agents.status !== 0) die("payload CLI failed: " + agents.stderr);
@@ -73,6 +73,17 @@ const stabilized = spawnSync("node", [path.join(pkgDir, "test", "mcp-smoke.mjs")
   encoding: "utf8", env: { ...env, COMM_MCP_TEST_ENTRY: path.join(data, "current", "src", "cli.mjs") }, timeout: 45000,
 });
 if (stabilized.status !== 0) die("stabilized MCP/bus failed: " + stabilized.stdout + stabilized.stderr);
+// Agent CLIs copy plugins into caches, outside the release directory. Their
+// launchers must still use the stabilized artifact even with a stale repo hint.
+const cached = path.join(fakeHome, "plugin cache", "communicate");
+cpSync(path.join(data, "current/vendor/plugins/communicate"), cached, { recursive: true });
+writeFileSync(path.join(data, "repo-path"), "/missing/legacy-checkout\n");
+const cachedMcp = spawnSync("node", [path.join(pkgDir, "test/mcp-smoke.mjs")], {
+  encoding: "utf8", env: { ...env, COMM_MCP_TEST_ENTRY: path.join(cached, "bin/communicate-mcp"), COMM_MCP_TEST_COMMAND: "bash", COMM_MCP_TEST_DATA: data }, timeout: 45000,
+});
+if (cachedMcp.status !== 0) die("cached plugin MCP escaped release: " + cachedMcp.stdout + cachedMcp.stderr);
+const cachedCli = spawnSync("bash", [path.join(cached, "bin/communicate"), "agents"], { env, encoding: "utf8", timeout: 15000 });
+if (cachedCli.status !== 0) die("cached plugin CLI escaped release: " + cachedCli.stderr);
 
 // A versioned cache can remain stale even when enabledPlugins is true.
 writeFileSync(path.join(fakeHome, "claude-cached-version"), "0.1.0");

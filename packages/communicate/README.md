@@ -1,245 +1,139 @@
-# @aadarwal/communicate
+# HOMI — combined communication package
 
-Register existing Claude Code and Codex agents on a bus, see who is available
-in a browser interface, and message published agents by name. Use general for
-open communication within your broker, or a named bus such as photonics for a
-specific group.
+HOMI gives agents durable identities and mailboxes, connects existing Claude and
+Codex sessions, and controls terminal seats. This package includes the existing
+native delivery, bus, durable mailbox/link, and seat implementations in one
+artifact. The npm name `@aadarwal/communicate`, plugin identity
+`communicate@communicate`, and state directory remain compatible with earlier
+installations.
 
-Sign in at [bus.nonlocally.org](https://bus.nonlocally.org), then
-[download the current 0.2.3 archive](https://bus.nonlocally.org/assets/communicate-0.2.3.tgz).
-Install the downloaded file, using the actual path your browser saved:
+## Install a reviewed release
+
+Get the release archive and checksum from
+[nonlocally/HOMI releases](https://github.com/nonlocally/HOMI/releases). After
+checking the checksum and extracting `homi-0.3.0.tar.gz`:
 
 ```sh
-npx -y --package "$HOME/Downloads/communicate-0.2.3.tgz" communicate setup
+./homi-0.3.0/bin/homi setup
+./homi-0.3.0/bin/homi doctor
 ```
 
-The current release uses this private archive channel; no npm publication or
-npm login is required. An archive shared directly with you installs the same way.
-The 0.2.3 archive includes OpenWebUI group-based bus viewing support, preserves
-the Nonlocally host migration, and refreshes stale Claude plugin caches through
-the Claude CLI. Re-run the archive's `setup` to
-upgrade an existing installation. Restart Claude Code and start a new Codex
-thread, then tell it **"register yourself on the bus"** or
-**"register yourself on the photonics bus"**. The included skills and MCP tools
-teach the entire flow. Registration attaches that session; it does not create
-a replacement headless agent.
-On natural first use, the plugin requests a hosted Communicate invitation
-unless you explicitly want a local or self-hosted hub. Later requests use the
-configured hub. The standalone CLI retains its local default; the plugin checks
-`bus status --no-start` first so it does not silently create a local substitute.
+The archive includes its Node dependencies. It requires macOS or Linux, Node.js
+20+, Python 3.9+, and Bash. Seat operations additionally need tmux; provider
+launches need the relevant authenticated agent CLI. SSH and Tailscale are
+optional, capability-specific dependencies. Installation does not install model
+clients, obtain their credentials, or grant access to a hosted service.
 
-The equivalent CLI commands are:
+`setup` registers available Claude/Codex clients and stages an immutable copy at
+`~/.local/share/communicate/0.3.0-<manifest-hash>/`. The stable `current` symlink
+selects that release. Add `~/.local/share/communicate/bin` to PATH for the `homi`
+and compatibility `communicate` commands. Start a fresh client session after
+changing the plugin so its loaded instructions and tools match the installation.
 
 ```sh
-communicate bus register
-communicate bus register --bus photonics --description "Photonic device review"
-communicate bus list --json
-communicate bus agents --bus photonics --json
-communicate bus dashboard --open
-communicate bus send TARGET --bus photonics -- MESSAGE
-communicate bus receipt RECEIPT_ID
-communicate bus reply RECEIVED_MESSAGE_ID -- ANSWER
-communicate bus leave --bus photonics
+homi setup --claude                # only this client
+homi setup --codex                 # only this client
+homi setup --no-clients            # CLI installation only
+homi setup --service               # also install the per-user daemon service
+homi setup --dry-run               # preview without changing the installation
 ```
 
-The interface shows explicit memberships and availability. Claude sessions can
-be live when their socket answers; Codex sessions are **queueable** into their
-exact existing thread. Queueable does not mean running, and an accepted or
-queued message is not proof of an answer. Select a registration ID when names
-collide.
+The service uses launchd on macOS or systemd --user on Linux. An existing managed
+service is refreshed on update unless `--no-service` is supplied. Setup preserves
+its device name when a daemon already answers. `homi doctor` reports the invoked
+package, installed payload and source commit, actual running daemon source,
+client registration, and optional dependencies without starting a daemon.
 
-General registration publishes an agent for discovery and incoming requests.
-Any exact local Claude/Codex agent on a device enrolled in general can initiate
-to a published recipient without publishing itself. The client keeps a private
-reply adapter for that conversation. Private buses require both agents to
-explicitly join. Existing local discovery, sockets, and Claude/Codex routing
-remain unrestricted by bus membership or publication.
-
-Use `bus reply` with the received message ID to answer. Replies stay within the
-original participants and bus, for 24 hours after initiation; replying does not
-extend that deadline. They can reach the unpublished initiator without making
-it publicly discoverable. Leave or revoked access closes affected conversations.
-
-Direct CLI registration defaults to general on the configured broker. Without
-configuration it starts a broker on loopback for this OS account; general is not a public global
-directory. A named-bus registration joins only that named bus. The first local
-registration on a named bus creates it automatically for the owner. An invited
-device can join only the buses it was granted; it cannot create a bus simply
-by naming one.
-
-Each agent shows its administrator-assigned account and enrolled device. The
-device's stable ID comes from its broker-issued principal; its display name,
-hostname, platform, and optional Tailscale Self names describe that device.
-The client never sends Tailscale peers or derives account ownership from a
-local username. Missing or slow Tailscale does not prevent registration.
-
-Refresh this installation's metadata with `communicate bus device`, or change
-its label with `communicate bus device --name lab-laptop`. This preserves its
-stable device ID and account assignment. The hosted administrator selects an
-account in the dashboard invitation form. CLI `bus invite --user USER` requires
-an actual broker-admin credential; an ordinary enrolled device does not become
-an administrator through account ownership. The joining device cannot assign
-itself to another account. Existing unassigned installations need the owner's
-help to set attribution.
-
-## Hosted Communicate bus
-
-Open [bus.nonlocally.org](https://bus.nonlocally.org). Members of OpenWebUI's
-`wilde-qit` group can sign in with their existing OpenWebUI account and Google
-sign-in to view `qit-wilde`. The gateway maps the stable group ID to this bus;
-group membership grants viewing only, without general access, device enrollment,
-or agent messaging. Names and emails do not link OpenWebUI and GitHub identities.
-This access applies only to the bus, not research, docs, or console.
-
-**Sign in with GitHub** remains available for `aadarwal` and `peer-handle`.
-`aadarwal` administers buses and invitations; `peer-handle` views general under
-the existing bus account `peer`. Browser sign-in and installing the plugin do
-not enroll your device, publish an agent, or grant agent membership on a private bus.
-
-Ask the owner for a private, one-time invitation to the appropriate bus. On a
-new installation:
+## One interface, explicit destinations
 
 ```sh
-communicate bus connect INVITE_CODE --device my-laptop
-communicate bus register
+homi start
+homi claim reviewer
+homi send reviewer --from operator -- 'Please review this change'
+homi inbox reviewer
+homi agents --json
+homi bus register
+homi bus agents --json
+homi bus send TARGET -- 'A message to an existing registered session'
+homi native agents
+homi profile preview --terminal --mesh
 ```
 
-Use `--bus photonics` when registering with a photonics invitation, or
-`--bus qit-wilde` with a `qit-wilde` invitation. After connection with a general
-invitation, "register yourself on the bus" joins general on the hosted broker.
-To reselect an existing connection, run
-`communicate bus use https://bus.nonlocally.org`.
+Default verbs address durable HOMI identities. `homi bus` addresses registrations
+of exact existing Claude/Codex sessions and keeps bus membership checks and
+receipts. `homi native` retains local socket, existing-session queue, and SSH
+commands. `homi profile` manages optional workstation configuration. A durable
+mailbox acceptance, a bus receipt, a native delivery, and a correlated answer
+retain their distinct meanings; none implies that a model completed the task.
 
-For a device still enrolled at the retired host, update to 0.2.2 or later and run:
+The plugin includes skills, slash commands, and MCP tools. Existing native/bus
+MCP names and their order remain unchanged; durable tools use `homi_` names.
+`homi serve` runs this combined MCP interface. The packaged plugin resolves its
+own release or the stable installed release, including when an agent client
+copies it into a cache. It does not fall back to an old checkout or npm registry.
+
+## Local, self-hosted, and hosted communication
+
+Local operation needs no invitation or hosted account. A configured broker is
+used as configured; without configuration, bus commands use a local loopback
+broker. Durable cross-device mail uses HOMI's existing device links. Bus sharing
+uses its existing scoped enrollment and exact-session adapters.
+
+For a shared bus, its owner creates a scoped invitation. The participant redeems
+it and explicitly registers the session they want to expose:
 
 ```sh
-communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org
-communicate bus status --no-start --json
+homi bus connect INVITE_CODE --device peer-device
+homi bus register --bus project
+homi bus dashboard --open
 ```
 
-This owner-confirmed move sends the existing credential to the new HTTPS
-origin and preserves agent IDs, memberships, delivery receipts, and reply
-adapters. It needs no fresh invitation or republication. Ordinary redirects
-remain refused. The application is at [research.nonlocally.org](https://research.nonlocally.org)
-and documentation at [docs.nonlocally.org](https://docs.nonlocally.org).
+Use `homi bus use local` to select the local broker or `homi bus use https://HOST`
+to select a previously enrolled broker. Owning the source or installing HOMI
+does not grant access to any existing hosted service; its administrator controls
+browser access, device enrollment, and private bus membership. See the repository
+[bus documentation](https://github.com/nonlocally/HOMI/blob/main/docs/BUSES.md)
+for owner networking and invitation details.
 
-Without that connection, the standalone CLI defaults to local. The plugin's
-natural first-use registration flow requests a hosted invitation when one is
-missing, then verifies the hosted broker in its registration result, unless
-you explicitly chose local or self-hosted operation.
+## Update, rollback, and uninstall
 
-## Connect devices and other people
-
-Choose one owner device for a shared broker. Other participants install the
-plugin, redeem a scoped invitation, and register only the sessions they want to
-make reachable:
+Run `update` from the newly downloaded, verified release:
 
 ```sh
-communicate bus connect INVITE_CODE --device lab-laptop
-communicate bus register --bus photonics
+/path/to/new-release/bin/homi update
+homi rollback --dry-run
+homi rollback
+homi uninstall --claude            # remove this owned client integration
+homi uninstall                    # remove owned integrations and executable links
+homi uninstall --purge            # also remove retained managed release payloads
 ```
 
-`connect` selects that broker for subsequent commands. To switch back to this
-device's local broker, use `communicate bus use local`. To return to a broker
-whose invitation was already redeemed, use `communicate bus use https://HOST`.
-Existing workers retain their registrations while the selected broker changes;
-discovery and new sends use the currently selected broker.
+A failed activation restores the previous `current` pointer. Releases are never
+replaced in place; rollback selects the retained previous payload. Installer
+ownership checks preserve client registrations, executables, and service files
+that someone changed after installation. Previous service definitions and
+Claude settings are backed up. Uninstall and purge always preserve identities,
+mail, credentials, and runtime configuration under
+`${COMM_STATE:-~/.local/state/communicate}`. They do not rewrite external model
+state or restart already-open agent sessions.
 
-For a single operation, select a connected broker without changing the default:
+## Development and compatibility
 
-```sh
-communicate bus --hub https://HOST send TARGET --bus photonics --from MY_ID -- MESSAGE
-communicate bus --hub https://HOST receipt RECEIPT_ID
-```
-
-Received bus messages include the originating broker in their exact reply
-command. Follow that command when another broker is selected locally. MCP
-`bus_send`, `bus_reply`, and `bus_receipt` accept the equivalent optional `hub` argument.
-
-They make outbound HTTPS requests and do not expose SSH, agent sockets, files,
-terminals, model credentials, or inbound ports.
-One outbound worker serves the device's local agents; there are no per-agent
-network ports or tunnels to configure.
-
-On the owner's device, `communicate bus serve --port 7433` runs the loopback
-JSON gateway. For a Tailscale network, the owner can explicitly enable HTTPS
-with `tailscale serve --bg 7433`. For participants outside that network, the
-owner can choose public HTTPS through `tailscale funnel --bg 7433` or a trusted
-HTTPS reverse proxy. These are owner choices; registering locally never
-publishes a gateway. Use the actual HTTPS URL reported by the chosen service:
+The maintained public artifact is the GitHub release; the historical npm names
+are not a claim that version 0.3.0 has been published to npm. A checkout can build
+an npm-compatible archive or the self-contained release without changing live
+installations:
 
 ```sh
-communicate bus create photonics
-communicate bus invite photonics --user peer --url https://YOUR-HOST --ttl 3600
-```
-
-Share the single-use, expiring invitation privately with its intended recipient.
-Keep dashboard token fragments and device credentials private as well. The
-owner can revoke a device with `communicate bus revoke PRINCIPAL_ID`.
-An invitation that has not been redeemed can be withdrawn with
-`communicate bus revoke-invite INVITE_CODE`; an already admitted device needs
-device revocation instead.
-`communicate bus stop` stops this device's worker and owned broker; disable any
-separate Serve/Funnel service when it is no longer wanted.
-
-Bus membership controls gateway discovery and messages. It does not isolate
-processes sharing an OS account or change preexisting raw socket/SSH access.
-The legacy `agents`, `route`, `send`, `codex queue`, `codex ask`, `claude bridge`,
-and wake commands remain available as their own local/SSH lanes.
-
-Owner networking documentation: [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve)
-and [Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel).
-
-## Installation details
-
-`setup` stabilizes the payload at `~/.local/share/communicate/<version>/` with a
-`current` symlink. It merges the Claude marketplace/plugin settings with a
-backup and invokes the Codex plugin CLI. New sessions get six skills, `/agents`
-and `/bus`, the CLI, and MCP tools. It never hand-edits Codex config.
-
-For a repository checkout, install the MCP dependencies and register it:
-
-```sh
-npm --prefix packages/communicate install
-bin/communicate setup-repo
-```
-
-The local launcher points MCP and CLI at that checkout, so subsequent pulls
-update both without a registry release or a stale npm payload taking priority.
-Registration and successful bus sends/replies automatically replace an older
-worker after an update; the broker and native local routes remain running.
-The pointer is local installer state under `~/.local/share/communicate/repo-path`;
-full `setup-repo --uninstall` removes it when it points at this checkout. An
-uninstall restricted to one ecosystem keeps it for the other client.
-
-`doctor` checks installation. `setup --uninstall` reverses registration;
-`--purge` also removes the installed payload. `serve` runs the stdio MCP server.
-The original nine tools retain their order; the appended bus tools are
-`bus_register`, `bus_list`, `bus_agents`, `bus_leave`, `bus_send`, `bus_receipt`,
-`bus_status`, `bus_dashboard`, `bus_create`, `bus_device`, and `bus_reply`.
-
-**Requirements:** macOS/Linux, Node.js 20+, bash, python3, and a Codex CLI with
-`codex queue` support (0.151+) for existing Codex sessions. SSH is needed only
-for the legacy SSH commands. The broker and worker use Python's standard
-library.
-
-This package ships the **communicate layer only**, including the bus gateway.
-Durable homi identities, mailboxes, store-and-forward, and homi federation are a
-separate plane in the [full repository](https://github.com/aadarwal/communicate).
-
-## Verification from a checkout
-
-```sh
-scripts/test-bus.sh
+npm --prefix packages/communicate ci
 npm --prefix packages/communicate run vendor
 npm --prefix packages/communicate test
 scripts/test-communicate-dist.sh
 ```
 
-`test-bus.sh` runs broker permissions, client registration and message delivery,
-an HTTPS round trip between isolated installations with certificate validation,
-and dashboard interaction tests. It needs `python3`, `node`, and `openssl`.
-The fixtures use temporary state, fake agent endpoints, and local networking;
-they do not contact real agents or publish a gateway. The longer TLS suite is
-kept separate from the npm/package smoke checks. The distribution check packs
-and installs the npm artifact, then verifies the bus MCP flow from that artifact.
+The distribution checks install a packed artifact into temporary directories and
+exercise bus MCP, durable MCP with concurrent ask/reply, copied plugin caches,
+immutable updates, rollback, ownership, and preserved state. Service-manager
+failure checks use fixtures; real per-user service qualification is separate.
+Phone, board, talk, and cockpit applications are not part of this payload. Bus
+browser UI, graph assets, and the human inbox remain included. MIT license.

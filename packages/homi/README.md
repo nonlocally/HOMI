@@ -1,67 +1,32 @@
-# @aadarwal/homi
+# @aadarwal/homi — compatibility package
 
-Durable agent identity, mailboxes, and store-and-forward messaging for AI agents
-— shipped as an MCP server and a CLI. **Two faces, one kernel:** the CLI is the
-complete, tested definition of the fabric; the MCP server is a thin projection —
-every tool call is one JSON line to a local daemon, with zero fabric logic in the
-Node layer.
+HOMI now ships one combined artifact with durable identities and mailboxes,
+terminal seats, native Claude/Codex delivery, the bus, and optional workstation
+profiles. Install the reviewed archive from
+[nonlocally/HOMI releases](https://github.com/nonlocally/HOMI/releases); see the
+[combined package guide](../communicate/README.md) for setup and lifecycle details.
+The historical npm name is retained for compatibility; this does not claim that
+version 0.3.0 has been published to npm.
 
-## What it gives an agent
+This package preserves the legacy durable MCP tool names (`claim`, `send`,
+`agents_list`, `seat_spawn`, and others). `homi serve` still exposes that legacy
+MCP face. All other CLI verbs, setup, doctor, update, rollback, and uninstall
+delegate to the same combined payload, avoiding a second installer or kernel.
+New installations use the combined MCP interface's `homi_` tool names alongside
+the existing native and bus tools.
 
-- **A durable name.** `claim <name>` gives you a stable socket, a sweep-proof
-  roster entry, and a mailbox that outlives the process behind it. An address
-  does not die with a session.
-- **Store-and-forward mail.** `send <name>` reaches an agent whether or not it is
-  running right now; when it wakes, held mail is delivered as a turn. Cross-device
-  addressing (`name@device`) rides acked, deduped, backoff'd links.
-- **Ask/reply, groups, notify.** `ask` blocks for a correlated reply; `group_send`
-  fans to many; `notify` summons the human with a durable reason.
-- **Seats** — the interactive escape hatch. Drive terminal surfaces you cannot
-  mailbox (cluster shells, REPLs, TUIs) with a state classifier and a verified
-  send discipline; seats can live on another device (opt-in per link).
-- **spawn** — claim an identity, launch an agent in a seat, bind them: one agent
-  reachable by mail AND watchable in a seat.
-
-## Install
+Legacy setup flags remain supported:
 
 ```sh
-npx @aadarwal/homi setup --claim <your-name>     # sets up the per-device daemon
+homi setup --handle your-handle --claim reviewer --no-mcp --no-persist
 ```
 
-Then add it to your agent:
+`--handle` explicitly claims the local human handle, `--claim` claims an agent
+identity, `--no-mcp` maps to `--no-clients`, and `--no-persist` maps to
+`--no-service`. Legacy setup preserves the measured claim/send/inbox self-test.
+Without `--no-persist`, legacy setup requests a persistent user service. The
+combined installation's stable daemon is preferred to an old legacy daemon path.
+All faces resolve the same `COMM_STATE` and control socket; existing durable
+state is preserved. Node.js 20+ and Python 3.9+ are required; seats require tmux.
 
-```sh
-claude mcp add homi -- npx -y @aadarwal/homi serve
-codex  mcp add homi -- npx -y @aadarwal/homi serve
-```
-
-`homi doctor` checks the install; `homi serve` is the MCP stdio server an MCP
-client spawns. Requires `python3` ≥ 3.9 (the daemon is stdlib-only — no pip) and,
-for seats, `tmux`.
-
-## How it fits together
-
-```
-  MCP client (Claude Code / Codex)
-        │  stdio, MCP
-   homi serve  ── one JSON line ──▶  homi daemon (python, per device)
-        ▲                                  │  durable mailboxes, links, seats
-        └───────── same kernel ────────────┘
-  communicate homi <verb>  (the CLI face)
-```
-
-A repo-managed `communicate homi` and an npm-managed `@aadarwal/homi` resolve the
-SAME state root, socket, and daemon — they are two faces of one per-device daemon,
-never two daemons.
-
-## Tools
-
-`agents_list`, `whoami`, `send`, `ask`, `inbox_read`, `wait_for_message`,
-`claim`, `release`, `group_send`, `notify`, `seat_ls`/`seat_spawn`/`seat_send`/
-`seat_read`/`seat_state`/`seat_wait`, `spawn`, `status`.
-
-Messaging is the default plane; seats are the explicit interactive escape hatch.
-
-## License
-
-MIT
+MIT license.

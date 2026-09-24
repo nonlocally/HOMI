@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end check of the communicate distribution: manifests valid, payload
-# homi-free, tarball installable, CLI + MCP + setup work from the packed artifact.
+# combined kernel present, tarball installable, CLI + MCP + setup work from the packed artifact.
 # The complete broker/client TLS/UI suite is intentionally separate:
 # scripts/test-bus.sh (temporary endpoints only, no external network).
 set -uo pipefail
@@ -49,9 +49,14 @@ else
   echo "  skip (validator or pyyaml absent)"
 fi
 
-echo "3) vendor is homi-free"
+echo "3) vendor includes the communication kernel and excludes optional applications"
 ( cd "$PKG" && node scripts/vendor.mjs >/dev/null ) || fail "vendor.mjs errored"
-find "$PKG/vendor" \( -name 'homi*.py' -o -name 'homi.sh' \) | grep -q . && fail "homi artifact in vendor" || ok "no homi artifacts"
+for core in bin/homi lib/homi.py lib/homi_seat.py lib/homi_adopt.py lib/homi_payload.py profiles/manage.py LICENSE release.json; do
+  [ -f "$PKG/vendor/$core" ] && ok "core payload: $core" || fail "core payload missing: $core"
+done
+for omitted in phone homi_board.py homi_talk.py homi_cockpit.py; do
+  [ ! -e "$PKG/vendor/lib/$omitted" ] && ok "optional application excluded: $omitted" || fail "optional application leaked: $omitted"
+done
 ls "$PKG/vendor/plugins" | grep -v "^\.claude-plugin$\|^communicate$" | grep -q . && fail "foreign plugin in vendor: $(ls "$PKG/vendor/plugins")" || ok "only the communicate plugin vendored"
 for artifact in bus.py bus_broker.py bus_ui.html assets/bus-graph.js assets/bus-graph.css assets/bus-graph.LICENSES.txt; do
   [ -f "$PKG/vendor/lib/$artifact" ] && ok "bus payload: $artifact" || fail "bus payload missing: $artifact"
@@ -64,11 +69,15 @@ TARBALL="$(cd "$PKG" && npm pack --silent 2>/dev/null | tail -1)"
 npm install --prefix "$TMP" --silent "$PKG/$TARBALL" >/dev/null 2>&1 || fail "npm install of tarball"
 BIN="$TMP/node_modules/.bin/communicate"
 "$BIN" version >/dev/null 2>&1 && ok "installed bin: version" || fail "installed bin: version"
-"$BIN" agents >/dev/null 2>&1 && ok "installed bin: agents" || fail "installed bin: agents"
+HOME="$TMP/home" COMM_STATE="$TMP/state" HOMI_SESSIONS_DIR="$TMP/sessions" "$BIN" agents >/dev/null 2>&1 && ok "installed bin: agents" || fail "installed bin: agents"
 COMM_MCP_TEST_ENTRY="$TMP/node_modules/@aadarwal/communicate/src/cli.mjs" node "$PKG/test/mcp-smoke.mjs" \
   && ok "packed artifact: full bus MCP flow" || fail "packed artifact: bus MCP flow"
 COMM_SETUP_TEST_ENTRY="$TMP/node_modules/@aadarwal/communicate/src/cli.mjs" node "$PKG/test/setup-smoke.mjs" \
   && ok "packed artifact: install with hoisted dependencies" || fail "packed artifact: stabilized installation"
+
+HOMI_MCP_TEST_ENTRY="$TMP/node_modules/@aadarwal/communicate/src/cli.mjs" HOMI_TEST_CLI="$TMP/node_modules/@aadarwal/communicate/vendor/bin/communicate" node "$ROOT/scripts/test-homi-mcp-interface.mjs" \
+  && ok "packed artifact: durable MCP and concurrent reply" || fail "packed artifact: durable MCP"
+"$TMP/node_modules/.bin/homi" version >/dev/null 2>&1 && ok "installed homi bin" || fail "installed homi bin"
 
 echo "5) setup --dry-run from the installed artifact writes nothing"
 FH="$(mktemp -d)"
@@ -80,6 +89,7 @@ echo "6) unit smokes + codex-queue payload test"
 ( cd "$PKG" && node test/mcp-smoke.mjs >/dev/null 2>&1 ) && ok "mcp-smoke" || fail "mcp-smoke"
 ( cd "$PKG" && node test/setup-smoke.mjs >/dev/null 2>&1 ) && ok "setup-smoke" || fail "setup-smoke"
 ( cd "$PKG" && node test/launcher-smoke.mjs >/dev/null 2>&1 ) && ok "launcher-smoke" || fail "launcher-smoke"
+( cd "$PKG" && node test/lifecycle-smoke.mjs >/dev/null 2>&1 ) && ok "lifecycle-smoke" || fail "lifecycle-smoke"
 "$ROOT/scripts/test-codex-queue.sh" >/dev/null 2>&1 && ok "codex-queue" || fail "codex-queue"
 "$ROOT/scripts/test-setup-repo.sh" >/dev/null 2>&1 && ok "setup-repo" || fail "setup-repo"
 "$ROOT/scripts/test-ask.sh" >/dev/null 2>&1 && ok "ask+coach" || fail "ask+coach"

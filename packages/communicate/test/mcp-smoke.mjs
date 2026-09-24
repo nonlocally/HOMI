@@ -11,7 +11,7 @@ import { communicateCli, packageVersion } from "../src/paths.mjs";
 const pkgDir = fileURLToPath(new URL("..", import.meta.url));
 const taskHome = mkdtempSync(path.join(os.tmpdir(), "comm-mcp-"));
 const env = { ...process.env, HOME: taskHome, COMM_STATE: path.join(taskHome, "state"),
-  COMM_BUS_PORT: "0", COMMUNICATE_DATA: path.join(taskHome, "data"),
+  COMM_BUS_PORT: "0", COMMUNICATE_DATA: process.env.COMM_MCP_TEST_DATA || path.join(taskHome, "data"),
   PATH: path.join(taskHome, "bin") + path.delimiter + process.env.PATH };
 for (const key of ["CODEX_HOME", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "COMM_CODEX_INDEX",
   "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MESSAGING_SOCKET", "COMMUNICATE_HOME"]) delete env[key];
@@ -35,7 +35,7 @@ with open(os.path.join(os.environ["HOME"], "queued.jsonl"), "a") as f:
 
 // Override the entry point to test a packed artifact with the same protocol checks.
 const entry = process.env.COMM_MCP_TEST_ENTRY || path.join(pkgDir, "src", "cli.mjs");
-const child = spawn("node", [entry, "serve"], { env, stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn(process.env.COMM_MCP_TEST_COMMAND || "node", [entry, "serve"], { env, stdio: ["pipe", "pipe", "pipe"] });
 let buf = "", stderr = ""; const pending = new Map();
 child.stderr.on("data", (d) => { stderr += d; });
 child.stdout.on("data", (d) => {
@@ -68,7 +68,9 @@ const call = async (name, args = {}, errorExpected = false) => {
 const jsonCall = async (...args) => JSON.parse(await call(...args));
 const assert = (ok, message) => { if (!ok) throw new Error(message); };
 const EXPECT = ["agents_list", "whereis", "route", "send", "codex_queue", "codex_ask", "status", "ask", "card_set",
-  "bus_register", "bus_list", "bus_agents", "bus_leave", "bus_send", "bus_receipt", "bus_status", "bus_dashboard", "bus_create", "bus_device", "bus_reply"];
+  "bus_register", "bus_list", "bus_agents", "bus_leave", "bus_send", "bus_receipt", "bus_status", "bus_dashboard", "bus_create", "bus_device", "bus_reply",
+  "homi_status", "homi_start", "homi_agents", "homi_claim", "homi_release", "homi_send", "homi_ask", "homi_reply", "homi_inbox", "homi_wait",
+  "homi_spawn", "homi_restart", "homi_seats", "homi_seat_spawn", "homi_seat_send", "homi_seat_read", "homi_seat_state", "homi_seat_bind", "homi_seat_interrupt", "homi_seat_kill"];
 let failed = false;
 try {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } });

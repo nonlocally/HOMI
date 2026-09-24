@@ -19,7 +19,7 @@ switch (cmd) {
   case "help":
   case "--help":
     version();
-    console.log("verbs: setup [--claude|--codex|--dry-run|--uninstall|--purge|-y] | doctor | serve | version");
+    console.log("verbs: setup/update [--claude|--codex|--no-clients] [--service|--no-service] [--dry-run] | rollback | uninstall [--purge] | doctor | serve | version");
     console.log("       any communicate CLI verb (bus ..., agents, route, send, codex ..., claude ..., wake ...)");
     break;
   case "version":
@@ -27,7 +27,14 @@ switch (cmd) {
     version();
     break;
   case "setup":
+  case "update":
     await (await import("./setup.mjs")).runSetup(rest);
+    break;
+  case "uninstall":
+    await (await import("./setup.mjs")).runSetup(["--uninstall", ...rest]);
+    break;
+  case "rollback":
+    await (await import("./setup.mjs")).runRollback(rest);
     break;
   case "doctor":
     await (await import("./setup.mjs")).runDoctor();

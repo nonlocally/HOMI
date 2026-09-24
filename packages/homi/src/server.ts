@@ -355,7 +355,7 @@ Not exposed here on purpose: federation, grants, and linking are human trust dec
 made on the CLI, never by an agent.`;
 
 export function buildServer(): McpServer {
-  const server = new McpServer({ name: "homi", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "homi", version: "0.3.0" }, { instructions: INSTRUCTIONS });
   for (const t of TOOLS) {
     server.registerTool(
       t.name,

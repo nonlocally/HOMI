@@ -45,6 +45,9 @@ export function resolvePython(): string {
 export function daemonFile(): string {
   if (process.env.HOMI_DAEMON_DIR)
     return path.join(process.env.HOMI_DAEMON_DIR, "homi.py");
+  const combined = path.join(process.env.COMMUNICATE_DATA ||
+    path.join(process.env.HOME || os.homedir(), ".local/share/communicate"), "current/vendor/lib/homi.py");
+  if (fs.existsSync(combined)) return combined;
   const installed = path.join(
     process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"),
     "homi",
