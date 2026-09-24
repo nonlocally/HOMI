@@ -130,12 +130,14 @@ export async function installService(dry = false, beforeRestore = () => {}) {
   try {
     fs.writeFileSync(definition.path, definition.content, { mode: 0o600 });
     loadService(definition);
+    const expectedSource = fs.realpathSync(path.join(currentLink(), "vendor/lib/homi.py"));
     for (let i = 0; i < 50; i++) {
       const status = await daemonRequest();
-      if (status?.ok) return { ...definition, hash: hash(definition.content), backup, state: stateRoot() };
+      if (status?.ok && status.self?.source_file === expectedSource)
+        return { ...definition, hash: hash(definition.content), backup, state: stateRoot() };
       await new Promise((r) => setTimeout(r, 200));
     }
-    throw new Error("Service installed but daemon did not answer; inspect its preserved logs");
+    throw new Error("Service did not answer from the selected release; inspect its preserved logs and homi doctor");
   } catch (error) {
     unloadService(definition);
     // The previous unit may itself use /current. Restore that pointer before
