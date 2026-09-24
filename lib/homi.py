@@ -1922,20 +1922,50 @@ class Homi:
 
     def _ensure_control_token(self):
         p = self.path("control.token")
-        try:
-            with open(p, "r") as f:
-                tok = f.read().strip()
-            if tok:
+
+        def read_existing():
+            # NOFOLLOW rejects aliases; NONBLOCK lets us reject FIFOs/devices
+            # without waiting for a writer. Validate the opened inode before
+            # changing permissions or reading any token bytes.
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                    raise PermissionError("control.token must be a regular file owned by this user")
+                if stat.S_IMODE(st.st_mode) != 0o600:
+                    os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                    tok = f.read().strip()
+                if not tok:
+                    raise ValueError("control.token is empty; refusing to replace an existing token")
                 return tok
-        except OSError:
-            pass
-        tok = os.urandom(24).hex()
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            finally:
+                os.close(fd)
+
         try:
-            os.write(fd, tok.encode())
+            return read_existing()
+        except FileNotFoundError:
+            pass
+
+        # Publish complete bytes without replacing a concurrent creator's
+        # token. An exclusive empty destination would expose a partial token
+        # to readers; linking a private completed file has no such interval.
+        tok = os.urandom(24).hex()
+        tmp = self.path(".control.token-" + uuid.uuid4().hex)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                os.fchmod(f.fileno(), 0o600)
+                f.write(tok)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.link(tmp, p, follow_symlinks=False)
+            except FileExistsError:
+                pass
         finally:
-            os.close(fd)
-        return tok
+            os.unlink(tmp)
+        return read_existing()
 
     def _needs_token(self):
         with self.mu:
