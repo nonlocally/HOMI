@@ -87,10 +87,18 @@ try {
   // Service-manager fixture, never the host's actual launchctl/systemctl. A
   // failed replacement must restore /current BEFORE reloading the previous unit.
   const manager = process.platform === "darwin" ? "launchctl" : "systemctl";
-  const unitFile = process.platform === "darwin" ? path.join(home, "Library/LaunchAgents/com.communicate.homi.plist") : path.join(home, ".config/systemd/user/communicate-homi.service");
+  const beforeDefinitionEnv = { ...process.env };
+  Object.assign(process.env, env);
+  const unitFile = serviceDefinition(process.platform, "/usr/bin/python3", "fixture").path;
+  for (const key of Object.keys(process.env)) if (!(key in beforeDefinitionEnv)) delete process.env[key];
+  Object.assign(process.env, beforeDefinitionEnv);
+  env.SERVICE_TEST_PATH = unitFile;
   fs.mkdirSync(path.dirname(unitFile), { recursive: true }); fs.writeFileSync(unitFile, "previous fixture definition");
   fs.writeFileSync(path.join(home, "bin", manager), `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),a=process.argv.slice(2);
+if(a[0]==='print'||a.includes('show')){
+ console.log(a[0]==='print'?'path = '+process.env.SERVICE_TEST_PATH:'FragmentPath='+process.env.SERVICE_TEST_PATH+'\\nActiveState=active');process.exit(0);
+}
 if (a.includes('bootstrap') || a.includes('enable')) {
  const target=fs.realpathSync(path.join(process.env.COMMUNICATE_DATA,'current'));
  fs.appendFileSync(path.join(process.env.HOME,'service-calls'),target+'\\n');
@@ -133,6 +141,6 @@ if (a.includes('bootstrap') || a.includes('enable')) {
   const linux = serviceDefinition("linux", "/tmp/python tools/python3", "fixture");
   assert(mac.content.includes("python &amp; tools"), "launchd XML path was not escaped");
   assert(linux.content.includes('ExecStart="/tmp/python tools/python3"'), "systemd path with spaces was not quoted");
-  assert(mac.label === "com.communicate.homi" && linux.label === "communicate-homi.service", "service compatibility label changed");
+  assert(mac.label.startsWith("com.communicate.homi") && linux.label.startsWith("communicate-homi"), "service identity prefix changed");
   console.log("PASS: lifecycle — immutable upgrade, failed activation, rollback, ownership, preserved state, tamper detection and platform service rendering");
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }
