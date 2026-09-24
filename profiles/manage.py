@@ -231,6 +231,9 @@ class Profile:
         with self.lock():
             # Reload inside lock: concurrent invocations cannot overwrite ownership.
             self.record = json.loads(self.ledger.read_text()) if self.ledger.exists() else {"entries": {}}
+            # Selection is additive. Another command may have added a module
+            # since this command read its initial ledger before taking the lock.
+            modules = sorted(set(self.record.get("modules", [])) | set(modules))
             plan = self.plan(modules)
             conflicts = [p for p in plan if p["action"] == "conflict"]
             if conflicts:

@@ -69,6 +69,18 @@ class Profiles(unittest.TestCase):
         self.assertTrue(self.profile.uninstall()["ok"])
         self.assertEqual(rc.read_bytes(), b"# no newline")
 
+    def test_additive_selection_survives_a_stale_installer_snapshot(self):
+        # Two commands may read the ledger before either acquires its lock.
+        # The second must retain the first command's newly installed module.
+        waiting = mod.Profile(self.home)
+        self.install(["terminal"])
+        waiting.install(["mesh"])
+        self.profile = mod.Profile(self.home)
+        self.assertEqual(self.profile.record["modules"], ["mesh", "terminal"])
+        result = self.run_tool(BASH, "-c", '. "$HOME/.config/homi/profiles/active.sh"; declare -F t; declare -F mesh')
+        self.assertEqual(result.stdout.splitlines(), ["t", "mesh"])
+        self.assertTrue(self.profile.uninstall()["ok"])
+
     def test_owned_config_and_backup_directories_are_private(self):
         self.install()
         self.assertEqual(self.profile.config.stat().st_mode & 0o077, 0)
