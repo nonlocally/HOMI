@@ -209,6 +209,34 @@ raise SystemExit(CODE)
         self.assertEqual((home/'settings.json').read_bytes(),before)
         self.assertEqual(list(home.glob('.homi-connection-*.json')),[])
 
+    def test_claude_overrides_settings_routes_and_alternate_auth_sources(self):
+        self.add(); self.fake_client('claude')
+        conflicts = {'ANTHROPIC_CUSTOM_HEADERS': 'Authorization: Bearer unrelated-credential',
+                     'ANTHROPIC_UNIX_SOCKET': str(self.home/'unrelated-provider.sock'),
+                     'ANTHROPIC_SMALL_FAST_MODEL': 'unrelated-small-model',
+                     'CLAUDE_CODE_USE_GATEWAY': '1',
+                     'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR': '44',
+                     'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR': '45',
+                     'CLAUDE_CODE_OAUTH_TOKEN': 'unrelated-login',
+                     'CCR_OAUTH_TOKEN_FILE': str(self.home/'unrelated-login.json')}
+        settings = self.home/'.claude/settings.json'
+        settings.write_text(json.dumps({'env': conflicts, 'enabledPlugins': {'communicate': True}}))
+        before = settings.read_bytes()
+        os.environ.update(conflicts)
+        original = models.subprocess.Popen
+        captured = {}
+        def launch(*args, **kwargs):
+            captured.update(kwargs['env'])
+            return original(*args, **kwargs)
+        with patch.object(models.subprocess, 'Popen', side_effect=launch):
+            self.assertEqual(models.run('openweb', 'claude', ['hello']), 0)
+        override = json.loads((self.home/'record.json').read_text())['settings']['env']
+        for name in conflicts:
+            expected = 'glm' if name == 'ANTHROPIC_SMALL_FAST_MODEL' else '0' if name == 'CLAUDE_CODE_USE_GATEWAY' else ''
+            self.assertEqual(override[name], expected, name)
+            if name != 'ANTHROPIC_SMALL_FAST_MODEL': self.assertNotIn(name, captured)
+        self.assertEqual(settings.read_bytes(), before)
+
     def test_external_edit_retained_and_nonzero_client_exit_propagates(self):
         self.add(); self.fake_client('codex',code=7,edit=True)
         self.assertEqual(models.run('openweb','codex',[]),7)

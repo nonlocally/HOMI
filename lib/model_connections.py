@@ -26,6 +26,8 @@ sys.dont_write_bytecode = True
 OWNER = "homi-model-connection-v1"
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}\Z")
 MAX_KEY = 8192
+CLAUDE_ALTERNATE_AUTH = ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+                        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CCR_OAUTH_TOKEN_FILE")
 
 
 class ConnectionError(Exception):
@@ -302,8 +304,8 @@ def spawn_command(name, cli):
 def launch_env(cli, home, key):
     env = dict(os.environ)
     for name in list(env):
-        if name.startswith(("ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_USE_")) or name in {
-                "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_SUBAGENT_MODEL",
+        if name.startswith(("ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_USE_")) or name in CLAUDE_ALTERNATE_AUTH or name in {
+                "CLAUDE_CODE_SUBAGENT_MODEL",
                 "CLAUDE_CODE_SIMPLE",
                 "CODEX_THREAD_ID", "CODEX_API_KEY", "ANU_ACCOUNT", "ANU_PROVIDER", "ANU_LAUNCH_NONCE", "HOMI_ACCOUNT"}:
             env.pop(name, None)
@@ -384,12 +386,17 @@ def run(name, cli, args, accept_inbound=False):
         env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_AUTH_TOKEN"] = meta["anthropic_base_url"], key
         for alias in ("SONNET", "OPUS", "HAIKU", "FABLE"):
             env["ANTHROPIC_DEFAULT_" + alias + "_MODEL"] = meta["model"]
+        env["ANTHROPIC_SMALL_FAST_MODEL"] = meta["model"]
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = meta["model"]
         env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
         path = home / (".homi-connection-" + uuid.uuid4().hex + ".json")
         settings_env = {k: v for k, v in env.items() if k.startswith("ANTHROPIC_") or
                         k in ("CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")}
-        settings_env.update({"ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": "",
+        # User/project settings can restore env values after process-env cleanup.
+        # Override the alternate routes and credential channels at that layer too.
+        settings_env.update({name: "" for name in CLAUDE_ALTERNATE_AUTH})
+        settings_env.update({"ANTHROPIC_API_KEY": "", "ANTHROPIC_CUSTOM_HEADERS": "",
+                             "ANTHROPIC_UNIX_SOCKET": "", "CLAUDE_CODE_USE_GATEWAY": "0",
                              "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_VERTEX": "0",
                              "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_MANTLE": "0",
                              "CLAUDE_CODE_USE_AWS": "0"})
