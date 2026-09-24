@@ -25,7 +25,7 @@ stages an immutable copy of the release at
 registers the plugin with the clients you named. Start a fresh client session
 afterwards. Keep a copy of the archive for recovery and purge if an installed
 payload becomes damaged. The full flag reference, service, update, rollback, uninstall,
-and troubleshooting are in [docs/INSTALL.md](../../docs/INSTALL.md).
+and troubleshooting are in [docs/INSTALL.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/INSTALL.md).
 
 ```sh
 homi setup --claude                             # or --codex; --no-clients for CLI only
@@ -60,7 +60,7 @@ sessions on the configured broker with membership checks and receipts.
 The three address spaces are explicit, so a failed lookup never targets another
 agent. A stored mailbox message, a bus receipt, a native submission, and a
 correlated reply keep their distinct meanings; none says a model finished the
-task. See [docs/CLI.md](../../docs/CLI.md).
+task. See [docs/CLI.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/CLI.md).
 
 ## Plugin and MCP
 
@@ -89,7 +89,7 @@ homi bus dashboard --open
 selects an enrolled remote one. Installing this package grants no access to any
 hosted service; its administrator controls browser access, device enrollment,
 and membership. Owner-side networking and invitations are in
-[docs/BUSES.md](../../docs/BUSES.md).
+[docs/BUSES.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/BUSES.md).
 
 ## Development
 
@@ -106,6 +106,6 @@ exercise the MCP server, durable ask/reply, copied plugin caches, immutable
 updates, rollback, ownership, service boundaries (with fixtures, never the
 host's service manager), install recovery, and client restoration. Real
 per-user service qualification and real provider exchanges are separate,
-opt-in checks described in [docs/RELEASING.md](../../docs/RELEASING.md).
+opt-in checks described in [docs/RELEASING.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/RELEASING.md).
 
 MIT license; bundled third-party notices are retained.
