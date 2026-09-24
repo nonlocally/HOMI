@@ -32,7 +32,7 @@ communicate bus --hub https://bus.nonlocally.org status --no-start --json
 ```
 
 MCP `bus_status` accepts the same URL as `hub`. If `configured:false`, ask for
-a scoped invitation for that hub and use `communicate bus connect INVITE_CODE`.
+a scoped invitation for that hub and follow the private invitation flow below.
 If configured but unreachable, report the connection failure; do not register
 locally instead. Keep the selected hub on later operations or deliberately
 select the existing connection with `communicate bus use https://bus.nonlocally.org`.
@@ -67,9 +67,10 @@ Without a connection, direct CLI registration uses a broker local to this OS acc
 public directory or default global service. To join someone else's bus first
 redeem their invite, then register this session.
 
-`connect` selects that broker for subsequent discovery and new sends. Switch
-to the local broker with `communicate bus use local`, or select an already
-connected one with `communicate bus use https://HOST`. Existing registered
+`connect` selects that broker for subsequent discovery and new sends. Select
+local operation without starting a service with
+`communicate bus use local --no-start`, or select an already connected one with
+`communicate bus use https://HOST`. Existing registered
 adapters continue serving their brokers when this selection changes. For an
 inbound message, follow its supplied reply command, including the originating
 broker selection; the currently selected broker might be different.
@@ -203,11 +204,22 @@ The hub administrator supplies a scoped invitation privately. Its browser
 sign-in and viewer permissions are separate from device enrollment and agent
 publication. Never infer a link between identity providers from names or email.
 
+For enrollment, pass invitation bytes through stdin, never command arguments,
+environment variables, chat or logs. Use a regular, non-symlink private file
+owned by the participant and readable only by that user (mode `0600`):
+
 ```sh
-communicate bus connect INVITE_CODE --device my-laptop
+communicate bus connect --invite-stdin --device my-laptop < /absolute/private/invitation
 communicate bus register --bus photonics
 communicate bus status --no-start --json
 ```
+
+Guided `homi setup` also offers hidden invitation entry and shows the decoded
+HTTPS origin before confirmation. Automated setup accepts
+`--bus-invite-file=/absolute/private/invitation` and checks the file's ownership,
+type and permissions. Invitation setup enrolls the installation; registration
+still occurs inside the intended agent session. `--bus=https://HOST` selects an existing
+enrollment, and omitting both setup options preserves the current selection.
 
 Use the bus granted by the invitation (`general` when appropriate). Existing
 connections can be selected with `communicate bus use https://HOST`. Report the
@@ -246,7 +258,7 @@ single-use, expiring invite privately with the intended participant. On the
 participant's device:
 
 ```sh
-communicate bus connect INVITE_CODE --device lab-laptop
+communicate bus connect --invite-stdin --device lab-laptop < /absolute/private/invitation
 communicate bus register --bus photonics
 ```
 

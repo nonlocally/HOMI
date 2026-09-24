@@ -13,7 +13,8 @@ it requires enrollment there. Missing enrollment calls for a scoped invitation,
 not a local replacement. Follow `communicate-bus` for connect/use.
 The owner issues
 a scoped invite with `communicate bus invite BUS --url https://HOST`; the
-participant runs `communicate bus connect INVITE_CODE` and then
+participant runs `communicate bus connect --invite-stdin < /absolute/private/invitation`
+(a user-owned, mode-`0600` file; keep its contents out of arguments and logs), then
 `communicate bus register --bus BUS` inside its existing agent session.
 Participants only make outbound HTTPS requests. This works across tailnets
 when the owner intentionally exposes its authenticated gateway over public
