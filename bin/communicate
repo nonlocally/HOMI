@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# communicate — bridge Claude Code and Codex agents across devices over
-# Tailscale + SSH. Transport is strictly ssh; agents are strictly Claude Code
-# and Codex. Nothing else by design.
+# communicate — HOMI's compatible native/session, bus, and durable CLI.
+# Native remote adapters use SSH; registered buses and durable links retain
+# their own transports. Claude Code and Codex are the native agent adapters.
 #
 #   communicate link    <device>                 verify the ssh/Tailscale substrate
 #   communicate ls      [device]                 list agents on a device
@@ -71,7 +71,7 @@ source "$COMM_HOME/lib/wake.sh"
 [ -f "$COMM_HOME/lib/ask.sh" ] && . "$COMM_HOME/lib/ask.sh"
 # shellcheck source=lib/setup_repo.sh
 [ -f "$COMM_HOME/lib/setup_repo.sh" ] && . "$COMM_HOME/lib/setup_repo.sh"
-# homi plane is optional: packaged installs (@aadarwal/communicate) ship without it.
+# Older compatibility packages omitted the durable plane; combined HOMI releases include it.
 # shellcheck source=lib/homi.sh
 [ -f "$COMM_HOME/lib/homi.sh" ] && . "$COMM_HOME/lib/homi.sh"
 
@@ -180,7 +180,7 @@ main() {
     card)    cards_cmd "$@";;
     setup-repo) setup_repo "$@";;
     homi)    type homi_cmd >/dev/null 2>&1 || \
-                 die "homi plane not bundled in this install — clone github.com/aadarwal/communicate for the full CLI"
+                 die "durable HOMI is missing from this installation — install a verified release from https://github.com/nonlocally/HOMI/releases"
              homi_cmd "$@";;
     # internal entrypoints (not for humans)
     __supervise-claude) _claude_supervise "$@";;

@@ -17,7 +17,7 @@ Use `--dry-run` to inspect setup and `homi doctor` to check actual installed pat
 
 Download `homi-VERSION.tar.gz` and its checksum from the matching GitHub release.
 Verify the SHA-256 before extracting. The archive includes production Node
-modules; supply Node20+, Python3, and Bash. Run the extracted `bin/homi setup` to
+modules; supply Node20+, Python3.9+, and Bash. Run the extracted `bin/homi setup` to
 create a stable per-user installation and enable selected integrations. Follow its
 PATH guidance for a new shell. A source checkout or temporary npm cache is not
 required after installation.
