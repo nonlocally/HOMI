@@ -9,7 +9,7 @@ To register **this Codex session**, run `communicate bus register` (or
 `--bus photonics`). It attaches the exact `CODEX_THREAD_ID`; use the session
 shell if MCP lacks that environment. `CODEX_SESSION_ID` may differ and is not
 the queue target. Verify the returned ID in `communicate bus agents --json`.
-Its status is queueable, not proof that the app is actively processing a turn.
+Its status is queueable, not proof that the thread is actively processing a turn.
 Read `communicate-bus` for the dashboard and membership-scoped sending.
 Never start a `codex peer` or `codex ask` to satisfy "register yourself".
 
@@ -24,9 +24,11 @@ communicate codex queue <device> <session-name|uuid> "<message>"
 
 - Requires Codex CLI ≥ 0.151 on the target device.
 - Addresses the NATIVE session name/UUID from `~/.codex/session_index.jsonl`
-  (exact name; the user sees your message and the reply in their app/TUI).
-- Success means **enqueued**, not answered. A live session consumes it in
-  seconds; a dormant one on resume. It never creates a lookalike session.
+  and queues into that exact existing thread.
+- Success means **enqueued**, not consumed or answered. Processing depends on
+  the target client's state; a dormant thread may need explicit resume. Do not
+  promise a processing delay or desktop-app wake. It never creates a lookalike
+  session.
 - The reply stays in THAT session. To verify delivery/reply, read its rollout:
   `~/.codex/sessions/YYYY/MM/DD/rollout-*<thread-id>.jsonl` (look for the
   trailing `agent_message` / `task_complete` records).
@@ -56,7 +58,7 @@ Stands up a small adapter: socket + sidecar, so the name appears in
 `ListAgents`/`communicate agents` like any Claude peer. Each inbound message
 runs a `codex ask` behind the scenes and the answer is written BACK to the
 sender's socket. Note: the peer owns its own headless thread — it is not
-attached to any app session (that's Lane 1's job).
+attached to the target's existing thread (that's Lane 1's job).
 
 ## Getting a reply back (closing the queue lane's loop)
 

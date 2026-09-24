@@ -33,12 +33,12 @@ The older local socket/SSH lane remains available below. Its roster is a
 different view from publication. Local Claude/Codex reachability and existing
 native socket/SSH routing remain unrestricted by bus membership or publication.
 
-Every Claude Code session has an identity (a **name**) and an address (a **unix
-socket**), published as a sidecar file (`~/.claude/sessions/<pid>.json`,
-`name → messagingSocketPath`). The set of sidecars IS the routing table.
-`communicate` extends it across agent kinds (Codex) and devices (ssh). No tmux,
-no cloud relay — you can use all of this from any surface: terminal, desktop
-app, anywhere with a shell.
+Supported Claude Code sessions publish a name and reachable Unix socket in a
+sidecar file (`~/.claude/sessions/<pid>.json`, `name → messagingSocketPath`).
+The set of sidecars is the native routing table. `communicate` also addresses
+exact Codex threads through the supported queue and devices through SSH.
+These native routes do not require a tmux pane. Reachability depends on the
+session's socket or queue support; it does not establish desktop-app wake.
 
 ## See who's here
 
@@ -50,7 +50,7 @@ communicate whereis NAME     # resolve one name -> type, via, socket
 
 **DESCRIPTION is the agent's self-described card when it has one** (what it is
 — ask me for: …; set via `communicate card set self`), **else the session's
-chat title** from the human's app sidebar; DIR is its working directory. So
+chat title** from its session metadata; DIR is its working directory. So
 when you're told "talk to the GitHub-widget one" or "whoever is in repo X",
 don't guess a name — read the roster, match intent against DESCRIPTION/DIR,
 then address by the exact NAME. **Names are addresses; descriptions are for
@@ -60,10 +60,10 @@ renamed (fresh spawns, terminal sessions).
 Inside Claude Code, the native `ListAgents` tool shows the same peers. A row of
 type `claude*` is a remote session bridged in over ssh; `codex` is a Codex peer.
 
-## Talk to anyone
+## Talk to reachable sessions
 
 ```sh
-communicate route <name> "<message>"              # one verb, any agent kind (add --coach to teach the receiver how to reply)
+communicate route <name> "<message>"              # supported Claude/Codex routes (add --coach to teach the receiver how to reply)
 communicate send  <name|socket> [--as NAME] "<message>"   # raw inject, custom attribution
 communicate ask   <name> [--timeout SEC] "<question>"     # SYNC: blocks for the reply
 ```
@@ -77,15 +77,15 @@ thread name. Timeout is honest: exit 2 means delivered-but-unanswered.
 **From inside a Claude Code session, prefer the native `SendMessage` tool** for
 Claude→Claude messages: it attests your permission mode, so the receiver's
 inbound gate is less likely to hold your message. `route`/`send` are the
-universal path (work from scripts, cron, any agent). Your `$CLAUDE_CODE_MESSAGING_SOCKET`
+CLI path for supported targets from a session shell, scripts or cron. Your `$CLAUDE_CODE_MESSAGING_SOCKET`
 becomes the reply address automatically when set.
 
 ## The lane table — pick delivery by target
 
 | Target | Lane | Sync? | Reply arrives |
 |---|---|---|---|
-| Claude session (any surface) | `route <name>` / native SendMessage | async | back to YOUR socket as a cross-session message |
-| Existing Codex app/TUI session | `communicate codex queue <dev> <session-name> "<msg>"` | async | stays in THAT session's UI/history |
+| Claude Code session with a reachable messaging socket | `route <name>` / native SendMessage | async | back to YOUR socket as a cross-session message |
+| Exact existing Codex thread supported by `codex queue` | `communicate codex queue <dev> <session-name> "<msg>"` | async | stays in THAT thread's history when processed |
 | Fresh headless Codex answer | `communicate codex ask <dev> "<q>"` | sync | on stdout, with thread continuity |
 | Codex as a ListAgents peer | `communicate codex peer <dev> [name]` | async | back to sender, like a Claude peer |
 

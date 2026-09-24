@@ -11,7 +11,7 @@ path that owns the target; a matching label in another path is not a substitute.
 | Target | Commands | Meaning |
 | --- | --- | --- |
 | Durable identity | `homi agents`, `claim`, `send`, `ask`, `inbox` | A saved address/mailbox with an optional current execution. |
-| Existing native session | `homi native agents`, `route`, `ask`, `codex queue` | The exact provider session, including app sessions without a pane. |
+| Existing native session | `homi native agents`, `route`, `ask`, `codex queue` | An exact supported Claude Code socket or Codex queue target; no pane required. |
 | Registered bus agent | `homi bus status`, `register`, `agents`, `send`, `reply` | Exact registrations under the selected hub's membership rules. |
 | Terminal seat | `homi seat spawn`, `read`, `send`, `state`, `bind` | Explicit terminal control on the configured tmux server or granted remote link. |
 

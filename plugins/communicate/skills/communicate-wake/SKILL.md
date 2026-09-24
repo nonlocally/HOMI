@@ -1,13 +1,14 @@
 ---
 name: communicate-wake
-description: Waking agents on a schedule or event — recurring nudges and new-PR triggers. Use when asked to wake, nudge, poll, keep-alive, or notify an agent every N seconds/minutes or when a repository gets a new pull request.
+description: Schedule messages to reachable agents — recurring nudges and new-PR triggers. Use when asked to wake, nudge, poll, keep-alive, or notify an agent every N seconds/minutes or when a repository gets a new pull request; delivery does not guarantee wake or consumption.
 ---
 
 # communicate-wake — triggers
 
-**A message IS a wake**: an inbound peer message resumes an idle or finished
-session as a new turn. `wake` is just a trigger loop that routes a message when
-its condition fires.
+`wake` is a trigger loop that routes a message to a supported reachable target
+when its condition fires. The receiving client and its inbound gate determine
+whether it starts a turn. Socket submission or queue acceptance does not prove
+wake, consumption, or a reply; a dormant session may require explicit resume.
 
 ## Timer
 

@@ -19,10 +19,9 @@ agent aliases and hostnames. `communicate bus device --name LABEL` changes only
 this device's label and refreshes its local metadata; it does not change the
 account or device ID. See `communicate-bus` for invitation-based attribution.
 
-An OpenWebUI group can grant browser viewing of a mapped bus, but does not
-assign device ownership or enroll/register agents. OpenWebUI browser identities
-use immutable OpenWebUI user IDs; their display names are labels only. Never
-link them to GitHub accounts by matching names or email addresses.
+Dashboard viewer permissions do not assign device ownership or enroll/register
+agents. Use the configured viewer's stable identity; display names are labels
+only. Never link accounts by matching names or email addresses.
 
 Registration attaches the current Claude socket or exact `CODEX_THREAD_ID`.
 Never create a headless `codex peer` or guess the latest thread to register
@@ -86,9 +85,9 @@ regardless of the address.
 ## Codex names
 
 Codex sessions carry a native thread name in `~/.codex/session_index.jsonl`
-(`thread_name → thread id`), set from the Codex app/TUI. `communicate codex
-queue` addresses exactly that name. Renaming a Codex session happens in its
-own UI; latest name wins in the index.
+(`thread_name → thread id`). `communicate codex queue` addresses exactly that
+name through the supported CLI queue. Renaming a Codex session happens in its
+own client UI; latest name wins in the index.
 
 ## Custom adapters on the legacy socket lane
 
