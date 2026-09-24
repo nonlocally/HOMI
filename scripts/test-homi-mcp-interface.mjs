@@ -2,7 +2,7 @@
 // Actual MCP -> existing CLI -> isolated durable daemon. No real agent/model.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,11 +47,18 @@ async function call(name, args = {}) {
 
 try {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "core-fixture", version: "1" } });
-  assert.match(init.result.instructions, /local operation/i);
-  assert(!init.result.instructions.includes("bus.nonlocally.org"));
+  assert.equal(init.result.serverInfo.name, "communicate");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   const names = (await rpc("tools/list", {})).result.tools.map((tool) => tool.name);
   for (const name of ["bus_dashboard", "bus_reply", "route", "homi_claim", "homi_seat_bind"]) assert(names.includes(name));
+  for (const args of [{}, { hub: "https://bus.nonlocally.org" }]) {
+    const status = JSON.parse(await call("bus_status", args));
+    assert.equal(status.configured, false, "fresh status must not invent enrollment");
+    assert.equal(status.hub, null, "fresh status must not select a fallback hub");
+  }
+  for (const file of ["server.json", "worker.json"]) {
+    assert(!existsSync(path.join(env.COMM_STATE, "bus", file)), "status inspection must not start bus services");
+  }
   await call("homi_start");
   await call("homi_claim", { name: "alice" });
   await call("homi_claim", { name: "bob" });
