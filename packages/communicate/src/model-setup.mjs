@@ -38,7 +38,12 @@ export async function prepareModelChoice({ ask, secret, add = addModelConnection
   const model = await ask("Model ID from that API's catalog (for example glm; empty cancels):");
   if (!model) return null;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model)) throw new Error("Use the model ID exactly as shown in the API catalog.");
-  let key = await secret("Paste a scoped model API key (hidden; empty cancels):");
+  const keyPrompt = base === "https://mit.nonlocally.org/v1"
+    ? "Create a model API key in API & clients at https://mit.nonlocally.org/workspaces/developer.\n" +
+      "Use the model key beginning with nlm_; the website account API key beginning with sk- does not grant model access.\n" +
+      "Paste the model API key (hidden; empty cancels):"
+    : "Paste a scoped model API key (hidden; empty cancels):";
+  let key = await secret(keyPrompt);
   if (!key) return null;
   if (!/^[\x21-\x7e]+$/.test(key) || Buffer.byteLength(key) > 8191) throw new Error("The model API key must be an ASCII token without whitespace, at most 8191 bytes.");
   return {

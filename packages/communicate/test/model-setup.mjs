@@ -33,7 +33,10 @@ for (const bad of ["", "line\nline", "nul\0byte", "x".repeat(8193)])
 const inputs = ["glm", "https://models.example.test/v1", "glm"];
 let applied = 0;
 const choice = await prepareModelChoice({
-  ask: async () => inputs.shift(), secret: async () => key,
+  ask: async () => inputs.shift(), secret: async (prompt) => {
+    assert.equal(prompt, "Paste a scoped model API key (hidden; empty cancels):");
+    return key;
+  },
   add: async (args, input) => {
     applied++;
     assert.equal(input, key);
@@ -44,6 +47,35 @@ assert(!JSON.stringify(choice).includes(key));
 assert.equal(applied, 0);
 await choice.apply();
 assert.equal(applied, 1);
+for (const endpoint of ["https://mit.nonlocally.org/v1", "https://mit.nonlocally.org/v1/"]) {
+  const answers = ["glm", endpoint, "glm"];
+  const nonlocallyChoice = await prepareModelChoice({
+    ask: async () => answers.shift(),
+    secret: async (prompt) => {
+      assert(prompt.includes("API & clients at https://mit.nonlocally.org/workspaces/developer"));
+      assert(prompt.includes("model key beginning with nlm_"));
+      assert(prompt.includes("website account API key beginning with sk- does not grant model access"));
+      assert(prompt.endsWith("(hidden; empty cancels):"));
+      return key;
+    },
+    add: async (args, input) => {
+      assert.equal(input, key, "guidance must not change or restrict the supplied token");
+      assert.deepEqual(args, ["glm", "--base-url", "https://mit.nonlocally.org/v1", "--model", "glm", "--anthropic-base-url", "https://mit.nonlocally.org"]);
+    },
+  });
+  assert(!JSON.stringify(nonlocallyChoice).includes(key));
+  await nonlocallyChoice.apply();
+}
+for (const endpoint of ["https://mit.nonlocally.org.example.test/v1", "https://mit.nonlocally.org:8443/v1"]) {
+  const answers = ["glm", endpoint, "glm"];
+  assert.equal(await prepareModelChoice({
+    ask: async () => answers.shift(),
+    secret: async (prompt) => {
+      assert.equal(prompt, "Paste a scoped model API key (hidden; empty cancels):");
+      return "";
+    },
+  }), null);
+}
 assert.equal(await prepareModelChoice({ ask: async () => "", secret: async () => { throw Error("must not ask for key"); } }), null);
 for (const name of ["research.glm", "x".repeat(49)])
   await assert.rejects(prepareModelChoice({ ask: async () => name, secret: async () => { throw Error("must not ask for key"); } }), /48 lowercase/);

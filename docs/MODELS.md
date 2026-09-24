@@ -15,8 +15,7 @@ is separate from a HOMI bus invitation and from your Claude or OpenAI login.
 
 Use the central model API supplied by your OpenWeb operator, with a named,
 expiring credential issued to your own account and permitted to use `glm`.
-The central service's inference credentials start with `nlm_`. They can be
-revoked separately from your account login.
+Model credentials can be revoked separately from your account login.
 
 The operator must supply the canonical API base URL and the model IDs your
 credential permits. On the central OpenWeb service, the signed-in account's
@@ -40,8 +39,11 @@ computer to perform the coding work: that work runs through your local client.
 
 For the nonlocally deployment, use `https://mit.nonlocally.org/v1` with model
 `glm`. Claude's compatible base origin is `https://mit.nonlocally.org`, so its
-requests reach `/v1/messages`. Obtain an ordinary scoped inference credential
-from the service; installing HOMI does not grant model access. The older
+requests reach `/v1/messages`. Sign in and open
+[API & clients](https://mit.nonlocally.org/workspaces/developer) to create a
+named, expiring model API key permitted to use `glm`. Use the model key beginning
+with `nlm_`; the website account API key beginning with `sk-` does not grant model
+access. Installing HOMI does not grant model access. The older
 `llm.nonlocally.org` route is not the connection to use for this release.
 
 For another deployment, obtain its endpoint and access from its operator.
