@@ -12,6 +12,7 @@ import { home, dataRoot, currentLink, ledgerPath, readJson, writeJson, hash, lin
 import { communicateCli } from "./paths.mjs";
 import { buildIntegration, removeIntegration } from "./integration.mjs";
 import { readCodexSettings, writeCodexSettings } from "./codex-settings.mjs";
+import { inspectBus, busSummary } from "./bus-setup.mjs";
 
 const pkgDir = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
@@ -663,6 +664,12 @@ export async function runDoctor() {
   rows.push(["package version", pkg.version]);
   rows.push(["payload", payloadOk ? `ok (${ver} at ${realpathSync(cur)})` : "MISSING — run setup"]);
   rows.push(["runtime state", stateRoot()]);
+  const bus = inspectBus();
+  rows.push(["bus connection", busSummary(bus)]);
+  if (bus.user) rows.push(["bus account", bus.user]);
+  if (bus.device) rows.push(["bus device", bus.device]);
+  if (bus.deviceId) rows.push(["bus device ID", bus.deviceId]);
+  if (bus.configured) rows.push(["bus worker", bus.workerRecent ? "recent heartbeat (not proof of model activity)" : "no recent heartbeat; registration starts its worker"]);
   const lock = installLockStatus();
   rows.push(["installation lock", lock ? `${lock.path}: pid=${lock.pid ?? "unknown"}, ${lock.status}, started=${lock.started || "unrecorded"}` : "none"]);
   if (lock) rows.push(["lock recovery", lock.recovery]);

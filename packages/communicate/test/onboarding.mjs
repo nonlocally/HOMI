@@ -67,6 +67,8 @@ function fixture(plan, initial, changes = {}) {
     setup: async (args) => { events.push({ kind: "setup", args: [...args] }); },
     profile: async (args) => { events.push({ kind: "profile", args: [...args] }); return { ok: true, actions: [] }; },
     doctor: async () => { events.push({ kind: "doctor" }); },
+    busStatus: async () => ({ configured: false, selection: "not selected", enrollment: "not enrolled" }),
+    prepareBus: async (options) => ({ description: options.bus || "invited hub", apply: async () => { events.push({ kind: "bus", selection: options.bus || "invite" }); } }),
     inspectLogin: async (provider) => { events.push({ kind: "inspect-login", provider }); return authenticated.has(provider); },
     login: async (provider) => { events.push({ kind: "login", provider }); authenticated.add(provider); },
   };
@@ -363,7 +365,7 @@ test("unsupported flags and contradictory selections are rejected before plannin
 
 test("guided answers choose only the requested client and keep authentication separate", async () => {
   const state = snapshot(), plan = makePlan(state);
-  const answers = [true, false, false, false, false, false, false, true];
+  const answers = [true, false, false, false, false, false, false, false, true];
   const f = fixture(plan, state, { confirm: async () => {
     assert.ok(answers.length, "unexpected additional prompt");
     return answers.shift();
@@ -418,6 +420,100 @@ for (const report of ["conflict", "invalid", "missing"]) {
     assert.equal(f.events.some((event) => ["setup", "doctor"].includes(event.kind)), false);
   });
 }
+
+test("bus setup flags preserve explicit destinations and reject mixed enrollment", () => {
+  assert.equal(shouldGuide(["--bus=local"]), true);
+  assert.equal(shouldGuide(["--bus-invite-file=/private/invite"]), true);
+  assert.equal(parseOnboardingArgs(["--bus=https://hub.example/"]).bus, "https://hub.example");
+  for (const args of [["--bus=http://remote.example"], ["--bus=local", "--bus-invite-file=/private/invite"],
+    ["--bus-invite-file=relative"], ["--bus=local", "--bus=local"]]) assert.throws(() => parseOnboardingArgs(args));
+});
+
+test("ordinary and repeated setup leave the selected bus untouched", async () => {
+  const state = snapshot(), plan = makePlan(state, ["--yes"]);
+  const f = fixture(plan, state, { prepareBus: async () => { throw new Error("must preserve the existing selection"); } });
+  await f.run(); await f.run();
+  assert.equal(f.events.some((event) => event.kind === "bus"), false);
+});
+
+test("dry-run neither reads an invitation nor inspects or connects a hub", async () => {
+  const state = snapshot(), plan = makePlan(state, ["--bus-invite-file=/private/missing", "--dry-run"]);
+  const f = fixture(plan, state, { prepareBus: async () => { throw new Error("dry run read invitation"); }, busStatus: async () => { throw new Error("dry run inspected network"); } });
+  assert.equal((await f.run()).status, "dry-run");
+  assert.deepEqual(f.events, []);
+});
+
+test("explicit bus selection runs after installation and before doctor", async () => {
+  const state = snapshot(), plan = makePlan(state, ["--bus=local", "--yes"]), f = fixture(plan, state);
+  assert.equal((await f.run()).status, "complete");
+  assert.deepEqual(f.events.filter((event) => ["setup", "bus", "doctor"].includes(event.kind)).map((event) => event.kind), ["setup", "bus", "doctor"]);
+});
+
+test("declining invitation origin confirmation leaves installation untouched", async () => {
+  const state = snapshot(), plan = makePlan(state, ["--bus-invite-file=/private/invite"]);
+  const f = fixture(plan, state, { prepareBus: async () => null });
+  assert.equal((await f.run()).status, "cancelled");
+  assert.deepEqual(mutations(f.events), []);
+});
+
+test("optional bus failure reports retained core installation and no registration", async () => {
+  const state = snapshot(), plan = makePlan(state, ["--bus=https://offline.example", "--yes"]);
+  const f = fixture(plan, state, { prepareBus: async () => ({ description: "offline hub", apply: async () => { throw new Error("sensitive-broker-output"); } }) });
+  await assert.rejects(f.run(), (error) => /core setup completed.*optional bus setup did not complete.*No agent registration/.test(error.message) && !error.message.includes("sensitive-broker-output"));
+  assert.deepEqual(f.events.filter((event) => ["setup", "doctor"].includes(event.kind)).map((event) => event.kind), ["setup", "doctor"]);
+});
+
+for (const consent of [true, false]) {
+  test(`hidden invitation confirms its origin and ${consent ? "joins without returning the secret" : "cancels before any installation"}`, async () => {
+    const state = snapshot(), plan = makePlan(state), f = fixture(plan, state);
+    const code = "commbus1." + Buffer.from(JSON.stringify({ url: "https://shared.example", invite: "private-hidden-value" })).toString("base64url");
+    const { prepareBus: _fixturePrepare, ...io } = f.io;
+    const questions = [], joins = [];
+    const result = await runOnboarding(["--guided", "--claude", "--no-service"], { ...io, stdoutTTY: true,
+      confirm: async (text) => {
+        questions.push(text);
+        if (text.startsWith("Enroll this installation")) return consent;
+        return text.startsWith("Choose a local or shared bus") || text.startsWith("Apply this setup plan");
+      },
+      ask: async () => "invitation", secret: async () => code,
+      applyBus: async (choice) => { joins.push(choice); f.events.push({ kind: "bus" }); },
+    });
+    assert.ok(questions.some((text) => text.includes("https://shared.example")));
+    assert.equal(JSON.stringify(result).includes(code), false);
+    assert.equal(JSON.stringify(result).includes("private-hidden-value"), false);
+    assert.equal(JSON.stringify(f.logs).includes(code), false);
+    if (consent) {
+      assert.equal(result.status, "complete");
+      assert.deepEqual(joins, [{ mode: "invite", code }]);
+      assert.deepEqual(f.events.filter((event) => ["setup", "bus", "doctor"].includes(event.kind)).map((event) => event.kind), ["setup", "bus", "doctor"]);
+    } else {
+      assert.equal(result.status, "cancelled");
+      assert.deepEqual(joins, []);
+      assert.deepEqual(mutations(f.events), []);
+    }
+  });
+}
+
+test("automated private invitation never appears in logs or the returned setup plan", async () => {
+  const state = snapshot(), plan = makePlan(state), f = fixture(plan, state);
+  const temp = mkdtempSync(path.join(os.tmpdir(), "homi-invite-consent-"));
+  try {
+    const code = "commbus1." + Buffer.from(JSON.stringify({ url: "https://shared.example", invite: "private-file-value" })).toString("base64url");
+    const file = path.join(temp, "invite"); writeFileSync(file, code, { mode: 0o600 });
+    const { prepareBus: _fixturePrepare, ...io } = f.io;
+    let joined = false;
+    const result = await runOnboarding(["--install-missing", "--claude", "--no-service", "--yes", `--bus-invite-file=${file}`], {
+      ...io, stdinTTY: false, stdoutTTY: false,
+      confirm: async () => { throw new Error("noninteractive invitation must not prompt"); },
+      applyBus: async (choice) => { assert.equal(choice.code, code); joined = true; },
+    });
+    assert.equal(result.status, "complete"); assert.equal(joined, true);
+    for (const text of [JSON.stringify(result), JSON.stringify(f.logs)]) {
+      assert.equal(text.includes(code), false); assert.equal(text.includes("private-file-value"), false);
+    }
+    assert.equal(readFileSync(file, "utf8"), code);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
 
 test("default command runner preserves literal executable paths and arguments", async () => {
   const temp = mkdtempSync(path.join(os.tmpdir(), "homi-onboard-argv-"));

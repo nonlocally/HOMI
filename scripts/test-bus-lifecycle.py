@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """A live socket is insufficient when its original Claude session disappears."""
 import json
+import base64
+import io
 import contextlib
 import os
 from pathlib import Path
@@ -15,6 +17,82 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import bus
+
+
+class EnrollmentInputTests(unittest.TestCase):
+    def setUp(self):
+        self.secret = "private-fixture-invitation"
+        self.code = "commbus1." + base64.urlsafe_b64encode(json.dumps({
+            "url": "https://hub.example", "invite": self.secret}).encode()).decode().rstrip("=")
+
+    def test_stdin_invitation_uses_existing_redemption_and_never_returns_token(self):
+        args = bus.parser().parse_args(["connect", "--invite-stdin", "--device", "test-device"])
+        with mock.patch.object(bus.sys, "stdin", io.StringIO(self.code + "\n")), \
+                mock.patch.object(bus, "config", return_value={"connections": {}}), \
+                mock.patch.object(bus, "device_metadata", return_value={}), \
+                mock.patch.object(bus, "request", return_value={"ok": True, "token": "issued-secret", "principal": "device-1", "buses": ["general"], "user": "owner"}) as request, \
+                mock.patch.object(bus, "save_connection") as save:
+            result = bus.run(args)
+        request.assert_called_once_with({"url": "https://hub.example"}, "redeem", invite=self.secret, device="test-device", device_metadata={})
+        self.assertEqual(save.call_args.args[0]["token"], "issued-secret")
+        self.assertEqual(result["user"], "owner")
+        self.assertNotIn("issued-secret", json.dumps(result))
+        self.assertNotIn(self.secret, json.dumps(result))
+
+    def test_stdin_rejects_missing_oversized_or_conflicting_code_before_any_state(self):
+        for argv, value in [(["connect"], ""), (["connect", "--invite-stdin"], ""),
+                            (["connect", "--invite-stdin"], "x" * 8194),
+                            (["connect", self.code, "--invite-stdin"], self.code)]:
+            with self.subTest(argv=argv[:2]), mock.patch.object(bus.sys, "stdin", io.StringIO(value)), \
+                    mock.patch.object(bus, "config") as config, mock.patch.object(bus, "request") as request:
+                with self.assertRaises(bus.BusError) as error:
+                    bus.run(bus.parser().parse_args(argv))
+                self.assertNotIn(self.secret, str(error.exception))
+                self.assertNotIn(self.code, str(error.exception))
+                config.assert_not_called()
+                request.assert_not_called()
+
+    def test_legacy_invitation_argument_remains_supported_without_reading_stdin(self):
+        args = bus.parser().parse_args(["connect", self.code])
+        stdin = mock.Mock()
+        with mock.patch.object(bus.sys, "stdin", stdin), \
+                mock.patch.object(bus, "config", return_value={"connections": {}}), \
+                mock.patch.object(bus, "device_metadata", return_value={"hostname": "fixture"}), \
+                mock.patch.object(bus, "request", return_value={"ok": True, "token": "issued", "principal": "p", "buses": ["general"]}), \
+                mock.patch.object(bus, "save_connection"):
+            self.assertTrue(bus.run(args)["ok"])
+        stdin.read.assert_not_called()
+
+    def test_local_selection_without_start_preserves_connections_and_registrations(self):
+        for has_local in [False, True]:
+            with self.subTest(has_local=has_local), tempfile.TemporaryDirectory(prefix="bus-select-", dir="/tmp") as directory:
+                root = Path(directory)
+                registrations = root / "registrations.json"
+                registrations.write_text('{"existing":"adapter survives"}')
+                remote = {"url": "https://hub.example", "token": "saved-secret", "principal": "device-1"}
+                cfg = {"connections": {remote["url"]: remote}, "default": remote["url"]}
+                if has_local:
+                    cfg["connections"]["http://127.0.0.1:7777"] = {"url": "http://127.0.0.1:7777", "token": "local-secret", "local": True}
+                before = json.loads(json.dumps(cfg["connections"]))
+                with mock.patch.object(bus, "state_dir", return_value=root), mock.patch.object(bus, "config", return_value=cfg), \
+                        mock.patch.object(bus, "locked", return_value=contextlib.nullcontext()), \
+                        mock.patch.object(bus, "local_connection") as local, mock.patch.object(bus, "spawn_daemon") as spawn, \
+                        mock.patch.object(bus, "start_worker") as worker, mock.patch.object(bus, "stop_services") as stop, \
+                        mock.patch.object(bus, "request") as request:
+                    result = bus.run(bus.parser().parse_args(["use", "local", "--no-start"]))
+                self.assertFalse(result["started"])
+                saved = json.loads((root / "client.json").read_text())
+                self.assertEqual(saved["connections"], before)
+                self.assertEqual(saved["default"], "http://127.0.0.1:7777" if has_local else None)
+                self.assertEqual(registrations.read_text(), '{"existing":"adapter survives"}')
+                for call in [local, spawn, worker, stop, request]:
+                    call.assert_not_called()
+
+    def test_no_start_does_not_weaken_remote_selection_rules(self):
+        with mock.patch.object(bus, "config") as config:
+            with self.assertRaisesRegex(bus.BusError, "only.*local"):
+                bus.run(bus.parser().parse_args(["use", "https://not-enrolled.example", "--no-start"]))
+        config.assert_not_called()
 
 
 class LifecycleTests(unittest.TestCase):

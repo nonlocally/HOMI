@@ -5,7 +5,9 @@ import { accessSync, constants, existsSync, mkdtempSync, readFileSync, readdirSy
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { Writable } from "node:stream";
 import { pkgDir } from "./paths.mjs";
+import { applyBusChoice, busOrigin, busSummary, inspectBus, invitationOrigin, readPrivateInvitation } from "./bus-setup.mjs";
 
 export const INSTALLERS = Object.freeze({
   brew: "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
@@ -15,24 +17,34 @@ export const INSTALLERS = Object.freeze({
 const NEW_FLAGS = ["--guided", "--install-missing", "--terminal", "--mesh", "--ghostty", "--login-claude", "--login-codex"];
 const SERVICE_ENV = ["PATH", "HOMI_SOCK_DIR", "HOMI_SESSIONS_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOMI_TMUX_SOCKET"];
 export function shouldGuide(argv, { stdinTTY = process.stdin.isTTY, stdoutTTY = process.stdout.isTTY } = {}) {
-  return (argv.length === 0 && !!stdinTTY && !!stdoutTTY) || argv.some((a) => NEW_FLAGS.includes(a));
+  return (argv.length === 0 && !!stdinTTY && !!stdoutTTY) || argv.some((a) => NEW_FLAGS.includes(a) || a.startsWith("--bus=") || a.startsWith("--bus-invite-file="));
 }
 
 export function parseOnboardingArgs(argv) {
   const o = { guided: false, installMissing: false, claude: false, codex: false, noClients: false,
     terminal: false, mesh: false, ghostty: false, service: false, noService: false,
-    yes: false, dryRun: false, loginClaude: false, loginCodex: false, setupArgs: [] };
+    yes: false, dryRun: false, loginClaude: false, loginCodex: false, bus: null, busInviteFile: null, setupArgs: [] };
   const flags = { "--guided": "guided", "--install-missing": "installMissing", "--claude": "claude",
     "--codex": "codex", "--no-clients": "noClients", "--terminal": "terminal", "--mesh": "mesh",
     "--ghostty": "ghostty", "--service": "service", "--no-service": "noService", "--yes": "yes",
     "-y": "yes", "--dry-run": "dryRun", "--login-claude": "loginClaude", "--login-codex": "loginCodex" };
   for (const a of argv) {
     if (flags[a]) o[flags[a]] = true;
+    else if (a.startsWith("--bus=")) {
+      if (o.bus !== null) throw new Error("Choose --bus only once");
+      o.bus = a.slice(6) === "local" ? "local" : busOrigin(a.slice(6));
+    }
+    else if (a.startsWith("--bus-invite-file=")) {
+      if (o.busInviteFile !== null) throw new Error("Choose an invitation file only once");
+      o.busInviteFile = a.slice(18);
+      if (!path.isAbsolute(o.busInviteFile)) throw new Error("The invitation file must use an absolute path");
+    }
     else if (a.startsWith("--service-inherit=") && SERVICE_ENV.includes(a.slice(18))) o.setupArgs.push(a);
     else throw new Error(`unknown guided setup flag: ${a}`);
   }
   if (o.noClients && (o.claude || o.codex)) throw new Error("--no-clients cannot be combined with --claude or --codex");
   if (o.service && o.noService) throw new Error("--service and --no-service cannot be combined");
+  if (o.bus !== null && o.busInviteFile !== null) throw new Error("Choose --bus or --bus-invite-file, not both");
   if (o.ghostty) o.terminal = true;
   if ((o.loginClaude && !o.claude) || (o.loginCodex && !o.codex))
     throw new Error("Select --claude or --codex explicitly before requesting its login");
@@ -177,24 +189,33 @@ async function installScript(step, options, runner = runOnboardingCommand) {
 
 function promptSession() {
   let closed = false, active = null;
+  const ask = async (question, secret = false) => {
+    if (closed || process.stdin.readableEnded) { closed = true; return undefined; }
+    // readline owns raw mode; its output is muted for secrets, including pasted
+    // characters and cursor redraws. The prompt itself contains no invitation.
+    const output = secret ? new Writable({ write(_chunk, _encoding, done) { done(); } }) : process.stdout;
+    const rl = createInterface({ input: process.stdin, output, terminal: secret || !!process.stdin.isTTY });
+    if (secret) process.stdout.write(question + " ");
+    active = rl;
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true; rl.off("close", cancel); rl.off("SIGINT", interrupt);
+        rl.close(); active = null;
+        if (secret) { process.stdout.write("\n"); output.end(); }
+        resolve(value);
+      };
+      const cancel = () => { closed = true; done(undefined); };
+      const interrupt = () => { closed = true; done(undefined); };
+      rl.once("close", cancel); rl.once("SIGINT", interrupt);
+      rl.question(secret ? "" : question + " ", (answer) => done(answer.trim()));
+    });
+  };
   return {
-    async confirm(question) {
-      if (closed || process.stdin.readableEnded) { closed = true; return false; }
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
-      active = rl;
-      return new Promise((resolve) => {
-        let settled = false;
-        const done = (value) => {
-          if (settled) return;
-          settled = true; rl.off("close", cancel); rl.off("SIGINT", interrupt);
-          rl.close(); active = null; resolve(value);
-        };
-        const cancel = () => { closed = true; done(false); };
-        const interrupt = () => { closed = true; done(false); };
-        rl.once("close", cancel); rl.once("SIGINT", interrupt);
-        rl.question(question + " [y/N] ", (answer) => done(/^(y|yes)$/i.test(answer.trim())));
-      });
-    },
+    confirm: async (question) => /^(y|yes)$/i.test(await ask(question + " [y/N]") || ""),
+    ask: (question) => ask(question),
+    secret: (question) => ask(question, true),
     get closed() { return closed; },
     close() { active?.close(); },
   };
@@ -209,6 +230,9 @@ export async function executeOnboarding(plan, io) {
   if (plan.profileArgs.length) log(`  homi profile preview/install ${plan.profileArgs.join(" ")} (managed shell/tmux/Ghostty configuration; no live reload)`);
   if (plan.options.loginClaude) log("  Claude login after setup, only if not already signed in (credentials handled by Claude)");
   if (plan.options.loginCodex) log("  Codex login after setup, only if not already signed in (credentials handled by Codex)");
+  if (plan.options.bus) log(plan.options.bus === "local" ? "  Select local bus use; registration starts its broker later." : `  Select the existing enrollment at ${plan.options.bus}.`);
+  else if (plan.options.busInviteFile || plan.options.busInvitePrompt) log("  Join the hub in your private invitation (invitation contents are never printed).");
+  else log("  Keep the current bus selection; no device enrollment or agent registration.");
   log("Packages installed by your package manager or provider installer remain yours; HOMI uninstall does not remove them.");
   for (const reason of plan.blocked) log(`  unavailable: ${reason}`);
   if (plan.options.dryRun) {
@@ -220,6 +244,12 @@ export async function executeOnboarding(plan, io) {
     throw new Error("Choose --claude, --codex or --no-clients explicitly for guided/automated setup.");
   if (!stdinTTY && !plan.options.yes) throw new Error("Noninteractive guided setup requires --yes after reviewing --dry-run.");
   if ((plan.options.loginClaude || plan.options.loginCodex) && !stdinTTY) throw new Error("Provider login requires an interactive terminal; run the provider's own login separately.");
+  let busChoice;
+  if (plan.options.bus || plan.options.busInviteFile || plan.options.busInvitePrompt) {
+    busChoice = await io.prepareBus(plan.options);
+    if (!busChoice) return { status: "cancelled", plan };
+    log(`  Bus choice: ${busChoice.description}`);
+  }
   // Preview the exact managed profile changes before consent, when Python exists.
   const python = plan.requirements.find((r) => r.id === "python3");
   const preview = async () => {
@@ -251,6 +281,15 @@ export async function executeOnboarding(plan, io) {
     try { await io.profile(["install", ...plan.profileArgs]); }
     catch (error) { throw new Error(`HOMI core setup completed, but profile installation failed: ${error.message}. Core installation and packages are retained; reconcile the profile conflict and rerun.`); }
   }
+  if (busChoice) {
+    try {
+      await busChoice.apply();
+      log(plan.options.bus === "local" ? "Local bus selected. Ask your agent to register when needed; no bus service was started." : "Bus selection completed. Open your agent session and ask it to register on the intended bus.");
+    } catch {
+      await io.doctor();
+      throw new Error("HOMI core setup completed, but optional bus setup did not complete. The installation is retained. Inspect homi bus status --no-start --json, then retry setup with the intended existing hub or a fresh private invitation. No agent registration is claimed.");
+    }
+  }
   await io.doctor();
   for (const provider of ["claude", "codex"]) {
     const key = provider === "claude" ? "loginClaude" : "loginCodex";
@@ -271,6 +310,10 @@ export async function runOnboarding(argv, injected = {}) {
   if (options.guided) options.installMissing = true;
   const prompt = !options.dryRun && stdinTTY && !injected.confirm ? promptSession() : null;
   const confirm = injected.confirm || prompt?.confirm || (async () => false);
+  const ask = injected.ask || prompt?.ask || (async () => undefined);
+  const secret = injected.secret || prompt?.secret || (async () => undefined);
+  const busStatus = injected.busStatus || (() => inspectBus({ env: environment() }));
+  const applyBus = injected.applyBus || applyBusChoice;
   const probe = injected.probe || probeOnboarding;
   const profile = async (args) => {
     const python = (await probe()).tools.python3?.path;
@@ -309,6 +352,15 @@ export async function runOnboarding(argv, injected = {}) {
       if (options.claude && !options.loginClaude) options.loginClaude = await confirm("After setup, offer Claude's own login if not already signed in?");
       if (options.codex && !options.loginCodex) options.loginCodex = await confirm("After setup, offer Codex's own login if not already signed in?");
       if (prompt?.closed) return { status: "cancelled" };
+      if (!options.bus && !options.busInviteFile) {
+        (injected.log || console.log)(`Bus: ${busSummary(await busStatus())}`);
+        if (await confirm("Choose a local or shared bus now? Keeping the current selection is fine.")) {
+          const choice = await ask("Enter local, invitation, or an already-connected HTTPS address (empty keeps the current selection):");
+          if (choice === "invitation") options.busInvitePrompt = true;
+          else if (choice) options.bus = choice === "local" ? "local" : busOrigin(choice);
+        }
+        if (prompt?.closed) return { status: "cancelled" };
+      }
     }
     const io = { log: console.log, stdinTTY, confirm, probe, run: runOnboardingCommand,
       setup: async (args) => {
@@ -317,6 +369,15 @@ export async function runOnboarding(argv, injected = {}) {
         await withSelectedPath(async () => (await import("./setup.mjs")).runSetup(args));
       },
       profile,
+      prepareBus: async (selected) => {
+        if (selected.bus) return { description: selected.bus === "local" ? "local, without starting a service" : `existing enrollment at ${selected.bus}`,
+          apply: () => applyBus(selected.bus === "local" ? { mode: "local" } : { mode: "existing", hub: selected.bus }, { env: environment() }) };
+        const code = selected.busInviteFile ? readPrivateInvitation(selected.busInviteFile) : await secret("Paste the invitation (hidden; empty cancels):");
+        if (!code) return null;
+        const hub = invitationOrigin(code);
+        if (stdinTTY && !await confirm(`Enroll this installation at ${hub} using this invitation?`)) return null;
+        return { description: `invited enrollment at ${hub}`, apply: () => applyBus({ mode: "invite", code }, { env: environment() }) };
+      },
       doctor: async () => { await withSelectedPath(async () => (await import("./setup.mjs")).runDoctor()); },
       installScript: (step, options) => installScript(step, options, injected.run || runOnboardingCommand),
       inspectLogin: async (provider) => {

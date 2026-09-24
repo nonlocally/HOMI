@@ -962,7 +962,8 @@ def parser():
     invite.add_argument("--ttl", type=int, default=900)
     invite.add_argument("--user", help="owner-assigned account for the invited device")
     connect = commands.add_parser("connect")
-    connect.add_argument("code")
+    connect.add_argument("code", nargs="?")
+    connect.add_argument("--invite-stdin", action="store_true", help="read one private invitation from stdin instead of command arguments")
     connect.add_argument("--device", help="device display name (defaults to this machine's detected name)")
     device = commands.add_parser("device", help="refresh this installation's device metadata")
     device.add_argument("--name", help="change this device's display name; stable identity is preserved")
@@ -974,6 +975,7 @@ def parser():
     dash.add_argument("--open", action="store_true")
     use = commands.add_parser("use")
     use.add_argument("hub", help="local or a previously connected HTTPS origin")
+    use.add_argument("--no-start", action="store_true", help="select local operation without starting a broker or worker")
     rehome = commands.add_parser("rehome", help="move a connected hub to a new public origin of the same broker, keeping this device's credential")
     rehome.add_argument("old", help="the connected HTTPS origin, e.g. https://bus.communicate.sh")
     rehome.add_argument("new", help="the broker's new public origin, e.g. https://bus.nonlocally.org")
@@ -996,6 +998,15 @@ def run(args):
     if cmd == "register":
         return register(args)
     if cmd == "connect":
+        if getattr(args, "invite_stdin", False):
+            if args.code is not None:
+                raise BusError("choose an invitation argument or --invite-stdin, not both")
+            raw_input = sys.stdin.read(8194)
+            if len(raw_input.encode("utf-8")) > 8193:
+                raise BusError("invitation input exceeds 8192 bytes")
+            args.code = raw_input.strip()
+        if not isinstance(args.code, str):
+            raise BusError("provide an invitation or use --invite-stdin")
         if not args.code.startswith("commbus1.") or len(args.code) > 8192:
             raise BusError("expected a commbus1 invitation code")
         try:
@@ -1036,6 +1047,16 @@ def run(args):
     if cmd == "rehome":
         return rehome_connection(args.old, args.new)
     if cmd == "use":
+        if getattr(args, "no_start", False):
+            if args.hub != "local":
+                raise BusError("--no-start applies only to selecting local operation")
+            with locked("client"):
+                cfg = config()
+                local = next((conn for conn in cfg["connections"].values() if conn.get("local")), None)
+                cfg["default"] = local["url"] if local else None
+                write_json(state_dir() / "client.json", cfg)
+            return {"ok": True, "hub": local["url"] if local else "local", "started": False,
+                    "note": "Local operation selected. Registration starts the local broker when needed; existing remote adapters remain active."}
         if args.hub == "local":
             conn = local_connection()
         else:
