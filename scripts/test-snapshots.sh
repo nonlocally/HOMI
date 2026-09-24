@@ -95,7 +95,9 @@ exit 0
 EOF
 cat > "$FAKEBIN/tmux" <<'EOF'
 #!/usr/bin/env bash
-[ "$1" = info ] && exit 0
+# A detached server has sessions even when older tmux rejects `info` because
+# no client is attached. Unattended snapshots must not use that client probe.
+[ "$1" = list-sessions ] && exit 0
 exit 1
 EOF
 chmod +x "$FAKEBIN"/*

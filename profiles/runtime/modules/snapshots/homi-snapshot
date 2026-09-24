@@ -273,7 +273,7 @@ _archived_verified() { # <local_dir> <name>
 _take_snapshot() { # <name>  -> logs OK/SKIP/ERROR; returns 0 unless a hard error
   local name="$1"
   command -v tmux >/dev/null 2>&1 || { _logline SKIP  "tmux not on PATH";       return 0; }
-  tmux info        >/dev/null 2>&1 || { _logline SKIP  "no tmux server running"; return 0; }
+  tmux list-sessions >/dev/null 2>&1 || { _logline SKIP "no tmux server running"; return 0; }
   [[ -r "$FNS" ]]                  || { _logline ERROR "tmux helpers missing: $FNS"; return 1; }
 
   # Atomic lock (mkdir): a wake-from-sleep double-fire or overlapping manual run

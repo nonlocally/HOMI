@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -35,7 +36,10 @@ class Profiles(unittest.TestCase):
         self.profile = mod.Profile(self.home)
 
     def run_tool(self, *args, check=True, env=None):
-        return subprocess.run(args, env=env or self.env, text=True, capture_output=True, check=check, timeout=15)
+        result = subprocess.run(args, env=env or self.env, text=True, capture_output=True, timeout=15)
+        if check:
+            self.assertEqual(result.returncode, 0, f"{args!r}\n{result.stdout}\n{result.stderr}")
+        return result
 
     def test_preview_and_migration_are_read_only(self):
         self.assertTrue(self.profile.plan(["terminal"]))
@@ -298,10 +302,16 @@ class Profiles(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux unavailable")
     def test_isolated_tmux_profile_navigation_and_snapshots(self):
-        self.install()
+        self.install(["terminal", "mesh", "snapshots"])
         # Never uses the user's default server. Environment and socket are private.
         socket = str(Path(self.temp.name) / "tmux.sock")
         tm = [shutil.which("tmux"), "-S", socket]
+        # Reproduce older tmux's client-dependent `info` on newer hosts too;
+        # all real workspace operations still reach this dedicated server.
+        shim = self.home / ".local/bin/tmux"
+        shim.write_text("#!/bin/sh\n[ \"$1\" != info ] || exit 1\nexec "
+                        + shlex.quote(tm[0]) + ' "$@"\n')
+        shim.chmod(0o755)
         cfg = str(self.profile.config / "tmux.conf")
         clients = []
         try:
@@ -309,6 +319,8 @@ class Profiles(unittest.TestCase):
             self.run_tool(*tm, "source-file", cfg)
             pane = self.run_tool(*tm, "display-message", "-p", "-t", "fixture", "#{pane_id}").stdout.strip()
             env = dict(self.env, TMUX=socket + ",0,0", TMUX_PANE=pane)
+            self.assertEqual(self.run_tool(*tm, "list-clients").stdout, "")
+            self.assertNotEqual(self.run_tool(str(shim), "info", env=env, check=False).returncode, 0)
             wrapper = str(self.home / ".local/bin/homi-workstation")
             self.run_tool(wrapper, "tile", "new", env=env)
             self.assertEqual(len(self.run_tool(*tm, "list-panes", "-t", "fixture").stdout.splitlines()), 2)
@@ -317,6 +329,11 @@ class Profiles(unittest.TestCase):
             self.assertTrue((snapshot / "windows.tsv").exists())
             for path in [snapshot, *snapshot.rglob("*")]:
                 self.assertEqual(path.stat().st_mode & 0o077, 0, str(path))
+            self.run_tool(str(self.home / ".local/bin/homi-snapshot"), "run",
+                          "snap-2026-09-24-0300", env=env)
+            scheduled = snapshot.parent / "snap-2026-09-24-0300"
+            self.assertTrue((scheduled / "meta.tsv").is_file())
+            self.assertIn("fixture\t", (scheduled / "windows.tsv").read_text())
             result = self.run_tool(BASH, "--noprofile", "--norc", "-c",
                                    '. "$1"; umask 022; tss umask-check >/dev/null; umask',
                                    "test", str(self.profile.config / "active.sh"), env=env)
