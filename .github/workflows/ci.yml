@@ -94,3 +94,31 @@ jobs:
           name: homi-dashboard-qualification
           path: ${{ runner.temp }}/homi-ui-evidence
           if-no-files-found: warn
+
+  homebrew:
+    needs: core
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: homi-runtime-macOS-node20
+          path: ${{ runner.temp }}/homi-brew-artifact
+      - name: Qualify canonical Homebrew install and reinstall on the disposable runner
+        run: |
+          version="$(cat VERSION)"
+          archive="$RUNNER_TEMP/homi-brew-artifact/homi-$version.tar.gz"
+          sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          python3 scripts/render-homebrew-formula.py "$version" "$sha" "$RUNNER_TEMP/homi.rb"
+          python3 scripts/qualify-homebrew.py "$archive" "$RUNNER_TEMP/homi.rb" \
+            --work "$RUNNER_TEMP/homi-brew-evidence" --disposable-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: homi-homebrew-qualification
+          path: ${{ runner.temp }}/homi-brew-evidence
+          if-no-files-found: warn
