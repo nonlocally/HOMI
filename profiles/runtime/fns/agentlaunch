@@ -1,0 +1,104 @@
+# Adapted from Anu 80d3c86; see profiles/NOTICE.md.
+# Agent command registry: alias\tcommand\tdescription
+_al_registry() {
+  cat <<'EOF'
+cx	homi-agent cx	Claude (interactive permissions)
+cxx	homi-agent cxx	Claude (full auto)
+cxc	homi-agent cxc	Claude (configured contained execution)
+claude	homi-agent claude	Claude (default)
+c	homi-agent c	OpenCode
+cdx	homi-agent cdx	Codex
+cdxx	homi-agent cdxx	Codex (full auto)
+cdxxs	homi-agent cdxxs	Codex (workspace sandbox)
+pi	homi-agent pi	Pi
+EOF
+}
+
+# Format registry for fzf display: alias\tdescription
+_al_commands() {
+  _al_registry | while IFS=$'\t' read -r alias _cmd desc; do
+    printf '%s\t%s\n' "$alias" "$desc"
+  done
+}
+
+# Resolve alias to full command
+_al_resolve() {
+  local name="$1"
+  _al_registry | while IFS=$'\t' read -r alias cmd _desc; do
+    if [[ $alias == "$name" ]]; then
+      printf '%s' "$cmd"
+      return 0
+    fi
+  done
+}
+
+# Pick an agent via fzf, return the alias
+_al_pick() {
+  # In a tmux popup (display-popup keybinding) $TMUX_PANE is unset; plain fzf
+  # fills that popup — a nested fzf --tmux (== --popup) would fail.
+  local fzf_popup=(--tmux 50%,35%)
+  [[ -n $TMUX && -z $TMUX_PANE ]] && fzf_popup=()
+  _al_commands | fzf "${fzf_popup[@]}" \
+    --header "select agent to launch" \
+    --delimiter $'\t' \
+    --with-nth 1,2 \
+    --no-preview | cut -f1
+}
+
+# Track a pane in the @agent_panes window option
+_al_track_pane() {
+  local pane_id="$1"
+  local current
+  current=$(tmux show-options -wqv @agent_panes)
+  if [[ -z $current ]]; then
+    tmux set-option -w @agent_panes "$pane_id"
+  else
+    tmux set-option -w @agent_panes "${current},${pane_id}"
+  fi
+}
+
+# Launch agent in a new split pane
+# Usage: al [command_alias]
+al() {
+  [[ -z $TMUX ]] && { echo "al requires tmux."; return 1; }
+
+  local selected="$1"
+  if [[ -z $selected ]]; then
+    selected=$(_al_pick) || return 0
+    [[ -z $selected ]] && return 0
+  fi
+
+  local cmd
+  cmd=$(_al_resolve "$selected")
+  [[ -z $cmd ]] && { printf '\033[31mal: unknown command "%s"\033[0m\n' "$selected"; return 1; }
+
+  local pane_id
+  pane_id=$(tmux split-window -h -c "$(tmux display-message -p '#{pane_current_path}')" -P -F '#{pane_id}')
+  tmux send-keys -t "$pane_id" "$cmd" C-m
+  tmux select-layout tiled
+  _al_track_pane "$pane_id"
+
+  printf '\033[32mLaunched %s in pane %s\033[0m\n' "$selected" "$pane_id"
+}
+
+# Launch agent in a new window
+# Usage: alw [command_alias]
+alw() {
+  [[ -z $TMUX ]] && { echo "alw requires tmux."; return 1; }
+
+  local selected="$1"
+  if [[ -z $selected ]]; then
+    selected=$(_al_pick) || return 0
+    [[ -z $selected ]] && return 0
+  fi
+
+  local cmd
+  cmd=$(_al_resolve "$selected")
+  [[ -z $cmd ]] && { printf '\033[31malw: unknown command "%s"\033[0m\n' "$selected"; return 1; }
+
+  local pane_id
+  pane_id=$(tmux new-window -c "$(tmux display-message -p '#{pane_current_path}')" -n "$selected" -P -F '#{pane_id}')
+  tmux send-keys -t "$pane_id" "$cmd" C-m
+
+  printf '\033[32mLaunched %s in new window\033[0m\n' "$selected"
+}

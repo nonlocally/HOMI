@@ -1,0 +1,1373 @@
+# Adapted from Anu 80d3c86; see profiles/NOTICE.md.
+# ==============================================================================
+# Mesh: Tailscale device management
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+# Refresh cached tailscale status (respects TTL)
+_mesh_refresh() {
+  local cache_dir="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh"
+  local cache_file="$cache_dir/devices.json"
+  local meta_file="$cache_dir/devices.meta"
+  local max_age="${MESH_CACHE_TTL:-30}"
+
+  mkdir -p "$cache_dir"
+
+  if [[ -f "$meta_file" && -f "$cache_file" ]]; then
+    local age=$(( $(date +%s) - $(cat "$meta_file") ))
+    if (( age < max_age )); then
+      return 0
+    fi
+  fi
+
+  command -v tailscale >/dev/null 2>&1 || return 1
+  local pending; pending=$(mktemp "$cache_dir/.devices.XXXXXX") || return 1
+  if ! tailscale status --json > "$pending" 2>/dev/null || ! jq -e . "$pending" >/dev/null 2>&1; then
+    rm -f "$pending"; return 1
+  fi
+  mv "$pending" "$cache_file" || return 1
+  _mesh_probe_shared "$cache_file"
+  date +%s > "$meta_file"
+}
+
+# Probe shared-in peers and store the answer as their Online state.
+#
+# Tailscale's control plane does not forward presence across a node share. A
+# peer from another tailnet keeps whatever Online/LastSeen it had in the last
+# full netmap this node received, so it reads "offline" forever while a live
+# tunnel runs to it. Own-tailnet peers are pushed every change and are never
+# probed here: their flag is authoritative. For shared peers the only truth
+# available locally is to ask the node, so each one gets a single
+# `tailscale ping` (one disco packet, ~10ms when up), all in parallel, bounded
+# by MESH_PROBE_TIMEOUT (default 2s). An unreachable shared node therefore
+# costs one timeout per cache refresh, nothing more. MESH_PROBE_SHARED=0 turns
+# the probe off and leaves tailscale's raw flags in place.
+#
+# Probed peers are marked in the cache (AnuShared: true, AnuProbe: "<line>
+# (<utc time>)") so `mesh info` can show where the status came from.
+_mesh_probe_shared() {
+  local cache="$1"
+  [[ "${MESH_PROBE_SHARED:-1}" == "0" ]] && return 0
+  command -v tailscale >/dev/null 2>&1 || return 0
+
+  # A peer is shared in when its MagicDNS tailnet suffix differs from ours;
+  # without DNS names, fall back to the owning user id.
+  local peers
+  peers=$(jq -r '
+    def tailnet: (.DNSName // "") | sub("\\.$"; "") | split(".") | .[1:] | join(".");
+    (.Self | tailnet) as $mine | .Self.UserID as $me |
+    (.Peer // {}) | to_entries[] |
+    select(if $mine != "" and (.value | tailnet) != ""
+           then (.value | tailnet) != $mine
+           else .value.UserID != $me end) |
+    select((.value.TailscaleIPs // []) | length > 0) |
+    [.key, .value.TailscaleIPs[0]] | @tsv
+  ' "$cache" 2>/dev/null) || return 0
+  [[ -z "$peers" ]] && return 0
+
+  local keys=() ips=() key ip
+  while IFS=$'\t' read -r key ip; do
+    [[ -z "$key" || -z "$ip" ]] && continue
+    keys+=("$key"); ips+=("$ip")
+  done <<< "$peers"
+
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/mesh-probe.XXXXXX") || return 0
+  local timeout="${MESH_PROBE_TIMEOUT:-2s}"
+
+  # One ping per shared peer, in parallel. The subshell keeps job-control
+  # notices ("[1]+ Done") out of an interactive terminal.
+  (
+    local i
+    for i in "${!ips[@]}"; do
+      { tailscale ping -c 1 --timeout "$timeout" "${ips[$i]}" > "$tmp/$i.out" 2>&1 \
+          && : > "$tmp/$i.ok"; } &
+    done
+    wait
+  )
+
+  # Fold the results into {key: {ok, line}} and patch the cache in place.
+  local results i ok line
+  results=$(
+    for i in "${!keys[@]}"; do
+      ok=false; [[ -f "$tmp/$i.ok" ]] && ok=true
+      line=$(grep -m1 -E 'pong|no reply|timed out|no matching|error' "$tmp/$i.out" 2>/dev/null \
+               | sed -E 's/^[0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9:]{8} //')
+      jq -cn --arg k "${keys[$i]}" --argjson ok "$ok" --arg line "${line:-no reply}" \
+        '{($k): {ok: $ok, line: $line}}'
+    done | jq -cs 'add // {}'
+  )
+  rm -rf "$tmp"
+  [[ -z "$results" || "$results" == "{}" ]] && return 0
+
+  jq --argjson r "$results" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .Peer |= with_entries(
+      if $r[.key] then
+        .value.Online    = $r[.key].ok
+        | .value.AnuShared = true
+        | .value.AnuProbe  = ($r[.key].line + " (" + $at + ")")
+      else . end)
+  ' "$cache" > "$cache.tmp" 2>/dev/null && mv "$cache.tmp" "$cache" || rm -f "$cache.tmp"
+  return 0
+}
+
+# Parse device list from cache as TSV: name, os, status, ip, relay
+# Usage: _mesh_devices [filter]
+# Filters: all, ssh (anything that can run an sshd: macOS/linux/android), online,
+# compute (default: online + macOS/linux, the devices worth running agents on)
+_mesh_devices() {
+  local filter="${1:-compute}"
+  _mesh_refresh || return 1
+
+  local cache="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.json"
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
+
+  jq -r --arg filter "$filter" --arg self "$self_name" '
+    def ssh_os:     . == "macOS" or . == "linux" or . == "android";
+    def compute_os: . == "macOS" or . == "linux";
+
+    # Build device list: self first, then peers
+    [
+      (.Self | {
+        name: (.DNSName | split(".")[0]),
+        os: .OS,
+        online: true,
+        ip: .TailscaleIPs[0],
+        relay: "--",
+        is_self: true
+      })
+    ] + [
+      .Peer | to_entries[].value | {
+        name: (.DNSName | split(".")[0]),
+        os: .OS,
+        online: .Online,
+        ip: .TailscaleIPs[0],
+        relay: (if .Relay == "" then "--" else .Relay end),
+        is_self: false
+      }
+    ] |
+
+    # Apply filter
+    if $filter == "ssh" then
+      map(select(.os | ssh_os))
+    elif $filter == "online" then
+      map(select(.online))
+    elif $filter == "compute" then
+      map(select(.online and (.os | compute_os)))
+    else . end |
+
+    # Sort: self first, then by name
+    sort_by(if .is_self then "!" else .name end) |
+
+    # Output TSV
+    .[] | [
+      .name,
+      .os,
+      (if .online then "online" else "offline" end),
+      .ip,
+      .relay,
+      (if .is_self then "self" else "" end)
+    ] | @tsv
+  ' "$cache"
+}
+
+# Parse manual SSH hosts from hosts.json as TSV (same format as _mesh_devices)
+_mesh_manual_hosts() {
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  [[ -f "$hosts_file" ]] || return 0
+
+  jq -r '.[] | [
+    .name,
+    (.os // "linux"),
+    "manual",
+    (.user + "@" + .host),
+    (if .port != 22 and .port != null then ":" + (.port | tostring) else "--" end),
+    ""
+  ] | @tsv' "$hosts_file"
+}
+
+# Unified device list: Tailscale + manual hosts
+# Excludes self by default (pass --include-self to keep)
+_mesh_all_devices() {
+  local filter="${1:-compute}" include_self=false
+  [[ "$2" == "--include-self" ]] && include_self=true
+
+  if $include_self; then
+    _mesh_devices "$filter" 2>/dev/null
+  else
+    _mesh_devices "$filter" 2>/dev/null | grep -v $'\tself$'
+  fi
+  _mesh_manual_hosts
+}
+
+# Preview info for a manual host
+_mesh_manual_info() {
+  local name="$1"
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  [[ -f "$hosts_file" ]] || { echo "No hosts file."; return 1; }
+
+  jq -r --arg name "$name" '
+    .[] | select(.name == $name) |
+    "\n  HOST INFO\n  ──────────────────────────────" +
+    "\n  Name:      " + .name +
+    "\n  Host:      " + .host +
+    "\n  User:      " + .user +
+    "\n  Port:      " + ((.port // 22) | tostring) +
+    "\n  OS:        " + (.os // "unknown") +
+    "\n  Type:      manual (SSH)" +
+    (if .description then "\n  Desc:      " + .description else "" end) +
+    "\n"
+  ' "$hosts_file"
+}
+
+# Preview dispatcher: routes to the right info function based on device type
+_mesh_preview() {
+  local name="$1" status="$2"
+  if [[ "$status" == "manual" ]]; then
+    _mesh_manual_info "$name"
+  else
+    _mesh_info "$name"
+  fi
+}
+
+# Check if a device name is a manual host
+_mesh_is_manual() {
+  local name="$1"
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  [[ -f "$hosts_file" ]] && jq -e --arg n "$name" '.[] | select(.name == $n)' "$hosts_file" >/dev/null 2>&1
+}
+
+# Check if a device name is the local machine
+_mesh_is_self() {
+  local device="$1"
+  _mesh_refresh || return 1
+  local cache="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.json"
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
+  [[ "$device" == "$self_name" ]]
+}
+
+# Source path for FZF subshells (preview/execute commands run in separate processes)
+_mesh_src() {
+  echo "${HOMI_PROFILE_RUNTIME}/fns/mesh"
+}
+
+# FZF single device picker
+_mesh_pick() {
+  local filter="${1:-compute}"
+  local src
+  src=$(_mesh_src)
+  local pick
+  # In a tmux popup (display-popup keybinding) $TMUX_PANE is unset; plain fzf
+  # fills that popup — a nested fzf --tmux (== --popup) would fail.
+  local fzf_popup=(--tmux 70%,50%)
+  [[ -n $TMUX && -z $TMUX_PANE ]] && fzf_popup=()
+  pick=$(_mesh_devices "$filter" | \
+    fzf "${fzf_popup[@]}" \
+      --prompt "device> " \
+      --header "select a device" \
+      --delimiter $'\t' \
+      --with-nth 1,2,3,4 \
+      --preview "source '$src' && _mesh_info {1}" \
+      --preview-window "right:45%") || return 1
+  echo "${pick%%$'\t'*}"
+}
+
+# FZF multi-select device picker
+_mesh_picks() {
+  local filter="${1:-compute}"
+  local src
+  src=$(_mesh_src)
+  # In a tmux popup (display-popup keybinding) $TMUX_PANE is unset; plain fzf
+  # fills that popup — a nested fzf --tmux (== --popup) would fail.
+  local fzf_popup=(--tmux 70%,50%)
+  [[ -n $TMUX && -z $TMUX_PANE ]] && fzf_popup=()
+  _mesh_devices "$filter" | \
+    fzf "${fzf_popup[@]}" \
+      --prompt "devices> " \
+      --header "tab: multi-select  enter: confirm" \
+      --multi \
+      --delimiter $'\t' \
+      --with-nth 1,2,3,4 \
+      --preview "source '$src' && _mesh_info {1}" \
+      --preview-window "right:45%" | \
+    while IFS=$'\t' read -r name _; do
+      echo "$name"
+    done
+}
+
+# Probe a device for system info (cached with TTL)
+# Usage: _mesh_probe <device>
+_mesh_probe() {
+  local device="$1"
+  [[ -z "$device" ]] && return 1
+
+  local profile_dir="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/profiles"
+  local profile="$profile_dir/$device.json"
+  local max_age="${MESH_PROBE_TTL:-300}"
+
+  mkdir -p "$profile_dir"
+
+  # Check cache freshness
+  if [[ -f "$profile" ]]; then
+    local mtime
+    mtime=$(stat -f %m "$profile" 2>/dev/null || stat -c %Y "$profile" 2>/dev/null)
+    local age=$(( $(date +%s) - mtime ))
+    if (( age < max_age )); then
+      cat "$profile"
+      return 0
+    fi
+  fi
+
+  # Portable probe script (works on macOS + Linux)
+  local probe_script='
+{
+  echo "{"
+  printf "\"hostname\": \"%s\"," "$(hostname -s 2>/dev/null || hostname)"
+
+  # OS version
+  if [ "$(uname)" = "Darwin" ]; then
+    printf "\"os\": \"macOS %s\"," "$(sw_vers -productVersion 2>/dev/null)"
+  elif [ -f /etc/os-release ]; then
+    printf "\"os\": \"%s\"," "$(. /etc/os-release && echo "$PRETTY_NAME")"
+  else
+    printf "\"os\": \"%s\"," "$(uname -sr)"
+  fi
+
+  # Arch
+  printf "\"arch\": \"%s\"," "$(uname -m)"
+
+  # CPUs
+  if [ "$(uname)" = "Darwin" ]; then
+    printf "\"cpus\": %d," "$(sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+  else
+    printf "\"cpus\": %d," "$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)"
+  fi
+
+  # Load averages
+  if [ "$(uname)" = "Darwin" ]; then
+    set -- $(sysctl -n vm.loadavg 2>/dev/null | tr -d "{}")
+    printf "\"load\": [%s, %s, %s]," "${1:-0}" "${2:-0}" "${3:-0}"
+  elif [ -f /proc/loadavg ]; then
+    set -- $(cat /proc/loadavg)
+    printf "\"load\": [%s, %s, %s]," "$1" "$2" "$3"
+  else
+    printf "\"load\": [0, 0, 0],"
+  fi
+
+  # Memory (MB)
+  if [ "$(uname)" = "Darwin" ]; then
+    total_mb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1048576 ))
+    ps=$(vm_stat 2>/dev/null | awk "/page size/{gsub(/[^0-9]/,\"\"); print}")
+    active=$(vm_stat 2>/dev/null | awk "/Pages active/{gsub(/[^0-9]/,\"\"); print}")
+    wired=$(vm_stat 2>/dev/null | awk "/Pages wired/{gsub(/[^0-9]/,\"\"); print}")
+    used_mb=$(( (${active:-0} + ${wired:-0}) * ${ps:-4096} / 1048576 ))
+    printf "\"mem_total_mb\": %d, \"mem_used_mb\": %d," "$total_mb" "$used_mb"
+  elif command -v free >/dev/null 2>&1; then
+    set -- $(free -m 2>/dev/null | awk "/^Mem:/{print \$2, \$3}")
+    printf "\"mem_total_mb\": %d, \"mem_used_mb\": %d," "${1:-0}" "${2:-0}"
+  else
+    printf "\"mem_total_mb\": 0, \"mem_used_mb\": 0,"
+  fi
+
+  # Disk (MB, root filesystem)
+  disk_total=$(df -m / 2>/dev/null | awk "NR==2{print \$2}")
+  disk_used=$(df -m / 2>/dev/null | awk "NR==2{print \$3}")
+  printf "\"disk_total_mb\": %d, \"disk_used_mb\": %d," "${disk_total:-0}" "${disk_used:-0}"
+
+  # Uptime (seconds)
+  if [ "$(uname)" = "Darwin" ]; then
+    boot=$(sysctl -n kern.boottime 2>/dev/null | awk "{print \$4}" | tr -d ",")
+    printf "\"uptime_secs\": %d," "$(( $(date +%s) - ${boot:-$(date +%s)} ))"
+  elif [ -f /proc/uptime ]; then
+    printf "\"uptime_secs\": %d," "$(awk "{print int(\$1)}" /proc/uptime)"
+  else
+    printf "\"uptime_secs\": 0,"
+  fi
+
+  # Tmux sessions
+  sessions=$(tmux list-sessions 2>/dev/null | wc -l | tr -d " ")
+  printf "\"tmux_sessions\": %d," "${sessions:-0}"
+
+  # AI tools available
+  tools=""
+  command -v claude >/dev/null 2>&1 && tools="${tools}claude,"
+  command -v opencode >/dev/null 2>&1 && tools="${tools}opencode,"
+  command -v codex >/dev/null 2>&1 && tools="${tools}codex,"
+  printf "\"ai_tools\": \"%s\"," "${tools%,}"
+
+  printf "\"probe_time\": \"%s\"" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "}"
+}
+'
+
+  local result
+  if _mesh_is_self "$device"; then
+    result=$(bash -c "$probe_script" 2>/dev/null)
+  else
+    local ip; ip=$(_mesh_device_ip "$device")
+    local suser; suser=$(_mesh_device_user "$device")
+    local -a sopts=(); read -ra sopts <<< "$(_mesh_ssh_opts "$device")"
+    result=$(ssh "${sopts[@]}" "$suser@$ip" -- bash -c "$probe_script" 2>/dev/null)
+  fi
+
+  if [[ -n "$result" ]] && echo "$result" | jq . >/dev/null 2>&1; then
+    echo "$result" > "$profile"
+    echo "$result"
+  else
+    echo '{"error": "probe failed"}' > "$profile"
+    return 1
+  fi
+}
+
+# Render a bar chart: _mesh_bar <used> <total> <width>
+_mesh_bar() {
+  local used="$1" total="$2" width="${3:-12}"
+  (( total == 0 )) && { printf "[%${width}s]" ""; return; }
+  local pct=$(( used * 100 / total ))
+  local filled=$(( used * width / total ))
+  (( filled > width )) && filled=$width
+  local empty=$(( width - filled ))
+
+  local bar=""
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=0; i<empty; i++)); do bar+="░"; done
+  printf "[%s] %d%%" "$bar" "$pct"
+}
+
+# Format uptime seconds as human readable
+_mesh_uptime_fmt() {
+  local secs="$1"
+  local days=$(( secs / 86400 ))
+  local hours=$(( (secs % 86400) / 3600 ))
+  local mins=$(( (secs % 3600) / 60 ))
+  if (( days > 0 )); then
+    printf "%dd %dh %dm" "$days" "$hours" "$mins"
+  elif (( hours > 0 )); then
+    printf "%dh %dm" "$hours" "$mins"
+  else
+    printf "%dm" "$mins"
+  fi
+}
+
+# Display formatted probe data for a device
+# Usage: _mesh_probe_display <device>
+_mesh_probe_display() {
+  local device="$1"
+  [[ -z "$device" ]] && return 1
+
+  local profile="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/profiles/$device.json"
+
+  # Run probe if no cached data
+  if [[ ! -f "$profile" ]]; then
+    _mesh_probe "$device" >/dev/null 2>&1
+  fi
+
+  if [[ ! -f "$profile" ]] || jq -e '.error' "$profile" >/dev/null 2>&1; then
+    echo "  $device"
+    echo "  ──────────────────────────────"
+    echo "  Probe failed or no data available."
+    echo "  Run 'mesh probe $device' to retry."
+    return 1
+  fi
+
+  local bold='\033[1m'
+  local cyan='\033[36m'
+  local dim='\033[2m'
+  local reset='\033[0m'
+
+  local os arch cpus uptime_secs mem_total mem_used disk_total disk_used tmux_sess ai_tools
+  local l1 l5 l15
+  os=$(jq -r '.os' "$profile")
+  arch=$(jq -r '.arch' "$profile")
+  cpus=$(jq -r '.cpus' "$profile")
+  l1=$(jq -r '.load[0]' "$profile")
+  l5=$(jq -r '.load[1]' "$profile")
+  l15=$(jq -r '.load[2]' "$profile")
+  mem_total=$(jq -r '.mem_total_mb' "$profile")
+  mem_used=$(jq -r '.mem_used_mb' "$profile")
+  disk_total=$(jq -r '.disk_total_mb' "$profile")
+  disk_used=$(jq -r '.disk_used_mb' "$profile")
+  uptime_secs=$(jq -r '.uptime_secs' "$profile")
+  tmux_sess=$(jq -r '.tmux_sessions' "$profile")
+  ai_tools=$(jq -r '.ai_tools' "$profile")
+
+  local mem_total_g=$(( mem_total / 1024 ))
+  local mem_used_g=$(( mem_used / 1024 ))
+  local disk_total_g=$(( disk_total / 1024 ))
+  local disk_used_g=$(( disk_used / 1024 ))
+
+  local is_self_tag=""
+  _mesh_is_self "$device" && is_self_tag=" (this machine)"
+
+  printf "\n  ${bold}${cyan}%s${reset}%s\n" "$device" "$is_self_tag"
+  echo "  ──────────────────────────────"
+  printf "  OS:      %-18s arch: %s\n" "$os" "$arch"
+  printf "  CPUs:    %-18s Load: %s %s %s\n" "$cpus" "$l1" "$l5" "$l15"
+  printf "  Memory:  %dG / %dG  %s\n" "$mem_used_g" "$mem_total_g" "$(_mesh_bar "$mem_used" "$mem_total")"
+  printf "  Disk:    %dG / %dG  %s\n" "$disk_used_g" "$disk_total_g" "$(_mesh_bar "$disk_used" "$disk_total")"
+  printf "  Uptime:  %s\n" "$(_mesh_uptime_fmt "$uptime_secs")"
+  if (( tmux_sess >= 0 )); then
+    printf "  Tmux:    %d session(s)\n" "$tmux_sess"
+  fi
+  if [[ -n "$ai_tools" && "$ai_tools" != "null" ]]; then
+    printf "  AI:      %s\n" "$ai_tools"
+  fi
+  local probe_time
+  probe_time=$(jq -r '.probe_time' "$profile")
+  printf "  ${dim}probed: %s${reset}\n" "$probe_time"
+  echo ""
+}
+
+# Show device info (used as FZF preview and by mesh info)
+_mesh_info() {
+  local device="$1"
+  _mesh_refresh 2>/dev/null
+  local cache="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.json"
+  [[ ! -f "$cache" ]] && { echo "No cache data."; return 1; }
+
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
+
+  if [[ "$device" == "$self_name" ]]; then
+    jq -r --arg name "$device" '
+      .Self | "
+  DEVICE INFO
+  ──────────────────────────────
+  Name:      " + (.DNSName | split(".")[0]) + " (this machine)
+  Hostname:  " + .HostName + "
+  OS:        " + .OS + "
+  IPs:       " + (.TailscaleIPs | join(", ")) + "
+  DNS:       " + .DNSName + "
+  Status:    online
+  Created:   " + .Created + "
+  Key exp:   " + .KeyExpiry + "
+"' "$cache"
+  else
+    jq -r --arg name "$device" '
+      [.Peer | to_entries[].value] |
+      map(select((.DNSName | split(".")[0]) == $name)) |
+      .[0] // empty |
+      "
+  DEVICE INFO
+  ──────────────────────────────
+  Name:      " + (.DNSName | split(".")[0]) + "
+  Hostname:  " + .HostName + "
+  OS:        " + .OS + "
+  IPs:       " + (.TailscaleIPs | join(", ")) + "
+  DNS:       " + .DNSName + "
+  Status:    " + (if .Online then "online" else "offline (last: " + .LastSeen + ")" end) + "
+" + (if .AnuShared then "  Shared:    yes, presence probed: " + (.AnuProbe // "pending") + "\n" else "" end) + "  Relay:     " + (if .Relay == "" then "direct" else .Relay end) + "
+  Traffic:   rx " + ((.RxBytes // 0) | tostring) + " / tx " + ((.TxBytes // 0) | tostring) + " bytes
+  Created:   " + .Created + "
+  Key exp:   " + .KeyExpiry + "
+"' "$cache"
+  fi
+
+  local port; port=$(_mesh_device_port "$device")
+  [[ -n "$port" ]] && echo "  SSH port:  $port (mesh/users.json override)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# User-facing commands
+# ------------------------------------------------------------------------------
+
+# Main entry point with subcommand routing
+mesh() {
+  local subcmd="${1:-hub}"
+  shift 2>/dev/null
+
+  case "$subcmd" in
+    hub|"")         _mesh_hub "$@" ;;
+    status|st)      _mesh_status "$@" ;;
+    ssh)            _mesh_connect "$@" ;;
+    vnc)            _mesh_vnc_connect "$@" ;;
+    run)            _mesh_run "$@" ;;
+    ping)           _mesh_ping "$@" ;;
+    info)           _mesh_info "$@" ;;
+    probe)          _mesh_probe "$@" ;;
+    detail)         _mesh_detail "$@" ;;
+    monitor|mon)    _mesh_monitor "$@" ;;
+    deploy)         _mesh_deploy "$@" ;;
+    refresh)        _mesh_force_refresh ;;
+    host)
+      local hostcmd="${1:-list}"
+      shift 2>/dev/null
+      case "$hostcmd" in
+        add)    _mesh_host_add "$@" ;;
+        rm)     _mesh_host_rm "$@" ;;
+        list|ls) _mesh_host_list ;;
+        *)      echo "mesh host: unknown subcommand '$hostcmd' (add, rm, list)"; return 1 ;;
+      esac
+      ;;
+    sshconfig)      _mesh_ssh_config_generate ;;
+    help|--help)    _mesh_help ;;
+    *)
+      echo "mesh: unknown command '$subcmd'"
+      _mesh_help
+      return 1
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Host management (manual SSH hosts)
+# ------------------------------------------------------------------------------
+
+# Add a manual SSH host
+# Usage: mesh host add <name> <user@host> [port] [os] [description]
+_mesh_host_add() {
+  local name="$1" userhost="$2" port="${3:-22}" os="${4:-linux}" desc="$5"
+
+  if [[ -z "$name" || -z "$userhost" ]]; then
+    echo "Usage: mesh host add <name> <user@host> [port] [os] [description]"
+    return 1
+  fi
+
+  local user="${userhost%%@*}"
+  local host="${userhost#*@}"
+  [[ "$user" == "$host" ]] && { echo "mesh: format must be user@host"; return 1; }
+  local host_pattern='^[A-Za-z0-9:][A-Za-z0-9._:%-]*$|^\[[A-Fa-f0-9:]+\]$'
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ && "$host" =~ $host_pattern ]] || {
+    echo 'mesh: use simple host/name/user tokens (no shell syntax)' >&2; return 1;
+  }
+  [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || {
+    echo 'mesh: port must be an integer from 1 to 65535' >&2; return 1;
+  }
+
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  mkdir -p "$(dirname "$hosts_file")" || return 1
+  [[ ! -f "$hosts_file" ]] && echo '[]' > "$hosts_file"
+
+  if jq -e --arg n "$name" '.[] | select(.name == $n)' "$hosts_file" >/dev/null 2>&1; then
+    echo "mesh: host '$name' already exists. Use 'mesh host rm' first."
+    return 1
+  fi
+
+  local new_entry
+  new_entry=$(jq -n \
+    --arg name "$name" \
+    --arg host "$host" \
+    --arg user "$user" \
+    --argjson port "$port" \
+    --arg os "$os" \
+    --arg desc "$desc" \
+    '{name: $name, host: $host, user: $user, port: $port, os: $os, description: (if $desc != "" then $desc else null end)}')
+
+  jq --argjson entry "$new_entry" '. + [$entry]' "$hosts_file" > "$hosts_file.tmp" && \
+    mv "$hosts_file.tmp" "$hosts_file" || return 1
+
+  echo "mesh: added host '$name' ($user@$host)"
+}
+
+# Remove a manual SSH host
+_mesh_host_rm() {
+  local name="$1"
+  [[ -z "$name" ]] && { echo "Usage: mesh host rm <name>"; return 1; }
+
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  [[ ! -f "$hosts_file" ]] && { echo "mesh: no hosts file."; return 1; }
+
+  if ! jq -e --arg n "$name" '.[] | select(.name == $n)' "$hosts_file" >/dev/null 2>&1; then
+    echo "mesh: host '$name' not found."
+    return 1
+  fi
+
+  jq --arg n "$name" 'map(select(.name != $n))' "$hosts_file" > "$hosts_file.tmp" && \
+    mv "$hosts_file.tmp" "$hosts_file"
+
+  echo "mesh: removed host '$name'"
+}
+
+# List all manual SSH hosts
+_mesh_host_list() {
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  [[ ! -f "$hosts_file" ]] && { echo "No manual hosts configured."; return 0; }
+
+  local bold='\033[1m'
+  local reset='\033[0m'
+
+  printf "${bold}  %-20s %-30s %-8s %s${reset}\n" "NAME" "CONNECTION" "OS" "DESCRIPTION"
+  jq -r '.[] | [.name, (.user + "@" + .host + (if .port != 22 then ":" + (.port | tostring) else "" end)), (.os // "--"), (.description // "--")] | @tsv' "$hosts_file" | \
+    while IFS=$'\t' read -r name conn os desc; do
+      printf "  %-20s %-30s %-8s %s\n" "$name" "$conn" "$os" "$desc"
+    done
+}
+
+# ------------------------------------------------------------------------------
+# SSH config generation
+# ------------------------------------------------------------------------------
+
+# Generate a separate SSH file from Tailscale devices + manual hosts.
+_mesh_ssh_config_generate() {
+  local config_file="${HOMI_PROFILE_CONFIG}/mesh/ssh.conf"
+  mkdir -p "${HOMI_PROFILE_CONFIG}/mesh"
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  local ts_cache="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.json"
+
+  mkdir -p "$HOME/.ssh"
+
+  local tmp_config
+  tmp_config=$(mktemp)
+
+  cat > "$tmp_config" <<HEADER
+# Auto-generated by HOMI mesh
+# Do NOT edit above the USER CONFIG line — changes will be overwritten
+# Run 'mesh sshconfig' to regenerate
+# Last generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+HEADER
+
+  # Manual hosts
+  if [[ -f "$hosts_file" ]]; then
+    jq -r '.[] | "Host " + .name + "\n  HostName " + .host + "\n  User " + .user + "\n  Port " + ((.port // 22) | tostring) + "\n"' "$hosts_file" >> "$tmp_config"
+  fi
+
+  # Tailscale hosts (SSH-capable: macOS + linux)
+  if [[ -f "$ts_cache" ]]; then
+    local current_user
+    current_user=$(whoami)
+    jq -r --arg user "$current_user" '
+      def ssh_os: . == "macOS" or . == "linux";
+      [
+        (.Self | select(.OS | ssh_os) | {
+          name: (.DNSName | split(".")[0]),
+          ip: .TailscaleIPs[0]
+        })
+      ] + [
+        .Peer | to_entries[].value | select(.OS | ssh_os) | {
+          name: (.DNSName | split(".")[0]),
+          ip: .TailscaleIPs[0]
+        }
+      ] | .[] |
+      "Host " + .name + "\n  HostName " + .ip + "\n  User " + $user + "\n"
+    ' "$ts_cache" >> "$tmp_config"
+  fi
+
+  # Preserve user additions
+  if [[ -f "$config_file" ]] && grep -q "^# BEGIN USER CONFIG" "$config_file"; then
+    sed -n '/^# BEGIN USER CONFIG/,$ p' "$config_file" >> "$tmp_config"
+  else
+    printf "# BEGIN USER CONFIG\n# Add your own SSH config below this line\n" >> "$tmp_config"
+  fi
+
+  mv "$tmp_config" "$config_file"
+  chmod 600 "$config_file"
+  echo "mesh: generated $config_file (your ~/.ssh/config is unchanged)"
+  printf 'To use: ssh -F "%s" HOST; or add an Include to your SSH config.\n' "$config_file"
+}
+
+# ------------------------------------------------------------------------------
+# Help
+# ------------------------------------------------------------------------------
+
+_mesh_help() {
+  cat <<'HELP'
+HOMI mesh (optional workstation module)
+  mesh [hub]                  select a manual or Tailscale host
+  mesh ssh [-w] HOST          shell here, or a tmux pane/window
+  mesh vnc HOST              configured VNC access (platform dependent)
+  mesh run HOST COMMAND      explicitly execute a command remotely
+  mesh host add NAME USER@HOST [PORT]
+  mesh host list | rm NAME
+  mesh status | info HOST | ping [HOST] | refresh
+  mesh probe HOST | detail HOST | monitor [COMMAND] [HOST...]
+  mesh deploy COMMAND [HOST]  launch a configured command in a remote pane
+  mesh sshconfig             generate a separate SSH file; never replace ~/.ssh/config
+Manual hosts: $HOMI_PROFILE_CONFIG/mesh/hosts.json; user mapping: users.json.
+Tailscale is optional for manual hosts. Nothing is connected at shell startup.
+HELP
+}
+
+# ------------------------------------------------------------------------------
+
+# FZF device hub (unified: Tailscale + manual hosts)
+_mesh_hub() {
+  # Tailscale refresh is optional — manual hosts work without it
+  _mesh_refresh 2>/dev/null
+
+  local devices
+  devices=$(_mesh_all_devices ssh)
+  [[ -z "$devices" ]] && { echo "mesh: no devices available."; return 1; }
+
+  local src
+  src=$(_mesh_src)
+
+  local fzf_opts=()
+  # Only a real pane gets fzf's own popup; inside a display-popup (the `prefix m`
+  # keybinding runs `mesh` -> _mesh_hub) $TMUX_PANE is empty, so use plain fzf and
+  # avoid a popup-inside-a-popup.
+  [[ -n "$TMUX" && -n "$TMUX_PANE" ]] && fzf_opts+=(--tmux 80%,60%)
+
+  local selected
+  selected=$(echo "$devices" | \
+    fzf "${fzf_opts[@]}" \
+      --expect "ctrl-v" \
+      --header "enter: ssh  ctrl-v: vnc  ctrl-p: ping  ctrl-i: info" \
+      --delimiter $'\t' \
+      --with-nth 1,2,3,4 \
+      --preview "source '$src' && _mesh_preview {1} {3}" \
+      --preview-window "right:50%" \
+      --bind "ctrl-p:execute(
+        if [[ {3} == manual ]]; then
+          ping -c 3 \$(echo {4} | cut -d@ -f2) 2>&1 | head -10
+        else
+          tailscale ping -c 3 {4} 2>&1 | head -10
+        fi
+      )+refresh-preview" \
+      --bind "ctrl-i:execute(
+        source '$src' && _mesh_preview {1} {3} | less
+      )") || return 0
+
+  # With --expect, the first line is the key pressed (empty for plain enter),
+  # the second line is the selected row.
+  local key row
+  key=$(printf '%s\n' "$selected" | sed -n 1p)
+  row=$(printf '%s\n' "$selected" | sed -n 2p)
+
+  local device status
+  IFS=$'\t' read -r device _ status _ _ _ <<< "$row"
+  [[ -z "$device" ]] && return 0
+
+  if [[ "$key" == "ctrl-v" ]]; then
+    if [[ "$status" == "manual" ]]; then
+      _mesh_vnc_manual "$device"
+    else
+      _mesh_vnc "$device"
+    fi
+  else
+    if [[ "$status" == "manual" ]]; then
+      _mesh_ssh_manual "$device"
+    else
+      _mesh_ssh "$device"
+    fi
+  fi
+}
+
+# Inline status table (shows probe data when available)
+_mesh_status() {
+  _mesh_refresh || { echo "mesh: cannot reach tailscale."; return 1; }
+
+  local green='\033[32m'
+  local dim='\033[2m'
+  local bold='\033[1m'
+  local cyan='\033[36m'
+  local reset='\033[0m'
+  local profile_dir="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/profiles"
+
+  printf "${bold}  %-24s %-8s %-8s %-18s %-7s %s${reset}\n" \
+    "DEVICE" "OS" "STATUS" "IP" "LOAD" "MEM"
+
+  while IFS=$'\t' read -r name os status ip relay is_self; do
+    local indicator name_display load_str mem_str
+
+    if [[ "$status" == "online" ]]; then
+      indicator="${green}●${reset}"
+    else
+      indicator="${dim}○${reset}"
+    fi
+
+    if [[ "$is_self" == "self" ]]; then
+      name_display="$name *"
+    else
+      name_display="$name"
+    fi
+
+    # Pull probe data if cached
+    load_str="--"
+    mem_str="--"
+    local profile="$profile_dir/$name.json"
+    if [[ -f "$profile" ]] && ! jq -e '.error' "$profile" >/dev/null 2>&1; then
+      local l1 mem_used mem_total
+      l1=$(jq -r '.load[0]' "$profile" 2>/dev/null)
+      mem_used=$(jq -r '.mem_used_mb' "$profile" 2>/dev/null)
+      mem_total=$(jq -r '.mem_total_mb' "$profile" 2>/dev/null)
+      [[ "$l1" != "null" && -n "$l1" ]] && load_str="$l1"
+      if [[ "$mem_total" != "null" && -n "$mem_total" && "$mem_total" != "0" ]]; then
+        mem_str="$(( mem_used / 1024 ))G/$(( mem_total / 1024 ))G"
+      fi
+    fi
+
+    if [[ "$status" == "online" ]]; then
+      printf "${indicator} %-24s %-8s ${green}%-8s${reset} %-18s %-7s %s\n" \
+        "$name_display" "$os" "$status" "$ip" "$load_str" "$mem_str"
+    else
+      printf "${indicator} ${dim}%-24s %-8s %-8s %-18s %-7s %s${reset}\n" \
+        "$name_display" "$os" "$status" "$ip" "--" "--"
+    fi
+  done < <(_mesh_devices all)
+}
+
+# Per-device SSH overrides for Tailscale devices live in mesh/users.json:
+#   { "dev": "user" }                            user only
+#   { "dev": { "user": "u", "port": 8022 } }     either key optional
+# The port form exists for devices whose sshd cannot sit on 22, e.g. a phone
+# running Termux (8022). Manual hosts carry their own port in hosts.json.
+
+# Resolve SSH user for a Tailscale device
+_mesh_device_user() {
+  local device="$1"
+  if _mesh_is_manual "$device"; then
+    jq -r --arg n "$device" '.[] | select(.name == $n) | .user' "$HOMI_PROFILE_CONFIG/mesh/hosts.json"
+    return
+  fi
+  local users_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/users.json"
+  if [[ -f "$users_file" ]]; then
+    local user
+    user=$(jq -r --arg name "$device" '
+      .[$name] // empty | if type == "object" then (.user // empty) else . end
+    ' "$users_file" 2>/dev/null)
+    [[ -n "$user" ]] && { echo "$user"; return; }
+  fi
+  echo "${MESH_SSH_USER:-$USER}"
+}
+
+# Resolve SSH port override for a Tailscale device; empty when unset or 22.
+_mesh_device_port() {
+  local device="$1"
+  if _mesh_is_manual "$device"; then
+    jq -r --arg n "$device" '.[] | select(.name == $n) | .port // 22' "$HOMI_PROFILE_CONFIG/mesh/hosts.json"
+    return
+  fi
+  local users_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/users.json"
+  [[ -f "$users_file" ]] || return 0
+  local port
+  port=$(jq -r --arg name "$device" '
+    .[$name] // empty | if type == "object" then (.port // empty) else empty end
+  ' "$users_file" 2>/dev/null)
+  [[ -n "$port" && "$port" != "22" ]] && echo "$port"
+  return 0
+}
+
+# ssh options for a device, as words: "-p <port>" or nothing.
+_mesh_ssh_opts() {
+  local port; port=$(_mesh_device_port "$1")
+  [[ -n "$port" ]] && echo "-p $port"
+  return 0
+}
+
+# Resolve Tailscale device name to its IP
+_mesh_device_ip() {
+  local device="$1"
+  if _mesh_is_manual "$device"; then
+    jq -r --arg n "$device" '.[] | select(.name == $n) | .host' "$HOMI_PROFILE_CONFIG/mesh/hosts.json"
+    return
+  fi
+  local cache="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.json"
+  jq -r --arg name "$device" '
+    [.Self, (.Peer | to_entries[].value)] |
+    map(select((.DNSName | split(".")[0]) == $name)) |
+    .[0].TailscaleIPs[0] // empty
+  ' "$cache"
+}
+
+# SSH into a device
+_mesh_ssh() {
+  local window_mode=false
+  local device=""
+
+  # Parse flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -w) window_mode=true; shift ;;
+      *)  device="$1"; shift ;;
+    esac
+  done
+
+  [[ -z "$device" ]] && { device=$(_mesh_pick) || return 1; }
+
+  # Self: just open a local shell
+  if _mesh_is_self "$device"; then
+    echo "mesh: $device is this machine."
+    return 0
+  fi
+
+  local ip
+  ip=$(_mesh_device_ip "$device")
+  [[ -z "$ip" ]] && { echo "mesh: cannot resolve IP for $device"; return 1; }
+
+  local suser sopts
+  suser=$(_mesh_device_user "$device")
+  sopts=$(_mesh_ssh_opts "$device")
+  local -a ssh_args=(); read -ra ssh_args <<< "$sopts"
+  local ssh_cmd; printf -v ssh_cmd '%q ' ssh "${ssh_args[@]}" -- "$suser@$ip"
+
+  # Outside tmux: direct SSH
+  if [[ -z "$TMUX" ]]; then
+    ssh "${ssh_args[@]}" -- "$suser@$ip"
+    return
+  fi
+
+  # Inside tmux: new pane or window
+  if $window_mode; then
+    local pane_id
+    pane_id=$(tmux new-window -n "$device" -P -F '#{pane_id}')
+    tmux send-keys -t "$pane_id" "$ssh_cmd" C-m
+  else
+    local pane_id
+    pane_id=$(tmux split-window -h -P -F '#{pane_id}')
+    tmux send-keys -t "$pane_id" "$ssh_cmd" C-m
+  fi
+}
+
+# SSH into a manual (non-Tailscale) host
+_mesh_ssh_manual() {
+  local window_mode=false
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -w) window_mode=true; shift ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  local host user port
+  read -r host user port < <(
+    jq -r --arg name "$name" '
+      .[] | select(.name == $name) |
+      [.host, .user, (.port // 22 | tostring)] | @tsv
+    ' "$hosts_file"
+  )
+
+  [[ -z "$host" ]] && { echo "mesh: unknown host '$name'"; return 1; }
+
+  local -a ssh_args=()
+  [[ "$port" != "22" ]] && ssh_args+=(-p "$port")
+  local ssh_cmd; printf -v ssh_cmd '%q ' ssh "${ssh_args[@]}" -- "$user@$host"
+
+  # Outside tmux: direct SSH
+  if [[ -z "$TMUX" ]]; then
+    ssh "${ssh_args[@]}" -- "$user@$host"
+    return
+  fi
+
+  # Inside tmux: new pane or window
+  if $window_mode; then
+    local pane_id
+    pane_id=$(tmux new-window -n "$name" -P -F '#{pane_id}')
+    tmux send-keys -t "$pane_id" "$ssh_cmd" C-m
+  else
+    local pane_id
+    pane_id=$(tmux split-window -h -P -F '#{pane_id}')
+    tmux send-keys -t "$pane_id" "$ssh_cmd" C-m
+  fi
+}
+
+# Unified SSH: routes to tailscale or manual based on host type
+_mesh_connect() {
+  local name=""
+  local flags=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -w) flags+=("-w"); shift ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+
+  [[ -z "$name" ]] && { name=$(_mesh_pick) || return 1; }
+
+  if _mesh_is_manual "$name"; then
+    _mesh_ssh_manual "${flags[@]}" "$name"
+  else
+    _mesh_ssh "${flags[@]}" "$name"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# VNC / screen sharing
+# ------------------------------------------------------------------------------
+
+# Open a VNC session to a host/IP.
+# macOS: built-in Screen Sharing via `open vnc://`. Linux: $MESH_VNC_CMD or vncviewer.
+# Usage: _mesh_open_vnc <host-or-ip> [user]
+_mesh_open_vnc() {
+  local target="$1" port="${2:-${MESH_VNC_PORT:-}}" user="$3"
+  [[ -z "$target" ]] && { echo "mesh: no VNC target."; return 1; }
+
+  local hostport="$target"
+  [[ -n "$port" ]] && hostport="$target:$port"
+
+  if [[ "$(uname)" == "Darwin" ]]; then
+    local url="vnc://"
+    [[ -n "$user" ]] && url+="$user@"
+    url+="$hostport"
+    echo "mesh: opening $url"
+    open "$url"
+  elif [[ -n "$MESH_VNC_CMD" ]]; then
+    MESH_VNC_TARGET="$hostport" MESH_VNC_HOST="$target" MESH_VNC_USER="$user" \
+      eval "$MESH_VNC_CMD"
+  elif command -v vncviewer >/dev/null 2>&1; then
+    vncviewer "$hostport"
+  else
+    echo "mesh: no VNC client found. Set MESH_VNC_CMD or install vncviewer."
+    return 1
+  fi
+}
+
+# VNC into a Tailscale device
+_mesh_vnc() {
+  local device="$1"
+  [[ -z "$device" ]] && { device=$(_mesh_pick) || return 1; }
+
+  if ! _mesh_is_manual "$device" && _mesh_is_self "$device"; then
+    echo "mesh: $device is this machine."
+    return 0
+  fi
+
+  local ip
+  ip=$(_mesh_device_ip "$device")
+  [[ -z "$ip" ]] && { echo "mesh: cannot resolve IP for $device"; return 1; }
+
+  _mesh_open_vnc "$ip"
+}
+
+# VNC into a manual (non-Tailscale) host.
+#
+# Manual hosts ride untrusted networks (no Tailscale/WireGuard wrapper), so by
+# default we tunnel VNC through SSH: the (weakly-encrypted) VNC stream rides
+# inside the SSH pipe, and the remote VNC server only needs to listen on its
+# own localhost — never exposed to the network. Opt out with MESH_VNC_NO_TUNNEL=1
+# (e.g. a trusted LAN where the server is reachable directly).
+_mesh_vnc_manual() {
+  local name="$1"
+  local hosts_file="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}/mesh/hosts.json"
+  local host user port
+  read -r host user port < <(
+    jq -r --arg name "$name" '
+      .[] | select(.name == $name) | [.host, .user, (.port // 22 | tostring)] | @tsv
+    ' "$hosts_file" 2>/dev/null
+  )
+
+  [[ -z "$host" ]] && { echo "mesh: unknown host '$name'"; return 1; }
+
+  if [[ "$MESH_VNC_NO_TUNNEL" == "1" ]]; then
+    echo "mesh: WARNING — VNC in the clear (no SSH tunnel). Auth + session are unencrypted."
+    _mesh_open_vnc "$host"
+    return
+  fi
+
+  local remote_port="${MESH_VNC_PORT:-5900}"
+  local local_port="${MESH_VNC_LOCAL_PORT:-5901}"
+  local wait="${MESH_VNC_TUNNEL_WAIT:-10}"
+
+  # Reuse an existing tunnel if something is already listening locally,
+  # otherwise stand one up. `sleep N` keeps it alive long enough to connect;
+  # ssh then holds it open for the session and exits after you disconnect.
+  if { exec 3<>"/dev/tcp/127.0.0.1/$local_port"; } 2>/dev/null; then
+    exec 3>&- 3<&-
+    echo "mesh: reusing existing tunnel on localhost:$local_port"
+  else
+    echo "mesh: tunneling VNC over SSH ($user@$host:$remote_port -> localhost:$local_port)"
+    if ! ssh -f -o ExitOnForwardFailure=yes \
+          -L "$local_port:localhost:$remote_port" \
+          -p "$port" "$user@$host" "sleep $wait"; then
+      echo "mesh: SSH tunnel failed — is a VNC server on $name listening on localhost:$remote_port?"
+      return 1
+    fi
+  fi
+
+  _mesh_open_vnc localhost "$local_port"
+}
+
+# Unified VNC: routes to tailscale or manual based on host type
+_mesh_vnc_connect() {
+  local name="$1"
+  [[ -z "$name" ]] && { name=$(_mesh_pick) || return 1; }
+
+  if _mesh_is_manual "$name"; then
+    _mesh_vnc_manual "$name"
+  else
+    _mesh_vnc "$name"
+  fi
+}
+
+# Run a command on a remote device
+_mesh_run() {
+  local device="$1"
+
+  if [[ -z "$device" ]]; then
+    device=$(_mesh_pick) || return 1
+    echo "Command to run on $device:"
+    read -r cmd
+    [[ -z "$cmd" ]] && return 1
+  else
+    shift
+    local cmd="$*"
+    [[ -z "$cmd" ]] && { echo "Usage: mesh run <device> <command>"; return 1; }
+  fi
+
+  if ! _mesh_is_manual "$device" && _mesh_is_self "$device"; then
+    echo "--- $device (local) ---"
+    eval "$cmd"
+  else
+    echo "--- $device ---"
+    local ip; ip=$(_mesh_device_ip "$device")
+    local suser; suser=$(_mesh_device_user "$device")
+    local -a sopts=(); read -ra sopts <<< "$(_mesh_ssh_opts "$device")"
+    [[ -n "$ip" ]] || { echo "mesh: cannot resolve $device" >&2; return 1; }
+    ssh "${sopts[@]}" -- "$suser@$ip" "$cmd"
+  fi
+}
+
+# Ping device(s) via Tailscale
+_mesh_ping() {
+  local device="$1"
+
+  if [[ -n "$device" ]]; then
+    if _mesh_is_self "$device"; then
+      echo "mesh: $device is this machine."
+      return 0
+    fi
+    # Shared-in names don't resolve through MagicDNS; the cached IP always does.
+    local ip
+    ip=$(_mesh_device_ip "$device")
+    tailscale ping -c 3 "${ip:-$device}"
+    return
+  fi
+
+  # No device specified: ping all online compute devices
+  _mesh_refresh || return 1
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.json")
+
+  while IFS=$'\t' read -r name os status ip relay is_self; do
+    [[ "$is_self" == "self" ]] && continue
+    printf "%-24s " "$name"
+    local result
+    result=$(tailscale ping -c 1 --timeout 3s "${ip:-$name}" 2>&1 | head -1)
+    echo "$result"
+  done < <(_mesh_devices compute)
+}
+
+# Force cache refresh
+_mesh_force_refresh() {
+  local meta_file="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/devices.meta"
+  rm -f "$meta_file"
+  _mesh_refresh && echo "mesh: cache refreshed." || echo "mesh: refresh failed."
+}
+
+# Live device detail popup (refreshes every 5s)
+_mesh_detail() {
+  local device="${1:-$(_mesh_pick)}"
+  [[ -z "$device" ]] && return 1
+  [[ -z "$TMUX" ]] && { echo "mesh detail requires tmux."; return 1; }
+
+  # Export functions so the subshell can use them
+  tmux display-popup -E -w 60% -h 50% -T " $device " \
+    "bash -c '
+      source \"${HOMI_PROFILE_RUNTIME}/fns/mesh\"
+      while true; do
+        clear
+        _mesh_probe \"$device\" >/dev/null 2>&1
+        _mesh_probe_display \"$device\"
+        echo \"  Press q to close, r to refresh now\"
+        read -t 5 -n 1 key
+        case \"\$key\" in
+          q) break ;;
+          r) rm -f \"\${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/mesh/profiles/$device.json\" ;;
+        esac
+      done
+    '"
+}
+
+# Mesh monitor layout: main pane + stacked device monitors on right
+# Usage: mesh monitor [command] [device1 device2 ...]
+_mesh_terminal_command() {
+  local device="$1" cmd="$2" ip suser port
+  if ! _mesh_is_manual "$device" && _mesh_is_self "$device"; then
+    printf '%s' "$cmd"
+    return
+  fi
+  ip=$(_mesh_device_ip "$device")
+  [[ -n "$ip" ]] || { printf 'mesh: cannot resolve %s\n' "$device" >&2; return 1; }
+  suser=$(_mesh_device_user "$device")
+  port=$(_mesh_device_port "$device")
+  local -a args=(-t)
+  [[ -z "$port" ]] || args+=(-p "$port")
+  # The remote command is explicit shell input; preserve it as one SSH argument.
+  printf '%q ' ssh "${args[@]}" -- "$suser@$ip" "$cmd"
+}
+
+_mesh_monitor() {
+  [[ -z $TMUX ]] && { echo "mesh monitor requires tmux."; return 1; }
+
+  local cmd="${1:-btop}"
+  shift 2>/dev/null
+  local -a devices
+
+  # Use remaining args as device list, or auto-detect
+  if [[ $# -gt 0 ]]; then
+    devices=("$@")
+  else
+    while IFS=$'\t' read -r name _; do
+      devices+=("$name")
+    done < <(_mesh_devices compute)
+  fi
+
+  if (( ${#devices[@]} < 1 )); then
+    echo "mesh: no online compute devices found."
+    return 1
+  fi
+
+  # Resolve every target before changing the window.
+  local -a commands=()
+  local dev line i
+  for dev in "${devices[@]}"; do
+    line=$(_mesh_terminal_command "$dev" "$cmd") || return
+    commands+=("$line")
+  done
+  local main_pane="$TMUX_PANE"
+  tmux rename-window -t "$main_pane" "mesh-monitor"
+
+  # First device gets right pane at 40%
+  local side_pane
+  side_pane=$(tmux split-window -h -p 40 -t "$main_pane" -P -F '#{pane_id}')
+
+  local first_device="${devices[0]}"
+  tmux send-keys -l -t "$side_pane" -- "${commands[0]}"
+  tmux send-keys -t "$side_pane" Enter
+
+  local mesh_map="$side_pane:$first_device"
+
+  # Stack remaining devices vertically in the right column
+  local prev="$side_pane"
+  for ((i=1; i<${#devices[@]}; i++)); do
+    local new_pane dev="${devices[$i]}"
+    new_pane=$(tmux split-window -v -t "$prev" -P -F '#{pane_id}')
+
+    tmux send-keys -l -t "$new_pane" -- "${commands[$i]}"
+    tmux send-keys -t "$new_pane" Enter
+
+    mesh_map+=",$new_pane:$dev"
+    prev="$new_pane"
+  done
+
+  # Store pane-to-device mapping
+  tmux set-option -w @mesh_panes "$mesh_map"
+  tmux select-pane -t "$main_pane"
+}
+
+# Deploy an AI agent on a remote device
+# Usage: mesh deploy <ai_command> [device]
+_mesh_deploy() {
+  local ai="$1"
+  [[ -z "$ai" ]] && { echo "Usage: mesh deploy <ai_command> [device]"; return 1; }
+  [[ -z $TMUX ]] && { echo "mesh deploy requires tmux."; return 1; }
+
+  local device="${2:-$(_mesh_pick)}"
+  [[ -z "$device" ]] && return 1
+
+  local pane_id line
+  line=$(_mesh_terminal_command "$device" "$ai") || return
+  pane_id=$(tmux new-window -n "ai@$device" -P -F '#{pane_id}')
+  tmux send-keys -l -t "$pane_id" -- "$line"
+  tmux send-keys -t "$pane_id" Enter
+}

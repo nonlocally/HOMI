@@ -1,0 +1,748 @@
+# Adapted from Anu 80d3c86; see profiles/NOTICE.md.
+# ==============================================================================
+# Session Management
+# ==============================================================================
+
+# Attach from outside tmux using a linked session group.
+# Each terminal gets its own current-window pointer while sharing all windows.
+# The linked session auto-destroys when the client detaches.
+_t_attach() {
+  local name="$1"
+  local link="${name}~$$"
+
+  # Let tmux clean up after attachment. Pruning detached views here can kill
+  # another terminal's new view in the gap between its creation and attachment.
+  local session
+  session=$(tmux new-session -d -t "=$name" -s "$link" -P -F '#{session_id}') || return
+  tmux attach-session -t "$session" \; set-option -t "$session" destroy-unattached on
+}
+
+# display-message -c chooses where to DISPLAY a message, not the client used
+# for -p format expansion. list-clients supplies the actual per-client values.
+_t_client_value() {
+  local client value
+  while IFS=$'\t' read -r client value; do
+    if [[ $client == "$1" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < <(tmux list-clients -F "#{client_name}"$'\t'"$2")
+  return 1
+}
+
+# Capture the client before opening a picker. Keybindings pass it explicitly;
+# shell invocations resolve it once from their pane rather than after fzf exits.
+_t_client() {
+  local target=()
+  if [[ -n ${HOMI_TMUX_CLIENT:-} ]]; then
+    _t_client_value "$HOMI_TMUX_CLIENT" '#{client_name}'
+    return
+  elif [[ -n ${TMUX_PANE:-} ]]; then
+    target=(-t "$TMUX_PANE")
+  fi
+  local client
+  client=$(tmux display-message -p "${target[@]}" '#{client_name}') || return
+  [[ -n $client ]] || { echo "tmux: no attached client" >&2; return 1; }
+  printf '%s\n' "$client"
+}
+
+# Use the client's session, not the session in a shared pane's environment.
+_t_client_session() {
+  _t_client_value "$1" '#{session_id}'
+}
+
+# Each terminal keeps its own current-window pointer when switching projects,
+# just as it does when attaching with _t_attach. Switching straight to the base
+# session makes every client attached there follow the same window selection.
+_t_switch() {
+  local name="${1%%~*}" client="${2:-}" current cpid link session created=0
+  [[ -n $client ]] || client=$(_t_client) || return
+  # new-session -t also accepts a NEW group name. A deleted picker result must
+  # fail here rather than creating an unrelated group with that name.
+  tmux has-session -t "=$name" 2>/dev/null || return 1
+  current=$(_t_client_value "$client" '#{client_session}') || return
+  [[ -n $current ]] || return 1
+  # Preserve an existing private view (including one made by _t_attach).
+  if [[ ${current%%~*} == "$name" ]] &&
+      [[ $(_t_client_value "$client" '#{session_attached}') == 1 ]]; then
+    return 0
+  fi
+  cpid=$(_t_client_value "$client" '#{client_pid}') || return
+  [[ -n $cpid ]] || return 1
+  link="${name}~${cpid}"
+  if ! tmux has-session -t "=$link" 2>/dev/null; then
+    session=$(tmux new-session -d -t "=$name" -s "$link" -P -F '#{session_id}') || return
+    created=1
+  else
+    session=$(tmux display-message -p -t "=$link:" '#{session_id}') || return
+  fi
+  if ! tmux switch-client -c "$client" -t "$session"; then
+    [[ $created == 1 ]] && tmux kill-session -t "$session"
+    return 1
+  fi
+  # Set this only AFTER attachment: a newly created view starts detached.
+  tmux set-option -t "$session" destroy-unattached on
+}
+
+# Previous/next project, skipping the temporary views and the stash.
+_t_cycle() {
+  local step="$1" client current session i=0 index=0
+  local sessions=()
+  client=$(_t_client) || return
+  current=$(_t_client_value "$client" '#{client_session}') || return
+  current="${current%%~*}"
+  while IFS= read -r session; do
+    [[ $session == _stash || $session == *~* ]] && continue
+    [[ $session == "$current" ]] && index=$i
+    sessions+=("$session")
+    i=$((i + 1))
+  done < <(tmux list-sessions -F '#{session_name}')
+  (( i > 1 )) || return 0
+  _t_switch "${sessions[$(( (index + step + i) % i ))]}" "$client"
+}
+
+# Smart tmux entry point
+# Usage:
+#   t            -> outside tmux: attach last session or create "Work"
+#                -> inside tmux: fzf session picker
+#   t <name>     -> attach/switch to session, or create it
+#   t <name> <dir> -> create session rooted at directory
+#   t .          -> session named after current git repo (or directory)
+t() {
+  local name="$1"
+  local dir="$2"
+
+  # No arguments
+  if [[ -z $name ]]; then
+    if [[ -n $TMUX ]]; then
+      tp
+      return
+    fi
+    local _last
+    _last=$(tmux list-sessions -F '#S' 2>/dev/null | grep -v '~' | head -1)
+    if [[ -n $_last ]]; then
+      _t_attach "$_last"
+    else
+      tmux new-session -s Work
+    fi
+    return
+  fi
+
+  # "t ." -- use git root or current dir as session name
+  if [[ $name == "." ]]; then
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null) || root="$PWD"
+    name=$(basename "$root" | tr '.:' '--')
+    dir="$root"
+  fi
+
+  # Resolve directory (support zoxide fuzzy matching)
+  if [[ -n $dir && ! -d $dir ]] && command -v zoxide &>/dev/null; then
+    dir=$(zoxide query -- "$dir" 2>/dev/null) || { echo "Directory not found: $2"; return 1; }
+  fi
+
+  # If session exists, attach/switch to it
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    if [[ -n $TMUX ]]; then
+      _t_switch "$name"
+    else
+      _t_attach "$name"
+    fi
+    return
+  fi
+
+  # Create new session
+  local new_dir="${dir:-$PWD}"
+  if [[ -n $TMUX ]]; then
+    tmux new-session -d -s "$name" -c "$new_dir"
+    _t_switch "$name"
+  else
+    tmux new-session -s "$name" -c "$new_dir"
+  fi
+
+  # Source workspace config if present
+  if [[ -f "$new_dir/.tmux-workspace" ]]; then
+    source "$new_dir/.tmux-workspace"
+  fi
+}
+
+# Create a new named session (errors if it already exists)
+# Usage: tn <name> [directory]
+tn() {
+  local name="$1"
+  local dir="${2:-$PWD}"
+
+  [[ -z $name ]] && { echo "Usage: tn <name> [directory]"; return 1; }
+
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    echo "Session '$name' already exists. Use 't $name' to switch."
+    return 1
+  fi
+
+  if [[ -n $TMUX ]]; then
+    tmux new-session -d -s "$name" -c "$dir"
+    _t_switch "$name"
+  else
+    tmux new-session -s "$name" -c "$dir"
+  fi
+}
+
+# Kill a tmux session (current session if no argument)
+# Usage: tk [session_name]
+tk() {
+  local name="${1:-$(tmux display-message -p '#S' 2>/dev/null)}"
+  name="${name%%~*}"  # normalize grouped session name to base
+  [[ -z $name ]] && { echo "Usage: tk [session_name]"; return 1; }
+
+  # Kill linked group sessions first, then the base session
+  tmux list-sessions -F '#S' 2>/dev/null | grep "^${name}~" | while read -r s; do
+    tmux kill-session -t "=$s" 2>/dev/null
+  done
+  tmux kill-session -t "=$name" 2>/dev/null && echo "Killed session '$name'" || echo "Session '$name' not found."
+}
+
+# List all tmux sessions
+tl() {
+  tmux list-sessions 2>/dev/null | grep -v '~' || echo "No tmux sessions running."
+}
+
+# fzf session picker/switcher
+# Inside tmux: switch session. Outside: attach. ctrl-x to kill inline.
+tp() {
+  [[ -z $(tmux list-sessions 2>/dev/null) ]] && { echo "No tmux sessions."; return 1; }
+
+  local client=""
+  [[ -z $TMUX ]] || client=$(_t_client) || return
+
+  local fmt='#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
+  # Inside a tmux popup (the `prefix s` keybinding) there is no $TMUX_PANE; use
+  # plain fzf to fill that popup. A nested fzf --tmux (== --popup) would fail.
+  local fzf_popup=(--tmux 60%,40%)
+  [[ -n $TMUX && -z $TMUX_PANE ]] && fzf_popup=()
+  local selected
+  # NB: reload[...] (bracket form), not reload(...): $fmt contains "(attached)"
+  # whose ')' would close fzf's reload action early and break --bind parsing
+  # (fzf chokes on the leftover "}…" as a bogus key binding).
+  selected=$(tmux list-sessions -F "$fmt" | grep -v '^_stash:' | grep -v '~' | fzf "${fzf_popup[@]}" \
+    --header "ctrl-x: kill  enter: switch" \
+    --bind "ctrl-x:execute-silent(tmux kill-session -t {1})+reload[tmux list-sessions -F \"$fmt\" 2>/dev/null | grep -v '^_stash:' | grep -v '~' || true]" \
+    --delimiter ":" \
+    --preview "tmux capture-pane -e -p -t {1}:" \
+    --preview-window "right:60%") || return 0
+
+  local session_name="${selected%%:*}"
+
+  if [[ -n $TMUX ]]; then
+    _t_switch "$session_name" "$client"
+  else
+    _t_attach "$session_name"
+  fi
+}
+
+# ==============================================================================
+# Project Awareness
+# ==============================================================================
+
+# Jump to a project directory: fzf pick from zoxide, create/attach session
+# Usage: tj [query]
+tj() {
+  local query="$1"
+  local selected
+
+  if ! command -v zoxide &>/dev/null; then
+    echo "tj requires zoxide."
+    return 1
+  fi
+
+  if [[ -n $query ]]; then
+    selected=$(zoxide query -- "$query" 2>/dev/null)
+  else
+    # Inside a tmux popup (the `prefix j` keybinding) there is no $TMUX_PANE; use
+    # plain fzf to fill that popup. A nested fzf --tmux (== --popup) would fail.
+    local fzf_popup=(--tmux 70%,50%)
+    [[ -n $TMUX && -z $TMUX_PANE ]] && fzf_popup=()
+    selected=$(zoxide query -l 2>/dev/null | fzf "${fzf_popup[@]}" \
+      --header "Pick a project directory" \
+      --preview "ls -la {}" \
+      --scheme path) || return 0
+  fi
+
+  [[ -z $selected ]] && { echo "No directory selected."; return 1; }
+
+  local name
+  name=$(basename "$selected" | tr '.:' '--')
+
+  t "$name" "$selected"
+}
+
+# ==============================================================================
+# Window Management
+# ==============================================================================
+
+# Create a named window (optionally with a command and directory)
+# Usage: tw <name> [command] [directory]
+tw() {
+  local name="$1"
+  local cmd="$2"
+  local dir="${3:-$(tmux display-message -p '#{pane_current_path}' 2>/dev/null)}"
+
+  [[ -z $TMUX ]] && { echo "tw requires tmux."; return 1; }
+  [[ -z $name ]] && { echo "Usage: tw <name> [command] [directory]"; return 1; }
+
+  local pane_id
+  pane_id=$(tmux new-window -c "${dir:-$PWD}" -n "$name" -P -F '#{pane_id}')
+
+  if [[ -n $cmd ]]; then
+    tmux send-keys -t "$pane_id" "$cmd" C-m
+  fi
+}
+
+# fzf window picker
+twp() {
+  [[ -z $TMUX ]] && { echo "twp requires tmux."; return 1; }
+
+  local client session
+  client=$(_t_client) || return
+  session=$(_t_client_session "$client") || return
+
+  local fmt="#{window_index}: #{window_name} (#{window_panes} panes)#{?window_active, *,}"
+  # Inside a tmux popup (the `prefix w` keybinding) there is no $TMUX_PANE; use
+  # plain fzf to fill that popup. A nested fzf --tmux (== --popup) would fail.
+  local fzf_popup=(--tmux 50%,40%)
+  [[ -n $TMUX && -z $TMUX_PANE ]] && fzf_popup=()
+  local selected
+  selected=$(tmux list-windows -t "$session" -F "$fmt" | fzf "${fzf_popup[@]}" \
+    --header "Pick a window" \
+    --preview "tmux capture-pane -e -p -t '$session':{1}" \
+    --delimiter ":") || return 0
+
+  local idx="${selected%%:*}"
+  tmux select-window -t "$session:$idx"
+}
+
+# Popup overlay/scratchpad
+# Usage: to [command]
+to() {
+  [[ -z $TMUX ]] && { echo "to requires tmux."; return 1; }
+  local cmd="${1:-$SHELL}"
+  tmux display-popup -E -w 80% -h 75% -d "#{pane_current_path}" "$cmd"
+}
+
+# Stash current window (move to _stash session for later retrieval)
+# Usage: tws [session:window]  (auto-detected if omitted)
+tws() {
+  local target="$1"
+
+  if [[ -z $target ]]; then
+    [[ -z $TMUX ]] && { echo "tws requires tmux."; return 1; }
+    target=$(tmux display-message -p '#S:#I')
+  fi
+
+  local session="${target%%:*}"
+  [[ $session == "_stash" ]] && { echo "Already in stash."; return 1; }
+
+  # Tag window with origin session
+  tmux set-option -w -t "$target" @stash_origin "$session"
+
+  # Ensure _stash session exists
+  if ! tmux has-session -t =_stash 2>/dev/null; then
+    tmux new-session -d -s _stash
+    local placeholder
+    placeholder=$(tmux list-windows -t _stash -F '#{window_id}' | head -1)
+    tmux move-window -s "$target" -t _stash:
+    tmux kill-window -t "$placeholder"
+  else
+    tmux move-window -s "$target" -t _stash:
+  fi
+}
+
+# Grab a window back from the stash (fzf picker)
+# Usage: twg
+twg() {
+  [[ -z $TMUX ]] && { echo "twg requires tmux."; return 1; }
+
+  if ! tmux has-session -t =_stash 2>/dev/null; then
+    echo "Stash is empty."
+    return 1
+  fi
+
+  local fmt='#{window_index}: #{window_name} (from: #{@stash_origin})'
+  local selected
+  selected=$(tmux list-windows -t _stash -F "$fmt" | sort -t: -k1 -rn | fzf --reverse \
+    --no-sort \
+    --header "Grab from stash" \
+    --preview "tmux capture-pane -e -p -t _stash:{1}" \
+    --delimiter ":") || return 0
+
+  local idx="${selected%%:*}"
+  local target
+  target=$(tmux display-message -p '#S')
+
+  tmux move-window -s "_stash:$idx" -t "$target:"
+
+  # Clean up empty stash session
+  if [[ -z $(tmux list-windows -t _stash 2>/dev/null) ]]; then
+    tmux kill-session -t =_stash 2>/dev/null
+  fi
+}
+
+# Swarm Layout: N tiled panes all running the same command
+# Usage: tsl <pane_count> <command>
+tsl() {
+  [[ -z $1 || -z $2 ]] && { echo "Usage: tsl <pane_count> <command>"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use tsl."; return 1; }
+
+  local count="$1"
+  local cmd="$2"
+  local current_dir="${PWD}"
+  local -a panes
+
+  tmux rename-window -t "$TMUX_PANE" "$(basename "$current_dir")"
+
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < count )); do
+    local new_pane
+    local split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  for pane in "${panes[@]}"; do
+    tmux send-keys -t "$pane" "$cmd" C-m
+  done
+
+  tmux select-pane -t "${panes[0]}"
+}
+
+# Mixed Swarm Layout: tiled panes with different commands
+# Usage: tslm <count1> <cmd1> [count2] [cmd2] ...
+# Example: tslm 4 cx 4 codex   (4 claude + 4 codex = 8 panes)
+tslm() {
+  (( $# < 2 )) && { echo "Usage: tslm <count1> <cmd1> [count2] [cmd2] ..."; return 1; }
+  (( $# % 2 != 0 )) && { echo "Args must be count/command pairs: tslm 4 cx 4 codex"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use tslm."; return 1; }
+
+  local current_dir="${PWD}"
+  local -a counts cmds
+
+  # Parse count/command pairs
+  while (( $# >= 2 )); do
+    counts+=("$1")
+    cmds+=("$2")
+    shift 2
+  done
+
+  # Calculate total panes
+  local total=0
+  for c in "${counts[@]}"; do
+    (( total += c ))
+  done
+
+  # Create all panes
+  local -a panes
+  tmux rename-window -t "$TMUX_PANE" "$(basename "$current_dir")"
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < total )); do
+    local new_pane
+    local split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  # Assign commands in groups
+  local idx=0
+  for ((g=0; g<${#cmds[@]}; g++)); do
+    for ((i=0; i<${counts[$g]}; i++)); do
+      tmux send-keys -t "${panes[$idx]}" "${cmds[$g]}" C-m
+      (( idx++ ))
+    done
+  done
+
+  tmux select-pane -t "${panes[0]}"
+}
+
+# Monitor Layout: main pane left + stacked command panes on right
+# Usage: tml <cmd1> [cmd2] [cmd3] ...
+tml() {
+  [[ $# -eq 0 ]] && { echo "Usage: tml <cmd1> [cmd2] [cmd3] ..."; return 1; }
+  [[ -z $TMUX ]] && { echo "tml requires tmux."; return 1; }
+
+  local dir="$PWD"
+  local main_pane="$TMUX_PANE"
+
+  tmux rename-window -t "$main_pane" "$(basename "$dir")"
+
+  # First command gets a right pane at 30%
+  local side_pane
+  side_pane=$(tmux split-window -h -p 30 -t "$main_pane" -c "$dir" -P -F '#{pane_id}')
+  tmux send-keys -t "$side_pane" "$1" C-m
+  shift
+
+  # Remaining commands stack vertically in the right column
+  local prev="$side_pane"
+  for cmd in "$@"; do
+    local new_pane
+    new_pane=$(tmux split-window -v -t "$prev" -c "$dir" -P -F '#{pane_id}')
+    tmux send-keys -t "$new_pane" "$cmd" C-m
+    prev="$new_pane"
+  done
+
+  tmux select-pane -t "$main_pane"
+}
+
+# ==============================================================================
+# Persistence — capture & restore the whole tmux workspace across a reboot
+# ==============================================================================
+#
+# tss saves every session/window/pane: exact layout geometry, each pane's cwd,
+# and a *resume command* for agent panes so the conversation continues instead
+# of starting fresh. Detection is empirical, not guesswork:
+#   - the real program in a pane is read from the process table (pane_pid's own
+#     argv, or its child if the pane is a shell). tmux's pane_current_command
+#     reports "node" / a version string for claude & codex and can't be trusted.
+#   - claude keeps no open handle to its transcript, so its session is the newest
+#     unclaimed ~/.claude/projects/<munged-cwd>/*.jsonl (one assigned per pane
+#     sharing a cwd, newest first).
+#   - codex DOES hold its rollout file open, so lsof yields the exact session id.
+#   - panes already launched with --resume/--continue keep that verbatim.
+# Linked view-sessions (name~PID, auto-destroyed on detach) and popup sessions
+# (all-digit names) are skipped. Conversations live on disk and survive a reboot
+# anyway; this rebuilds only the topology, which doesn't.
+#
+# tsr rebuilds it: shells + exact layouts first, then resumes agents in a second
+# pass (so the shells are ready — no send-keys race). Non-agent pane commands are
+# pre-typed but not executed. `tsr -n <name>` previews without touching tmux.
+
+_tss_munge() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+
+# argv (own command line) of a pid, from the ps snapshot in $_TSS_SNAP
+_tss_cmd_of() { awk -v p="$1" '$1==p{$1="";$2="";sub(/^[[:space:]]+/,"");print;exit}' "$_TSS_SNAP"; }
+
+# representative child of a shell pane: prefer a known agent/app over a sub-shell
+_tss_pick_child() {
+  local pp="$1" cmd b best=""
+  while IFS= read -r cmd; do
+    [[ -z $cmd ]] && continue
+    b="${cmd%% *}"; b="${b##*/}"
+    case "$b" in
+      bash|zsh|sh|fish|-bash|-zsh|login) ;;                       # skip shells
+      claude|codex|node|opencode|pi|nvim|vim|nano|python|python3|marimo|dlv|delve|htop|container|lazygit)
+        printf '%s' "$cmd"; return ;;                              # strong match
+      *) [[ -z $best ]] && best="$cmd" ;;
+    esac
+  done < <(awk -v pp="$pp" '$2==pp{$1="";$2="";sub(/^[[:space:]]+/,"");print}' "$_TSS_SNAP")
+  printf '%s' "$best"
+}
+
+# every descendant pid of a pid (so codex's fd-holding grandchild is included)
+_tss_descendants() {
+  local queue="$1 " out="" cur kids k
+  while [[ -n ${queue// /} ]]; do
+    cur="${queue%% *}"; queue="${queue#"$cur" }"
+    [[ -z $cur ]] && continue
+    kids=$(awk -v pp="$cur" '$2==pp{print $1}' "$_TSS_SNAP")
+    for k in $kids; do out+="$k "; queue+="$k "; done
+  done
+  printf '%s' "$out"
+}
+
+# newest *unclaimed* claude transcript id for a cwd (one per same-cwd pane)
+_tss_claude_uuid() {
+  local proj="$HOME/.claude/projects/$(_tss_munge "$1")" f
+  [[ -d $proj ]] || return
+  while IFS= read -r f; do
+    [[ -z $f ]] && continue
+    grep -qxF "$f" "$_TSS_CLAIMED" 2>/dev/null && continue
+    printf '%s\n' "$f" >> "$_TSS_CLAIMED"
+    f="${f##*/}"; printf '%s\n' "${f%.jsonl}"; return
+  done < <(command ls -t "$proj"/*.jsonl 2>/dev/null)
+}
+
+# exact codex session id via the open rollout fd (codex holds it open)
+_tss_codex_uuid() {
+  local pids; pids=$(_tss_descendants "$1"); pids="${pids// /,}"; pids="${pids%,}"
+  [[ -z $pids ]] && return
+  lsof -p "$pids" 2>/dev/null \
+    | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl' \
+    | head -1 | sed 's/\.jsonl$//'
+}
+
+# classify a pane -> "kind<TAB>resume_cmd"  (kind: claude|codex|opencode|pi|other|shell)
+_tss_resolve() {
+  local ppid="$1" cwd="$2" argv a0 kind="shell" resume="" u
+  argv=$(_tss_cmd_of "$ppid"); a0="${argv%% *}"; a0="${a0##*/}"
+  case "$a0" in
+    bash|zsh|sh|fish|-bash|-zsh|login|"") argv=$(_tss_pick_child "$ppid"); a0="${argv%% *}"; a0="${a0##*/}" ;;
+  esac
+  if [[ -z $argv ]]; then printf 'shell\t'; return; fi
+  if [[ $a0 == claude ]]; then
+    kind=claude
+    local pflag=""                       # preserve the permission flag, drop any inline prompt
+    case " $argv " in
+      *" --dangerously-skip-permissions "*) pflag="--dangerously-skip-permissions" ;;
+      *" --allow-dangerously-skip-permissions "*) pflag="--allow-dangerously-skip-permissions" ;;
+    esac
+    case " $argv " in
+      *" --resume "*|*" --continue "*|*" --from-pr "*) resume="$argv" ;;   # already a resume — keep verbatim
+      *) u=$(_tss_claude_uuid "$cwd")
+         if [[ -n $u ]]; then resume="claude ${pflag:+$pflag }--resume $u"
+         else                 resume="claude ${pflag:+$pflag }--continue"; fi ;;
+    esac
+  elif [[ $argv == *codex* && $argv != *Codex.app* ]]; then
+    kind=codex
+    u=$(_tss_codex_uuid "$ppid"); [[ -n $u ]] && resume="codex resume $u" || resume="codex resume --last"
+  elif [[ $a0 == opencode ]]; then kind=opencode; resume="opencode"
+  elif [[ $a0 == pi ]]; then kind=pi; resume="pi"
+  else kind=other; resume="$argv"; fi
+  printf '%s\t%s' "$kind" "$resume"
+}
+
+# Save the whole workspace.   Usage: tss [name]   (default: "default")
+tss() {
+  local name="${1:-default}"
+  local dir="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/sessions/$name"
+  command -v tmux >/dev/null || { echo "tss: tmux not found"; return 1; }
+  tmux info >/dev/null 2>&1 || { echo "tss: no tmux server running"; return 1; }
+
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [[ "$name" != *..* ]] || { echo "tss: invalid snapshot name" >&2; return 1; }
+  [[ ! -L "$dir" ]] || { echo "tss: refusing symlink snapshot" >&2; return 1; }
+  if [[ -e "$dir" ]]; then echo "tss: snapshot already exists; choose a new name" >&2; return 1; fi
+  mkdir -p "$dir/scrollback"
+  _TSS_SNAP=$(mktemp); _TSS_CLAIMED=$(mktemp)
+  ps -Ao pid=,ppid=,command= > "$_TSS_SNAP"
+
+  local win_tsv="$dir/windows.tsv" pane_tsv="$dir/panes.tsv"
+  : > "$win_tsv"; : > "$pane_tsv"
+  local ns=0 nw=0 np=0 na=0 sess widx wname wactive wlayout pidx pactive ppid cwd kind resume
+
+  while IFS= read -r sess; do
+    case "$sess" in *~[0-9]*) continue ;; esac            # linked view-session
+    case "$sess" in ''|*[!0-9]*) : ;; *) continue ;; esac # all-digit popup
+    ns=$((ns+1))
+    while IFS=$'\t' read -r widx wname wactive wlayout; do
+      printf '%s\t%s\t%s\t%s\t%s\n' "$sess" "$widx" "$wname" "$wactive" "$wlayout" >> "$win_tsv"
+      nw=$((nw+1))
+    done < <(tmux list-windows -t "=$sess" -F '#{window_index}	#{window_name}	#{window_active}	#{window_layout}')
+    while IFS=$'\t' read -r widx pidx pactive ppid cwd; do
+      IFS=$'\t' read -r kind resume < <(_tss_resolve "$ppid" "$cwd")
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sess" "$widx" "$pidx" "$pactive" "$kind" "$cwd" "$resume" >> "$pane_tsv"
+      np=$((np+1)); case "$kind" in claude|codex|opencode|pi) na=$((na+1)) ;; esac
+      tmux capture-pane -p -t "=$sess:$widx.$pidx" -S -2000 \
+        > "$dir/scrollback/${sess//[^A-Za-z0-9]/_}__w${widx}_p${pidx}.txt" 2>/dev/null
+    done < <(tmux list-panes -s -t "=$sess" -F '#{window_index}	#{pane_index}	#{pane_active}	#{pane_pid}	#{pane_current_path}')
+  done < <(tmux list-sessions -F '#{session_name}')
+
+  { printf 'saved\t%s\nhost\t%s\nsessions\t%s\nwindows\t%s\npanes\t%s\nagents\t%s\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S')" "$(hostname -s 2>/dev/null)" "$ns" "$nw" "$np" "$na"; } > "$dir/meta.tsv"
+  rm -f "$_TSS_SNAP" "$_TSS_CLAIMED"
+  printf '\033[32mtss\033[0m saved \033[1m%s\033[0m: %d sessions, %d windows, %d panes (%d agent)\n     -> %s\n' \
+    "$name" "$ns" "$nw" "$np" "$na" "$dir"
+}
+
+_tsr_run() { if [[ $_TSR_DRY == 1 ]]; then printf '  + tmux %s\n' "$*" >&2; else tmux "$@"; fi; }
+
+# Build one window. Real panes are created as shells and addressed by window-id
+# (never a captured pane-id, which can come back empty while a server is still
+# starting); the per-pane resume/pre-type commands are zipped on afterward in
+# pane-index order. Agent/other panes are collected into $_TSR_RESUMES for pass 2.
+_tsr_window() {
+  local sess="$1" widx="$2" wname="$3" wactive="$4" wlayout="$5"
+  local pidx pactive kind cwd resume
+
+  if [[ $_TSR_DRY == 1 ]]; then
+    printf '  %s:%s "%s"\n' "$sess" "$widx" "$wname"
+    while IFS=$'\t' read -r pidx pactive kind cwd resume; do
+      printf '      [%s] %s%s\n' "$kind" "$cwd" "${resume:+  ->  $resume}"
+    done < <(awk -F'\t' -v s="$sess" -v w="$widx" '$1==s&&$2==w{print $3"\t"$4"\t"$5"\t"$6"\t"$7}' "$_TSR_DIR/panes.tsv" | sort -t'	' -k1,1n)
+    return
+  fi
+
+  local first=1 win="" n=0 act=-1
+  local -a KIND=() RES=()
+  while IFS=$'\t' read -r pidx pactive kind cwd resume; do
+    if [[ $first == 1 ]]; then
+      if tmux has-session -t "=$sess" 2>/dev/null; then
+        tmux new-window  -t "=$sess:" -n "$wname" -c "$cwd" >/dev/null 2>&1
+      else
+        tmux new-session -d -s "$sess" -n "$wname" -c "$cwd" >/dev/null 2>&1
+      fi
+      win=$(tmux display-message -p -t "=$sess:" '#{window_id}' 2>/dev/null)
+      [[ -n $win ]] || { printf '\033[31mtsr\033[0m could not create %s:%s — skipping\n' "$sess" "$wname" >&2; return 1; }
+      first=0
+    else
+      tmux split-window -t "$win" -c "$cwd" >/dev/null 2>&1
+    fi
+    KIND[$n]="$kind"; RES[$n]="$resume"
+    [[ $pactive == 1 ]] && act=$n
+    n=$((n+1))
+  done < <(awk -F'\t' -v s="$sess" -v w="$widx" '$1==s&&$2==w{print $3"\t"$4"\t"$5"\t"$6"\t"$7}' "$_TSR_DIR/panes.tsv" | sort -t'	' -k1,1n)
+  [[ -n $win ]] || return
+
+  tmux select-layout -t "$win" "$wlayout" >/dev/null 2>&1   # exact geometry
+  tmux set-option -w -t "$win" automatic-rename off 2>/dev/null
+  tmux rename-window -t "$win" "$wname" 2>/dev/null
+
+  # zip commands onto panes in index order (= creation order = saved pane order)
+  local i=0 pane
+  while IFS= read -r pane; do
+    case "${KIND[$i]:-}" in
+      claude|codex|opencode|pi|other) [[ -n ${RES[$i]:-} ]] && _TSR_RESUMES+=("$pane	${KIND[$i]}	${RES[$i]}") ;;
+    esac
+    [[ $i == "$act" ]] && tmux select-pane -t "$pane" 2>/dev/null
+    i=$((i+1))
+  done < <(tmux list-panes -t "$win" -F '#{pane_id}')
+
+  [[ $wactive == 1 ]] && tmux select-window -t "$win" 2>/dev/null
+}
+
+# Restore a saved workspace.   Usage: tsr [-n] [name]   (-n = dry run, -l = list)
+tsr() {
+  _TSR_DRY=0; local name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n|--dry-run) _TSR_DRY=1 ;;
+      -l|--list) command ls -1 "${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/sessions" 2>/dev/null; return ;;
+      *) name="$1" ;;
+    esac; shift
+  done
+  name="${name:-default}"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [[ "$name" != *..* ]] || { echo "tsr: invalid snapshot name" >&2; return 1; }
+  _TSR_DIR="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/sessions/$name"
+  command -v tmux >/dev/null || { echo "tsr: tmux not found"; return 1; }
+  if [[ ! -f $_TSR_DIR/windows.tsv ]]; then
+    echo "tsr: no saved state '$name'. Available:"
+    command ls -1 "${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/sessions" 2>/dev/null | sed 's/^/  /'
+    return 1
+  fi
+  [[ $_TSR_DRY == 0 ]] && tmux start-server 2>/dev/null   # clean, live server before building
+
+  _TSR_RESUMES=()
+  local cur_sess="" skip=0 sess widx wname wactive wlayout
+  while IFS=$'\t' read -r sess widx wname wactive wlayout; do
+    if [[ $sess != "$cur_sess" ]]; then
+      cur_sess="$sess"; skip=0
+      if [[ $_TSR_DRY == 0 ]] && tmux has-session -t "=$sess" 2>/dev/null; then
+        printf '\033[33mtsr\033[0m session %s already exists — skipping (kill it first to rebuild)\n' "$sess"; skip=1
+      fi
+    fi
+    [[ $skip == 1 ]] && continue
+    _tsr_window "$sess" "$widx" "$wname" "$wactive" "$wlayout"
+  done < "$_TSR_DIR/windows.tsv"
+
+  # pass 2: resume agents (shells are ready now), pre-type non-agent commands
+  local rec pane_id kind resume na=0
+  for rec in "${_TSR_RESUMES[@]}"; do
+    IFS=$'\t' read -r pane_id kind resume <<<"$rec"
+    [[ -z $resume ]] && continue
+    case "$kind" in
+      claude|codex|opencode|pi) _tsr_run send-keys -t "$pane_id" "$resume" Enter; na=$((na+1)) ;;
+      *)                        _tsr_run send-keys -t "$pane_id" "$resume" ;;  # pre-typed, not run
+    esac
+  done
+  [[ $_TSR_DRY == 1 ]] && { echo "(dry run — nothing executed)"; return; }
+  printf '\033[32mtsr\033[0m restored \033[1m%s\033[0m — %d agent panes resumed\n' "$name" "$na"
+}

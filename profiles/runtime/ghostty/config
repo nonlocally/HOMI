@@ -1,0 +1,51 @@
+# Adapted from Anu 80d3c86; see profiles/NOTICE.md.
+# Font
+font-family = "JetBrainsMono Nerd Font"
+font-style = Regular
+font-size = 13
+
+# Window
+window-theme = ghostty
+window-padding-x = 14
+window-padding-y = 14
+confirm-close-surface = false
+resize-overlay = never
+
+# Cursor styling
+cursor-style = "block"
+cursor-style-blink = false
+
+# Shell integration
+shell-integration-features = no-cursor
+
+# macOS specific
+
+# Slowdown mouse scrolling
+mouse-scroll-multiplier = 0.95
+
+# Matte Black theme
+background = #121212
+foreground = #bebebe
+cursor-color = #eaeaea
+selection-background = #333333
+selection-foreground = #bebebe
+
+# Normal colors
+palette = 0=#333333
+palette = 1=#D35F5F
+palette = 2=#FFC107
+palette = 3=#b91c1c
+palette = 4=#e68e0d
+palette = 5=#D35F5F
+palette = 6=#5f9ea0
+palette = 7=#bebebe
+
+# Bright colors
+palette = 8=#8a8a8d
+palette = 9=#B91C1C
+palette = 10=#FFC107
+palette = 11=#b90a0a
+palette = 12=#f59e0b
+palette = 13=#B91C1C
+palette = 14=#7ec8ca
+palette = 15=#ffffff
