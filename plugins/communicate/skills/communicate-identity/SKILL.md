@@ -7,7 +7,7 @@ description: Names, renaming, and registration on the agent bus. Use for "regist
 
 ## Register this session on a bus
 
-First inspect `communicate bus status --no-start --json`. Use an existing configured hub; on natural first use, obtain a hosted Communicate invitation unless the user explicitly wants local/self-hosted operation. Then run `communicate bus register` for "register yourself on the bus", or
+First inspect `communicate bus status --no-start --json`. Use the configured hub; without one, local operation, a user-controlled hub and a hosted invitation are valid choices. Follow the user's stated scope or clarify it before enrolling remotely. Then run `communicate bus register` for "register yourself on the bus", or
 `communicate bus register --bus photonics` for a named bus. Verify the returned
 identity with `communicate bus agents --bus photonics --json` (use `general`
 when unspecified). `--name ALIAS --description TEXT` adds a bus alias and
@@ -58,8 +58,10 @@ So renaming someone else means driving their composer:
   run `/rename <name>` (it decides; the gate may hold your request).
 - **Dormant transcript**: append a `custom-title` record to the transcript
   JSONL (`{"type":"custom-title","customTitle":"<name>","sessionId":"<uuid>"}`)
-  — the name is carried when it resumes. The full repo automates this as
-  `homi retitle` (not bundled here).
+  — the name is carried when it resumes. The bundled durable CLI automates this as
+  `homi retitle`. Live `homi adopt NAME --pane %ID` uses the selected tmux
+  server and verifies that exact Claude session; `--socket PATH` disambiguates
+  another server.
 
 ## Cards — describe yourself in the legacy socket roster
 

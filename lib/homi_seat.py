@@ -73,7 +73,7 @@ class SeatUnavailable(SeatError):
 
 
 class SeatDriver:
-    def __init__(self, session=None, log=None):
+    def __init__(self, session=None, log=None, *, socket_path=None, ambient=False):
         self.session = session or os.environ.get("HOMI_SEAT_SESSION", "homi-seats")
         self.log = log or (lambda *a: None)
         # A dedicated named tmux server ("homi") by default, so seats are stable
@@ -82,7 +82,9 @@ class SeatDriver:
         sock = os.environ.get("HOMI_TMUX_SOCKET")
         if sock is None:
             sock = "homi"
-        self._base = ["tmux"] + (["-L", sock] if sock else [])
+        self._base = (["tmux", "-S", socket_path] if socket_path else
+                      ["tmux"] if ambient else
+                      ["tmux"] + (["-L", sock] if sock else []))
 
     # -- tmux plumbing ---------------------------------------------------------
     def _tmux(self, *args, check=False, timeout=10):
@@ -478,3 +480,75 @@ class SeatDriver:
                     seats.append({"seat": parts[0], "cmd": parts[1],
                                   "title": parts[2]})
         return {"ok": True, "seats": seats}
+
+
+def adopt_pane(name, seat, sessions_dir, *, socket_path=None, timeout=6):
+    """Rename one verified Claude session through its own terminal composer.
+
+    This is intentionally a caller-side operation on the selected tmux server,
+    not the daemon's default seat server. A same-named sidecar elsewhere cannot
+    confirm it. No dependency on Anu or an external ``pane`` executable.
+    """
+    import json
+    from pathlib import Path
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name or ""):
+        raise SeatError("invalid agent name")
+    if not re.fullmatch(r"%[0-9]+", seat or ""):
+        raise SeatError("adopt requires an exact pane ID such as %12")
+    drv = SeatDriver(socket_path=socket_path, ambient=True)
+    pane_pid = drv._field(seat, "#{pane_pid}")
+    if not pane_pid.isdigit():
+        raise SeatError("no such pane on the selected tmux server")
+    process = subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True,
+                             text=True, timeout=5, check=True)
+    children = {}
+    for line in process.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and all(value.isdigit() for value in fields):
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    descendants, pending = set(), [int(pane_pid)]
+    while pending:
+        pid = pending.pop()
+        if pid not in descendants:
+            descendants.add(pid)
+            pending.extend(children.get(pid, []))
+
+    def read(path):
+        try:
+            value = json.loads(path.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    matches = []
+    for path in Path(sessions_dir).glob("*.json"):
+        value = read(path)
+        if (path.stem.isdigit() and value.get("pid") in descendants
+                and value.get("messagingSocketPath")
+                and value.get("version") != "communicate-homi"):
+            matches.append((path, value))
+    if len(matches) != 1:
+        raise SeatError("cannot identify exactly one Claude session in that pane; nothing sent")
+    path, original = matches[0]
+    identity_keys = ("pid", "sessionId", "messagingSocketPath")
+    if original.get("name") == name:
+        return {"ok": True, "already": True, "name": name, "seat": seat}
+    state = drv.state(seat)
+    if state != "idle":
+        raise SeatError("pane is %s; wait for its idle composer before adopting" % state)
+    sent = drv.send(seat, "/rename " + name)
+    if not sent.get("ok"):
+        return sent
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if drv._field(seat, "#{pane_pid}") != pane_pid:
+            raise SeatError("pane execution changed while confirming adoption")
+        current = read(path)
+        if all(current.get(key) == original.get(key) for key in identity_keys):
+            if current.get("name") == name:
+                return {"ok": True, "name": name, "seat": seat}
+        else:
+            raise SeatError("session identity changed while confirming adoption")
+        time.sleep(0.1)
+    return {"ok": False, "sent": True, "err": "rename submitted, but this pane's session has not confirmed it"}

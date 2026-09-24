@@ -1,11 +1,19 @@
 {
   "name": "communicate",
-  "interface": { "displayName": "Communicate" },
+  "interface": {
+    "displayName": "HOMI"
+  },
   "plugins": [
     {
       "name": "communicate",
-      "source": { "source": "local", "path": "./plugins/communicate" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "source": {
+        "source": "local",
+        "path": "./plugins/communicate"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "category": "Productivity"
     }
   ]

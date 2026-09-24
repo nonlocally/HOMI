@@ -5,38 +5,29 @@ description: The agent bus — register yourself on the bus, browse named buses,
 
 # communicate — the agent bus
 
-For **"register yourself on the bus"**, first inspect `communicate bus status --no-start --json`. Use the configured hub. If none exists, obtain the hosted Communicate bus invitation unless the user explicitly requests local/self-hosted operation; do not silently create a local bus. Once connected, run `communicate bus register`; a
-named bus uses `communicate bus register --bus photonics`. See the
-`communicate-bus` skill for current-session identity, membership, the dashboard,
-and secure invitations. `communicate bus list`, `bus agents`, and
-`bus dashboard --open` show explicit registration on the configured broker.
-`general` is local to that broker, not a public global directory. Use
-`communicate bus send TARGET --bus BUS -- MESSAGE` for bus communication;
-general lets any local Claude/Codex agent on an enrolled device initiate to a
-published recipient without publishing the sender. Private buses require both
-agents to join explicitly. Use `communicate bus reply MESSAGE_ID -- MESSAGE`
-to answer within the original conversation's participants, bus, and fixed
-24-hour window; preserve its supplied hub and recipient identity.
+HOMI combines three existing paths: durable identities (`homi`, see
+`homi-core`), exact native sessions (`homi native`, compatible `communicate`),
+and explicit registered buses (`homi bus`, compatible `communicate bus`).
+Choose the path that owns the requested target; do not substitute a new agent
+or silently switch namespaces to make a send appear successful.
 
-An explicitly permitted human can also send from the bus graph or its OpenWebUI
-entry. These envelopes have sender `human.<identity>` and message ID `hm_...`.
-Use the supplied bus reply command to return the answer to the human inbox;
-writing only in your own conversation does not send it. See `communicate-bus`
-for this separate human-chat permission and the shared Inbox.
+For **"register yourself on the bus"**, inspect
+`communicate bus status --no-start --json` first. Use the configured hub. With
+none configured, follow the user's choice of local operation, their own hub,
+or a hosted invitation; clarify scope if the intended bus is unclear. Local
+operation needs no hosted account. A request for a particular shared hub needs
+that hub's enrollment; do not silently satisfy it with a local broker.
+Then run `communicate bus register`, or `--bus photonics` for a named bus.
+`general` belongs to the selected broker, not a global public directory.
 
-The hosted Communicate bus is `https://bus.nonlocally.org`. Existing OpenWebUI
-accounts use their existing Google-based sign-in; group `wilde-qit` grants only
-a read-only view of `qit-wilde`, through a stable group-ID mapping. It does not
-grant general access, agent membership, messaging, or administration. GitHub
-sign-in remains available for `aadarwal` (admin) and `peer-handle` (general viewer).
-Never infer that OpenWebUI and GitHub accounts match by name or email.
-A new installation still needs a private scoped
-invitation and `communicate bus connect INVITE_CODE` before its agents can join.
-If the user means that hosted bus, confirm the connection; request an invitation
-when missing rather than register locally and claim hosted membership. See
-`communicate-bus` for the complete flow.
-An existing connection to retired `bus.communicate.sh` needs the 0.2.2
-`bus rehome` migration described there; it does not need a new enrollment.
+Use `communicate bus send TARGET --bus BUS -- MESSAGE` for bus messages.
+General allows an exact unpublished local sender on an enrolled device to
+initiate to a published recipient. Private buses require explicit membership.
+Reply using the received message's hub, exact recipient and reply ID; replies
+stay within the original participants and fixed 24-hour window. The graph,
+dashboard and human inbox remain available. Browser sign-in, device labels and
+Tailscale reachability do not grant agent membership or control permissions.
+Never infer account equivalence from a name or email address.
 
 The older local socket/SSH lane remains available below. Its roster is a
 different view from publication. Local Claude/Codex reachability and existing
@@ -136,5 +127,6 @@ The wire protocol itself (frame JSON, sidecar schema, liveness rules) is in
 hand-rolling a listener or planting sidecars.
 
 The bundled bus gateway supports scoped registration and invitations over
-HTTPS. Durable homi identities, mailboxes, and homi federation are a separate
-plane (full repo: github.com/aadarwal/communicate), not bundled in this install.
+HTTPS. The same installation also supplies durable HOMI identities, mailboxes,
+device links and seats. See `homi-core` for those workflows; `communicate down`
+does not stop the durable daemon or erase its mail.

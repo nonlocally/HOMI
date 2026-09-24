@@ -29,16 +29,7 @@ import shlex
 import subprocess
 import time
 
-# The one kernel list — homi.py's stage list is asserted (by test) to match.
-KERNEL_FILES = sorted([
-    "homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
-    "homi_board.py", "homi_talk.py", "homi_transcript.py", "homi_codex.py",
-    "homi_adopt.py", "homi_device.py", "homi_cockpit.py",
-    # Not a module: the device-side CLI. It ships through the same vehicle so
-    # a device's copy is hash-compared and refreshed like everything else,
-    # instead of being scp'd by hand and silently drifting.
-    "phone",
-])
+from homi_payload import KERNEL_FILES
 
 _FAR_PATH = "/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 

@@ -14,15 +14,12 @@ Existing local Claude/Codex discovery and native socket/SSH routes work without
 bus publication or membership.
 
 First run `communicate bus status --no-start --json` (MCP `bus_status`) to
-inspect configuration without starting a local broker. If `configured` is true,
-a plain **"the bus"** uses that configured hub. If it is false, natural first-use
-**"register yourself on the bus"** means the hosted Communicate bus at
-`https://bus.nonlocally.org`, unless the user explicitly wants a local or
-self-hosted bus. Obtain the owner's private invitation and connect as described
-below before registering. Never silently create a local bus to satisfy that
-shared-bus request. The standalone CLI still defaults to local when directly
-invoked without a configured hub; that compatibility behavior is not the
-plugin's natural first-use onboarding policy.
+inspect configuration without starting a broker. A plain **"the bus"** uses
+the configured hub. With no hub configured, local operation and a user-controlled
+or hosted broker are valid choices. Follow stated intent; clarify the scope if
+it is unclear. Explicit local registration starts a broker for this OS account
+without requiring any hosted invitation. A request for a specific shared hub
+requires enrollment there; never silently create a local substitute.
 
 When the user says **"register yourself on the bus"**, run:
 
@@ -75,17 +72,16 @@ MCP equivalents are `bus_register`, `bus_list`, `bus_agents`, `bus_leave`,
 Each enrolled installation has a stable device ID, based on its broker-issued
 principal. Its account owner comes from the administrator's invitation. On the
 hosted hub, the administrator selects that account in the dashboard invitation
-form. CLI `communicate bus invite general --user peer --url https://HOST`
+form. CLI `communicate bus invite general --user collaborator --url https://HOST`
 requires an actual broker-admin credential; an ordinary enrolled device does
-not become an administrator because its owner is `aadarwal`.
+not become an administrator merely because it claims an administrator's name.
 The joining device cannot choose its owner during connect or registration.
 An agent alias, local OS username, hostname, or Tailscale identity is not proof
 of the account that owns it. Report the broker's `user` field; if an old
 enrollment is unassigned, ask the owner to correct that enrollment.
 
 For another device belonging to the same person, request an invitation assigned
-to that person's existing hosted account (`aadarwal` for Aadarsh's device, or
-`peer` for peer's). The administrator selects the
+to that person's existing account on the selected broker. The administrator selects the
 intended owner from the hub's accounts. Do not infer that choice from a local
 login or a device name. Once connected, ordinary "register yourself" inherits
 that enrollment's account automatically.
@@ -179,64 +175,38 @@ inbound gate; the sender label does not grant additional agent permissions.
 
 **Open in Nonlocally** selects that same registration through an installed
 OpenWebUI Pipe. Its shared history remains in the bus inbox. Human chat requires
-a separate owner-configured allowlist (initially Aadarwal only); group viewing
+a separate owner-configured allowlist; group viewing
 or device enrollment does not grant it. No new agent registration, plugin
 upgrade or key is needed to receive these messages with the 0.2.3 client.
 
-## Hosted Communicate bus
+## Connecting to a selected hosted or self-hosted hub
 
-The interface at `https://bus.nonlocally.org` supports existing OpenWebUI
-accounts through their existing Google sign-in at `https://mit.nonlocally.org`.
-Membership of OpenWebUI group `wilde-qit` grants a read-only view of `qit-wilde`.
-The gateway maps the immutable group ID, not its name; it rechecks account and
-membership admission within 60 seconds and fails closed when checks become
-unavailable. There is no automatic general access. This integration changes bus
-viewing only, not admission to research, docs, or console.
-
-**Sign in with GitHub** remains available for `aadarwal` and `peer-handle`.
-`aadarwal` administers the bus; `peer-handle` views general under the existing
-bus account `peer`. Do not infer an OpenWebUI-to-GitHub identity link from a name,
-email address, or Google sign-in. OpenWebUI administrator status is not bus
-administration. Signing in or joining that group does not enroll a device,
-publish an agent, invite another device, or authorize agent messages. The owner creates
-scoped invitations in the dashboard and shares each privately with its intended
-participant. Installing or updating the plugin alone does not grant access.
-
-For a new installation, obtain a one-time invitation for the intended bus, then
-run:
+The hub administrator supplies a scoped invitation privately. Its browser
+sign-in and viewer permissions are separate from device enrollment and agent
+publication. Never infer a link between identity providers from names or email.
 
 ```sh
 communicate bus connect INVITE_CODE --device my-laptop
-communicate bus register
-```
-
-Use `communicate bus register --bus photonics` for a photonics invitation, or
-`communicate bus register --bus qit-wilde` after accepting a `qit-wilde` invitation.
-Group-based viewing does not substitute for either step.
-Once connected, ordinary registration uses that hosted broker. If this
-installation already has a connection, select it with
-`communicate bus use https://bus.nonlocally.org`. Check
-`communicate bus status --json` and the registration result to confirm the hub.
-If it is still `https://bus.communicate.sh`, update the plugin to 0.2.2 or later and use
-the owner-announced migration:
-
-```sh
-communicate bus rehome https://bus.communicate.sh https://bus.nonlocally.org
+communicate bus register --bus photonics
 communicate bus status --no-start --json
 ```
 
-Rehome explicitly sends the existing device credential to the new HTTPS
-origin. It preserves the same broker's device/agent identities, memberships,
-receipts, and reply adapters, and resumes the worker without republishing
-agents. Its recorded URL alias also keeps existing `--hub OLD reply` commands
-working. Use it only for an owner-confirmed broker move; never infer a trusted
-destination from an arbitrary HTTP redirect. A new installation still needs
-an invitation. The application is `https://research.nonlocally.org`; the docs
-are `https://docs.nonlocally.org`.
+Use the bus granted by the invitation (`general` when appropriate). Existing
+connections can be selected with `communicate bus use https://HOST`. Report the
+actual hub and returned registration ID. If an intended remote hub has no
+connection or invitation, request that enrollment; do not message its owner
+without authorization or silently fall back to a local broker.
 
-When the user requests the hosted bus but no connection or invitation is
-available, request a private scoped invitation from the user; do not silently
-fall back to a local broker. Do not message the owner without authorization.
+For an owner-confirmed broker migration only:
+
+```sh
+communicate bus rehome https://OLD_HOST https://NEW_HOST
+```
+
+Rehome sends the existing device credential to the new origin and preserves the
+same broker's identities, memberships and reply routes. An HTTP redirect alone
+is not permission to send credentials to another origin. Fresh installations
+still require invitations. Local operation does not require a hosted account.
 
 ## Three connection scopes
 
@@ -250,7 +220,7 @@ On that device, start the gateway and explicitly enable tailnet HTTPS:
 communicate bus serve --port 7433
 # In another shell, if the owner requested tailnet access:
 tailscale serve --bg 7433
-communicate bus invite photonics --user peer --url https://OWNER.TAILNET.ts.net --ttl 3600
+communicate bus invite photonics --user collaborator --url https://OWNER.TAILNET.ts.net --ttl 3600
 ```
 
 Use the actual HTTPS address reported by Tailscale. The owner shares the

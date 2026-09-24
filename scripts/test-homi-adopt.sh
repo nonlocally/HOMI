@@ -199,10 +199,9 @@ echo "== kernel files list includes homi_adopt itself and matches homi.py's"
 r="$(PY "
 import re
 src = open('$HERE/lib/homi.py').read()
-m = re.search(r'kernel_files = \[os.path.join\(here_dir, f\) for f in\s*\(([^)]*)\)', src)
-# Not just *.py: the list also carries the device-side CLI (\"phone\"),
-# which must be staged and hash-compared like any module.
-names = sorted(re.findall(r'\"([a-z_0-9.]+)\"', m.group(1)))
+from homi_payload import KERNEL_FILES
+import homi
+names = sorted(homi.KERNEL_FILES)
 print('homi_adopt.py' in names, sorted(ha.KERNEL_FILES) == names)")"
 if [ "$r" = "True True" ]; then ok "one kernel list, adopt ships with it"
 else bad "kernel list (got: $r)"; fi

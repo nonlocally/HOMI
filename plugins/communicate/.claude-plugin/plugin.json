@@ -1,7 +1,7 @@
 {
   "name": "communicate",
-  "version": "0.2.3",
-  "description": "Register existing Claude and Codex agents on general or named buses, browse the bus interface, message members, and connect devices through scoped HTTPS invitations.",
+  "version": "0.3.0",
+  "description": "HOMI: durable agent identities, native Claude/Codex messaging, shared buses and explicit terminal seats.",
   "author": {
     "name": "Aadarsh Agarwal",
     "url": "https://github.com/aadarwal"
@@ -16,5 +16,6 @@
     "bus",
     "registration",
     "discovery"
-  ]
+  ],
+  "repository": "https://github.com/nonlocally/HOMI"
 }

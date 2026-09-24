@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cc_peer  # deliver, _sidecar_obj, _read_line, _extract_text, _addr_from
 import homi_seat  # the seat plane (tmux driver); imported lazily-usable, no tmux at import
 import homi_workspace  # the workspace axis (git interrogation, worktrees)
+from homi_payload import KERNEL_FILES
 
 
 # ---- paths / env -------------------------------------------------------------
@@ -3689,11 +3690,7 @@ def _cli_pair(args):
 
     # [2/7] far daemon: probe, stage, start, upgrade.
     here_dir = os.path.dirname(os.path.abspath(__file__))
-    kernel_files = [os.path.join(here_dir, f) for f in
-                    ("homi.py", "cc_peer.py", "homi_seat.py", "homi_workspace.py",
-                     "homi_board.py", "homi_talk.py", "homi_transcript.py", "homi_codex.py",
-                     "homi_adopt.py", "homi_device.py", "homi_cockpit.py",
-                     "phone")]
+    kernel_files = [os.path.join(here_dir, f) for f in KERNEL_FILES]
 
     def stage_kernel():
         _pair_ssh(addr, "mkdir -p %s" % far_stage_dir)
@@ -4842,6 +4839,10 @@ def cli_call(argv):
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
     if op == "send":
+        literal = []
+        if "--" in args:
+            boundary = args.index("--")
+            args, literal = args[:boundary], args[boundary + 1:]
         frm = "cli"
         if "--from" in args:
             i = args.index("--from")
@@ -4851,6 +4852,7 @@ def cli_call(argv):
                 sys.stderr.write("--from needs a value\n")
                 return 1
             args = args[:i] + args[i + 2:]
+        args = args + literal
         if len(args) < 2:
             sys.stderr.write("usage: communicate homi send <name> <message...> [--from NAME]\n")
             return 1
@@ -4870,6 +4872,10 @@ def cli_call(argv):
         sys.stderr.write((r.get("err") or "failed") + "\n")
         return 1
     if op == "ask":
+        literal = []
+        if "--" in args:
+            boundary = args.index("--")
+            args, literal = args[:boundary], args[boundary + 1:]
         frm, timeout, want_json = "asker", 240.0, False
         rest = []
         i = 0
@@ -4882,6 +4888,7 @@ def cli_call(argv):
             if a == "--json":
                 want_json = True; i += 1; continue
             rest.append(a); i += 1
+        rest.extend(literal)
         if len(rest) < 2:
             sys.stderr.write("usage: communicate homi ask <name> <question...> "
                              "[--from NAME] [--timeout SEC] [--json]\n")
@@ -4897,6 +4904,10 @@ def cli_call(argv):
             sys.stderr.write((r.get("err") or "failed") + "\n")
         return 0 if r.get("ok") else 1
     if op == "reply":
+        literal = []
+        if "--" in args:
+            boundary = args.index("--")
+            args, literal = args[:boundary], args[boundary + 1:]
         frm = ""
         if "--from" in args:
             i = args.index("--from")
@@ -4905,6 +4916,7 @@ def cli_call(argv):
             except IndexError:
                 sys.stderr.write("--from needs a value\n"); return 1
             args = args[:i] + args[i + 2:]
+        args = args + literal
         if len(args) < 2:
             sys.stderr.write("usage: communicate homi reply <token> <answer...> [--from NAME]\n")
             return 1
@@ -5266,11 +5278,36 @@ def cli_call(argv):
     if op == "board":
         # The fabric's front end — a VIEW over the measured ops, extracted to
         # its own module (homi.py must not grow a renderer).
-        import homi_board
+        try:
+            import homi_board
+        except ModuleNotFoundError as error:
+            if error.name != "homi_board":
+                raise
+            sys.stderr.write("The historical HOMI board is not included in this core installation. "
+                             "Use homi bus dashboard for the bus interface.\n")
+            return 1
         return homi_board.main(args)
     if op == "pair":
         return _cli_pair(args)
     if op == "adopt":
+        if "--pane" in args:
+            import argparse
+            parser = argparse.ArgumentParser(prog="homi adopt")
+            parser.add_argument("name")
+            parser.add_argument("--pane", required=True)
+            parser.add_argument("--socket", help="exact tmux socket path; defaults to the caller's server")
+            options = parser.parse_args(args)
+            try:
+                result = homi_seat.adopt_pane(options.name, options.pane, sessions_dir(),
+                                              socket_path=options.socket)
+            except (homi_seat.SeatError, OSError, subprocess.SubprocessError) as error:
+                sys.stderr.write("adopt: %s\n" % error)
+                return 1
+            if result.get("ok"):
+                print("session in %s adopted '%s' (its sidecar confirms)" % (options.pane, options.name))
+                return 0
+            sys.stderr.write((result.get("err") or "adoption unconfirmed") + "\n")
+            return 2 if result.get("sent") else 1
         return _cli_adopt(args)
     if op == "connect":
         return _cli_connect(args)

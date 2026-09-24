@@ -1,12 +1,12 @@
 {
   "name": "communicate",
-  "version": "0.2.3",
-  "description": "Register existing Claude and Codex agents on general or named buses, browse the bus interface, message members, and connect devices through scoped HTTPS invitations.",
+  "version": "0.3.0",
+  "description": "HOMI: durable agent identities, native Claude/Codex messaging, shared buses and explicit terminal seats.",
   "author": {
     "name": "Aadarsh Agarwal",
     "url": "https://github.com/aadarwal"
   },
-  "repository": "https://github.com/aadarwal/communicate",
+  "repository": "https://github.com/nonlocally/HOMI",
   "license": "MIT",
   "keywords": [
     "agents",
@@ -21,8 +21,8 @@
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Communicate",
-    "shortDescription": "Register agents, browse buses, and message across devices",
+    "displayName": "HOMI",
+    "shortDescription": "Durable identities, agent messaging, buses and terminal seats",
     "developerName": "Aadarsh Agarwal",
     "category": "Productivity",
     "capabilities": [
@@ -30,11 +30,11 @@
       "Write"
     ],
     "websiteURL": "https://docs.nonlocally.org",
-    "longDescription": "Register the current Claude Code or Codex session on a general or named bus, inspect memberships and availability in a browser interface, send messages with bus membership checks, and invite devices over HTTPS without sharing shell access. Also includes legacy local socket and SSH routing, existing-session Codex queueing, headless Codex conversations, and wake triggers. Ships six skills, the CLI, and MCP tools.",
+    "longDescription": "HOMI combines existing-session Claude/Codex routing, registered buses with a graph and human inbox, durable mailboxes, and explicit tmux seat control. Local operation works without a hosted account. Remote enrollment and terminal control remain separately authorized. Compatible communicate commands and plugin identifiers are retained.",
     "defaultPrompt": [
-      "Register yourself on the bus",
-      "Register yourself on the photonics bus",
-      "Open the bus interface and show registered agents"
+      "Create a durable agent identity",
+      "Register this session on my configured bus",
+      "Show the bus interface and my durable agents"
     ]
   }
 }

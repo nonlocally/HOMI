@@ -4,6 +4,11 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
+# Packed plugin: RELEASE/vendor/plugins/communicate/bin. Its immutable
+# neighboring release wins over an older registered checkout or current link.
+if [ -f "$repo/VERSION" ] && [ -f "$repo/../src/cli.mjs" ]; then
+  exec node "$repo/../src/cli.mjs" serve
+fi
 pkg="$repo/packages/communicate"
 if [ ! -f "$pkg/src/cli.mjs" ]; then
   data="${COMMUNICATE_DATA:-$HOME/.local/share/communicate}"

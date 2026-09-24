@@ -5,14 +5,14 @@
     "url": "https://github.com/aadarwal"
   },
   "metadata": {
-    "description": "Register existing Claude and Codex agents on named buses, browse the dashboard, and connect devices through scoped HTTPS invitations.",
-    "version": "0.2.3"
+    "description": "HOMI identities, durable mail, native agent routes, explicit buses and terminal seats.",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "communicate",
       "source": "./communicate",
-      "description": "Register yourself on a bus, discover registered agents, message members, and invite devices without sharing shell access."
+      "description": "HOMI identities, durable mail, native agent routes, explicit buses and terminal seats."
     }
   ]
 }

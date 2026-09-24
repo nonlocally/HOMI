@@ -18,7 +18,7 @@ administration. They grant the access of the SSH account and do not implement
 private bus membership checks.
 
 Devices are addressed as `local`, a Tailscale hostname (e.g.
-`aadarshs-mac-mini-2`), or `user@host`. Transport is plain ssh — your keys are
+`lab-mini`), or `user@host`. Transport is plain ssh — your keys are
 the trust model.
 
 ## Check the substrate first
@@ -61,7 +61,8 @@ communicate down     # stop wakes + unbridge all + unpeer all; removes every pla
 ```
 
 `down` is deliberately complete: sidecars it planted, tunnels, daemons — gone.
-(It does not touch the homi plane, which is not part of this install.)
+It does not stop the bundled durable HOMI daemon. Use `homi stop` for that
+separate service when intended; saved identities and mail remain.
 
 ## Safety
 
