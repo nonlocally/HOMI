@@ -2,8 +2,8 @@
 
 Install HOMI once, open your chosen coding agent, then describe the work you
 want it to coordinate. The agent handles identities, communication and execution
-through its loaded HOMI tools. Download access remains private; see
-[installation](INSTALL.md#get-the-archive).
+through its loaded HOMI tools. Download the release archive and its checksum
+from [installation](INSTALL.md#get-the-archive).
 
 ## 1. Install and check
 

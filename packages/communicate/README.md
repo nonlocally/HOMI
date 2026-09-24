@@ -6,10 +6,10 @@ durable daemon, with production Node dependencies included in the release
 archive. The npm name `@aadarwal/communicate`, the plugin identity
 `communicate@communicate`, and the state directory are kept for compatibility
 with earlier Communicate installations. Version 0.3.0 uses a release archive;
-the npm name is not a claim that 0.3.0 is published to npm. Archives currently
-require repository access; public distribution is deferred. Use a matching
-maintainer-provided archive. See
-[RELEASING.md](https://github.com/nonlocally/HOMI/blob/main/docs/RELEASING.md)
+the npm name is not a claim that 0.3.0 is published to npm. Download the archive
+and checksum from the [HOMI 0.3.0 release](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0),
+or install with [Homebrew](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/INSTALL.md#homebrew).
+See [RELEASING.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/RELEASING.md)
 for the validation process.
 
 ## Install

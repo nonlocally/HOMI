@@ -1,8 +1,7 @@
 # Installation
 
-> **Release access.** Archives currently require repository access; public
-> distribution is deferred. Use a matching maintainer-provided archive. See
-> [RELEASING.md](RELEASING.md) for the validation process.
+Install from the [HOMI 0.3.0 release](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
+or use [Homebrew](#homebrew). Setup lets you choose clients and optional tools.
 
 ## Requirements
 
@@ -18,16 +17,16 @@
 Guided setup can install missing dependencies and clients for selected features.
 It does not obtain provider credentials for you or enroll you in a hosted bus.
 Node.js must already be available to start the archive's installer; the HOMI
-Homebrew formula supplies Node when that distribution channel is available.
+Homebrew formula supplies Node and the core runtime dependencies.
 
 ## Get the archive
 
-The archive is `homi-VERSION.tar.gz` with a `.sha256` beside it. Obtain the matching
-build from the maintainer. Once the private release is activated, an account with
-repository access can download both files with GitHub CLI, then verify them:
+The release provides `homi-VERSION.tar.gz` and its matching `.sha256` file.
+Download both, then verify the archive before extracting it:
 
 ```sh
-gh release download v0.3.0 --repo nonlocally/HOMI --pattern 'homi-0.3.0.tar.gz*'
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz.sha256
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
 tar -xzf homi-0.3.0.tar.gz
 ```
@@ -272,8 +271,11 @@ removes only what is still exactly what it wrote. See [PROFILES.md](PROFILES.md)
 
 ## Homebrew
 
-The Homebrew tap is being staged privately for public launch. Use the release
-archive for now; the commands below apply once the tap is public.
+```sh
+brew install nonlocally/tap/homi
+homi setup
+homi doctor
+```
 
 `brew install nonlocally/tap/homi` installs the same archive under Homebrew's prefix and
 puts `homi` and `communicate` on PATH; you still run `homi setup` to register

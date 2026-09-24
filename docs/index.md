@@ -2,8 +2,8 @@
 
 Start here:
 
-- [Quickstart](QUICKSTART.md) — install, two identities, a correlated reply, a
-  session that knows HOMI, a seat, a bus.
+- [Quickstart](QUICKSTART.md) — guided setup, provider sign-in, and asking your
+  agent to create peers and coordinate work; CLI examples for debugging.
 - [Installation](INSTALL.md) — requirements, setup flags, the service, update,
   rollback, uninstall, private configuration, troubleshooting.
 - [CLI and delivery semantics](CLI.md) — what each command means and what a

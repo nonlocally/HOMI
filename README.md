@@ -5,9 +5,8 @@ other across sessions and machines, and runs them in terminal seats you can obse
 and control. One `homi` command, one Claude Code/Codex plugin, one MCP server.
 macOS and Linux.
 
-> **Release access.** Archives currently require repository access; public
-> distribution is deferred. Use a matching maintainer-provided archive. See
-> [RELEASING.md](docs/RELEASING.md) for the validation process.
+Download [HOMI 0.3.0](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
+or install with [Homebrew](docs/INSTALL.md#homebrew).
 
 ## Why
 
@@ -35,11 +34,11 @@ Guided setup checks the remaining requirements and offers to install missing
 tools for the features you choose: Claude Code, Codex, terminal helpers, mesh,
 and, on macOS, Ghostty. You can keep a server installation CLI-only.
 
-Obtain the matching archive from the maintainer. Once the private release is
-activated, an account with repository access can download it with GitHub CLI:
+Download the archive and its checksum, then verify and extract it:
 
 ```sh
-gh release download v0.3.0 --repo nonlocally/HOMI --pattern 'homi-0.3.0.tar.gz*'
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz.sha256
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
 tar -xzf homi-0.3.0.tar.gz
 ./homi-0.3.0/bin/homi setup                    # guided when run in a terminal
@@ -71,9 +70,8 @@ unrelated settings and private overrides are preserved. Explicit
 and do not download missing software. Full requirements, platform recipes,
 flags, and lifecycle are in [INSTALL.md](docs/INSTALL.md).
 
-The Homebrew tap is being staged privately for public launch; use the archive
-for now. Once public, `brew install nonlocally/tap/homi` installs the commands;
-then run `homi setup` to choose your clients and optional tools.
+Alternatively, `brew install nonlocally/tap/homi` installs the commands and core
+dependencies. Then run `homi setup` to choose your clients and optional tools.
 Service installation is also explicit.
 
 ## First success
