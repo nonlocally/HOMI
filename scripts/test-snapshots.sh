@@ -10,6 +10,12 @@
 # the fake manager named explicitly: no real snapshots, drive, tmux server or
 # service manager is touched.
 set -uo pipefail
+# A runner or interactive shell can set XDG/profile roots outside these homes.
+# Fixture schedules must never inherit them or source a user's private overlay.
+while IFS= read -r name; do
+  case "$name" in HOMI_*|XDG_*) unset "$name" ;; esac
+done < <(compgen -e)
+unset TMUX TMUX_PANE BASH_ENV ENV
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MOD="$HERE/profiles/runtime/modules/snapshots"
 SNAP="$MOD/homi-snapshot"
@@ -23,6 +29,7 @@ cleanup() { [ "$BASHPID" = "$$" ] || return 0; rm -rf "$T"; }
 trap cleanup EXIT
 
 FAKEHOME="$T/home with spaces"; mkdir -p "$FAKEHOME"
+export HOME="$FAKEHOME"
 FAKEBIN="$T/bin"; mkdir -p "$FAKEBIN"
 VOL="$T/vol"; ARCH="$VOL/homi-snapshots"; mkdir -p "$VOL"
 LOGF="$T/calls.log"
@@ -317,7 +324,7 @@ printf '%s' "$out" | grep -q "every 6h at 03:00, 09:00, 15:00, 21:00" && ok "sta
 printf '%s' "$out" | grep -q "keep newest 56 snapshots" && ok "KEEP defaults to 56 (14 days at 4/day)" || bad "keep default (out: $out)"
 out="$(HOMI_SNAPSHOT_KEEP=8 _cli "$S4" status)"
 printf '%s' "$out" | grep -q "keep newest 8 snapshots" && ok "HOMI_SNAPSHOT_KEEP overrides" || bad "keep override (out: $out)"
-printf '%s' "$out" | grep -q "com.communicate.homi.snapshots" && ok "status names the HOMI schedule label" || bad "label (out: $out)"
+printf '%s' "$out" | grep -Eq '^label: +(com\.communicate\.homi\.snapshots\.[0-9a-f]{8}|communicate-homi-snapshots-[0-9a-f]{8}\.timer)$' && ok "status names the scoped native HOMI schedule label" || bad "label (out: $out)"
 printf '%s' "$out" | grep -q "loaded:    no" && ok "status reports the (scoped) job not loaded" || bad "loaded line (out: $out)"
 out="$(_cli "$S4" bogus)"; rc=$?
 [ $rc -eq 2 ] && ok "unknown command exits 2" || bad "unknown command rc=$rc"
@@ -370,7 +377,7 @@ echo "-- install/uninstall across two homes leave each other alone"
 out="$(sched "$HOME_A" install)"; rc=$?
 PA="$(plist_of "$HOME_A")"
 [ $rc -eq 0 ] && [ -f "$PA" ] && [ "$(cat "$LAUNCHD/$LA")" = "$PA" ] && ok "A installs and the manager holds A's label from A's file" || bad "install A (rc=$rc out: $out)"
-hours="$(plutil -extract StartCalendarInterval json -o - "$PA" 2>/dev/null | python3 -c 'import json,sys; print(" ".join(str(e["Hour"]) for e in json.load(sys.stdin)))' 2>/dev/null)"
+hours="$(python3 -c 'import plistlib,sys; print(" ".join(str(e["Hour"]) for e in plistlib.load(open(sys.argv[1], "rb"))["StartCalendarInterval"]))' "$PA" 2>/dev/null)"
 [ "$hours" = "3 9 15 21" ] && ok "…StartCalendarInterval fires at 03/09/15/21" || bad "plist hours (got: $hours)"
 grep -q 'KeepAlive\|RunAtLoad\|StartInterval' "$PA" && bad "plist is a daemon or drifting timer" || ok "…one-shot job: no KeepAlive/RunAtLoad/StartInterval"
 [ "$(_mode "$HOME_A/Library/Logs")" = 700 ] && [ "$(_mode "$HOME_A/Library/Logs/homi-snapshot.out.log")" = 600 ] && [ "$(_mode "$HOME_A/Library/Logs/homi-snapshot.err.log")" = 600 ] && ok "…a fresh launchd log dir is 0700 with its two log files pre-created 0600" || bad "log dir/file modes: $(_mode "$HOME_A/Library/Logs" 2>/dev/null) $(_mode "$HOME_A/Library/Logs/homi-snapshot.out.log" 2>/dev/null)"
@@ -449,7 +456,8 @@ PG="$HOME_G/Library/LaunchAgents/$(sched "$HOME_G" preview | jq_ 'print(d["label
 [ $rc -ne 0 ] && [ ! -e "$PG" ] && [ ! -e "$HOME_G/.local/bin/homi-snapshot" ] && ok "a first install whose load fails leaves no files behind" || bad "failed first load left files (rc=$rc out: $out)"
 python3 -c "import json,sys,os; p=sys.argv[1]; d=json.load(open(p)) if os.path.exists(p) else {'entries':{}}; assert not d['entries']" "$HOME_G/.local/state/homi/profiles/ownership.json" 2>/dev/null && ok "…and no ledger entries" || bad "failed load left ledger entries"
 rm -f "$T/bootstrap-fails"
-out="$(python3 "$SCHED" install --home "$HOME_G" --runtime "$HERE/profiles/runtime" --platform linux 2>&1)"; rc=$?
+NON_NATIVE="$(python3 -c 'import sys; print("darwin" if sys.platform == "linux" else "linux")')"
+out="$(python3 "$SCHED" install --home "$HOME_G" --runtime "$HERE/profiles/runtime" --platform "$NON_NATIVE" 2>&1)"; rc=$?
 [ $rc -ne 0 ] && printf '%s' "$out" | grep -q -- '--manager' && ok "a non-native --platform cannot mutate without an explicit --manager fixture" || bad "non-native mutation (rc=$rc out: $out)"
 out="$(python3 "$SCHED" preview --home "$HOME_G" --runtime "$HERE/profiles/runtime" --platform linux 2>&1)"
 printf '%s' "$out" | grep -q 'OnCalendar=\*-\*-\* 03,09,15,21:00:00' && printf '%s' "$out" | grep -q 'Persistent=true' && ok "…while rendering the Linux persistent 03/09/15/21 timer is fine" || bad "linux timer rendering (out: $out)"
