@@ -84,8 +84,12 @@ class Proof:
                  if "homi" in p.name and p != self.unit and (p.is_file() or p.is_symlink())} if paths.exists() else {}
         units = set()
         for command in ("list-units", "list-unit-files"):
-            result = self.manager(command, "--all", "--no-legend", "--plain", "*homi*")
-            units.update(line.split()[0] for line in result.stdout.splitlines() if line.split())
+            # Some systemd releases exit 1 for an unmatched unit-file pattern.
+            # Read the inventory successfully, then select HOMI names locally;
+            # a manager failure must still fail this protection check.
+            result = self.manager(command, "--all", "--no-legend", "--plain")
+            units.update(line.split()[0] for line in result.stdout.splitlines()
+                         if line.split() and "homi" in line.split()[0])
         units.discard(self.label)
         return {"files": files, "units": {name: self.state(name) for name in sorted(units)},
                 "client_configs": {str(p): fingerprint(p) for p in
