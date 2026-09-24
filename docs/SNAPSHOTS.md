@@ -65,6 +65,20 @@ files verify against it. Two rules are stricter than the Anu original:
 Without a configured archive volume every snapshot stays local and the log
 says so; nothing is pruned.
 
+## Privacy of new data
+
+Everything the module creates is private regardless of the caller's umask:
+state parents, the sessions directory, the log, the run lock, manifests,
+`.archived` markers and the archive directory are created under a scoped
+`umask 077` (a subshell, so a shell that sources the module keeps its own
+umask), and the schedule creates its launchd log directory 0700 with the two
+log files pre-created 0600 when absent. Nothing that already exists is
+re-moded: a pre-existing log, sessions directory or snapshot keeps its mode,
+and `rsync -a` keeps the source's modes on every archived or restored copy,
+so a copy that was never private is restored as it is rather than claimed
+private. Reviewing the permissions of data that predates this module is a
+separate step.
+
 ## Configuration
 
 Private settings belong in `~/.config/homi/profiles/local.sh` (trusted shell,
@@ -178,8 +192,11 @@ reactivation restoring files and the previous job, a shared profile-owned
 wrapper retained, edited-file and unowned-file refusals, a non-native
 platform refused for mutation, a refused unload that keeps every file and
 entry until a retry succeeds, a manager that errors reading as unknown, the
-rendered environment, and a fake systemd fixture whose enabled/active flags
+rendered environment, a fake systemd fixture whose enabled/active flags
 are independent (a failed Linux update restores each separately; a refused
-disable keeps the units). It never touches real snapshots, a real volume, a
+disable keeps the units), and a fresh home under `umask 022` whose new state
+parents, sessions directory, log, run lock, manifest, markers and archive
+directory come out private while pre-existing modes and an imported
+non-private archive copy are left as they are. It never touches real snapshots, a real volume, a
 tmux server, or a service manager. Real launchd firing, a real external
 volume, and real systemd remain environment-specific checks.

@@ -101,6 +101,14 @@ _drop_dir() { # <sessions_dir> <entry>
   rm -rf -- "${1:?}/${2:?}"
 }
 
+# PRIVACY. Everything this script creates — state parents, the sessions dir,
+# the log, the run lock, manifests, .archived markers, the archive dir — is
+# created under a scoped `umask 077` (a subshell, never the caller's umask:
+# the module is also sourced), so a launchd run inherits nothing permissive.
+# Existing files and directories are never re-moded; a snapshot dir keeps the
+# mode tss gave it, and rsync -a keeps the source's modes on every copy, so a
+# copy that was never private is restored as it is, not claimed private.
+
 # Every snapshot dir under <root>, oldest first, across BOTH naming schemes.
 # Sorting the bare names would be lexicographic and therefore wrong: it puts
 # every `nightly-*` before every `snap-*` regardless of date. Sort on an
@@ -121,8 +129,7 @@ _snap_dirs() { # <root> [-r]
 # Append one aligned line to the log AND echo it (so the job's stdout log shows it too).
 _logline() { # <status> <detail>
   local line; line="$(printf '%s  %-5s  %s' "$(_now)" "$1" "$2")"
-  mkdir -p "$(dirname "$LOG")" 2>/dev/null
-  printf '%s\n' "$line" >> "$LOG" 2>/dev/null
+  ( umask 077; mkdir -p "$(dirname "$LOG")" && printf '%s\n' "$line" >> "$LOG" ) 2>/dev/null
   printf '%s\n' "$line"
 }
 
@@ -222,7 +229,7 @@ _resolve_snap() { # <root> <token>
 
 # Write a sha256 manifest covering every file in a snapshot dir.
 _manifest() { # <dir>
-  ( cd "$1" && find . -type f ! -name '.manifest.sha256' ! -name '.archived' -print0 \
+  ( umask 077; cd "$1" && find . -type f ! -name '.manifest.sha256' ! -name '.archived' -print0 \
       | sort -z | xargs -0 shasum -a 256 > .manifest.sha256 )
 }
 
@@ -272,7 +279,7 @@ _take_snapshot() { # <name>  -> logs OK/SKIP/ERROR; returns 0 unless a hard erro
   # Atomic lock (mkdir): a wake-from-sleep double-fire or overlapping manual run
   # can't race the same snapshot dir.
   local lock="$SESS_DIR/.${name}.lock"
-  if ! mkdir "$lock" 2>/dev/null; then _logline SKIP "locked ($name already in progress)"; return 0; fi
+  if ! ( umask 077; mkdir "$lock" 2>/dev/null ); then _logline SKIP "locked ($name already in progress)"; return 0; fi
 
   # Snapshot to a temp name, then atomically promote — a crash mid-write can't
   # leave a half-valid final snapshot. Subshell so sourcing the helpers can't
@@ -306,14 +313,14 @@ cmd_archive() {
     _logline "$([[ $dr == 3 ]] && echo ERROR || echo ARCH)" "$(_archive_state) — keeping all local, nothing pruned"
     return 1
   fi
-  mkdir -p "$ARCHIVE_DIR" || { _logline ERROR "cannot create archive dir $ARCHIVE_DIR"; return 1; }
+  ( umask 077; mkdir -p "$ARCHIVE_DIR" ) || { _logline ERROR "cannot create archive dir $ARCHIVE_DIR"; return 1; }
   local snap name dest new=0 already=0 fail=0
   while IFS= read -r snap; do
     name="$(basename "$snap")"; dest="$ARCHIVE_DIR/$name"
     if [[ -f "$snap/.archived" ]] && _archived_verified "$snap" "$name"; then already=$((already+1)); continue; fi
     _manifest "$snap"
     if rsync -a --exclude='.archived' "$snap/" "$dest/" 2>/dev/null && _archived_verified "$snap" "$name"; then
-      printf '%s\n' "$(_now)" > "$snap/.archived"; new=$((new+1))
+      ( umask 077; printf '%s\n' "$(_now)" > "$snap/.archived" ); new=$((new+1))
     else
       fail=$((fail+1)); _logline ERROR "archive FAILED for $name (kept local, will retry)"
     fi
@@ -349,7 +356,7 @@ cmd_prune() {
 cmd_run() {
   local name="${1:-snap-$(date '+%Y-%m-%d-%H%M')}"
   _safe_name "$name" || { _logline ERROR "refusing unsafe snapshot name: $name"; return 1; }
-  mkdir -p "$SESS_DIR"
+  ( umask 077; mkdir -p "$SESS_DIR" )
   local rc=0
   _take_snapshot "$name" || rc=1
   # Always mirror the backlog to the archive, then prune only what is verified
@@ -377,11 +384,11 @@ cmd_restore() {
     echo "restore: REFUSED — archived $name fails checksum verification (or has no manifest); nothing written to $SESS_DIR/$name" >&2
     return 1
   fi
-  mkdir -p "$SESS_DIR"
+  ( umask 077; mkdir -p "$SESS_DIR" )
   local tmpname=".$name.restoring" tmp="$SESS_DIR/.$name.restoring"
   _drop_dir "$SESS_DIR" "$tmpname"
   if rsync -a "$ARCHIVE_DIR/$name/" "$tmp/" 2>/dev/null && _verify_dir "$tmp"; then
-    printf '%s\n' "$(_now)" > "$tmp/.archived"
+    ( umask 077; printf '%s\n' "$(_now)" > "$tmp/.archived" )
     mv "$tmp" "$SESS_DIR/$name" \
       && echo "restored $name from the archive (verified) -> run: tsr $name   (or: homi-workstation shell tsr $name)"
   else

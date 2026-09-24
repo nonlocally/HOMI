@@ -370,6 +370,18 @@ class Schedule:
             raise Conflict(f"{verb}: {self.name} is loaded from {state['path'] or 'an unreported path'}, not this "
                            f"schedule's file {self.job_path}; refusing to touch it")
 
+    def private_log_dir(self):
+        """The launchd log directory and the two log files it will append to,
+        created private when absent; anything that already exists keeps its
+        mode. launchd opens the files with O_APPEND, so a 0600 file stays so."""
+        for directory in (self.log_dir.parent, self.log_dir):
+            if not directory.exists():
+                directory.mkdir(mode=0o700)
+        for name in ("homi-snapshot.out.log", "homi-snapshot.err.log"):
+            path = self.log_dir / name
+            if not path.exists():
+                os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+
     def files_report(self, rows):
         return [{"path": r["path"], "action": r["action"], **({"reason": r["reason"]} if "reason" in r else {})}
                 for r in rows]
@@ -428,7 +440,7 @@ class Schedule:
                 return {"ok": True, "action": "unchanged", **self.describe(), "loaded": True, "restarted": False,
                         "files": self.files_report(rows)}
             if self.platform == "darwin":
-                self.log_dir.mkdir(parents=True, exist_ok=True)
+                self.private_log_dir()
             rollback = []
 
             def restore_files():

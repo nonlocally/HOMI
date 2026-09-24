@@ -128,7 +128,17 @@ _mkarch() { # <sess_dir> <name>: a verified archive copy of the local snapshot
   cp "$1/$2"/*.tsv "$ARCH/$2/"
   ( cd "$ARCH/$2" && find . -type f ! -name '.manifest.sha256' -print0 | sort -z | xargs -0 shasum -a 256 > .manifest.sha256 )
 }
+_mode() { if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
+export -f _mode
 mounted()   { touch "$VOL/.mounted"; }
+# The fake snapshotter every section may use.
+cat > "$T/fake-fns" <<'EOF'
+# Like the real tss: saves under $HOMI_PROFILE_STATE/sessions with umask 077,
+# and (for the suite) records the mode of the run lock while it exists.
+tss() ( umask 077; local d="${HOMI_PROFILE_STATE}/sessions/$1"; mkdir -p "$d"
+        printf 'saved\tnow\nsessions\t2\nwindows\t3\npanes\t5\nagents\t1\n' > "$d/meta.tsv"; printf 'w\n' > "$d/layout.tsv"
+        [ -z "${FAKE_TSS_LOCKMODE:-}" ] || _mode "${HOMI_PROFILE_STATE}/sessions/.${1%.partial}.lock" > "$FAKE_TSS_LOCKMODE" 2>/dev/null || true )
+EOF
 unmounted() { rm -f "$VOL/.mounted"; }
 
 echo "== module files"
@@ -261,6 +271,31 @@ _mkfix "$T/s10/stage" snap-2026-08-31-0300; mkdir -p "$ARCH/snap-2026-08-31-0300
 out="$(_cli "$S10" restore 2026-08-31-0300)"; rc=$?
 [ $rc -eq 0 ] && [ -f "$S10/snap-2026-08-31-0300/layout.tsv" ] && ok "existing text and binary-mode shasum manifests keep verifying" || bad "gnu manifest formats (rc=$rc out: $out)"
 
+echo "== new state, logs, locks, manifests and archive copies are private under a permissive umask; nothing existing is re-moded"
+FRESH="$T/fresh-home"; mkdir -p "$FRESH"; rm -rf "$ARCH"; mounted     # the script, not the suite, creates the archive dir
+STATE="$FRESH/.local/state/homi/workstation"
+( umask 022; HOME="$FRESH" HOMI_SNAPSHOT_FNS="$T/fake-fns" FAKE_TSS_LOCKMODE="$T/lockmode" HOMI_SNAPSHOT_VOL="$VOL" HOMI_SNAPSHOT_ARCHIVE="$ARCH" bash "$SNAP" run snap-2026-09-02-0300 > "$T/fresh-run.out" 2>&1 )
+[ "$(_mode "$STATE")" = 700 ] && [ "$(_mode "$STATE/sessions")" = 700 ] && ok "fresh state parents and the sessions dir are 0700 under umask 022" || bad "state dirs: $(_mode "$STATE" 2>/dev/null) $(_mode "$STATE/sessions" 2>/dev/null)"
+[ "$(_mode "$STATE/snapshots.log")" = 600 ] && ok "the new log is 0600" || bad "log mode: $(_mode "$STATE/snapshots.log" 2>/dev/null)"
+[ "$(cat "$T/lockmode" 2>/dev/null)" = 700 ] && ok "the run lock is 0700 while it exists" || bad "lock mode: $(cat "$T/lockmode" 2>/dev/null)"
+SNAPD="$STATE/sessions/snap-2026-09-02-0300"
+[ "$(_mode "$SNAPD")" = 700 ] && [ "$(_mode "$SNAPD/.manifest.sha256")" = 600 ] && [ "$(_mode "$SNAPD/.archived")" = 600 ] && ok "the snapshot stays 0700 and its manifest and marker are 0600" || bad "snapshot modes: $(_mode "$SNAPD" 2>/dev/null) $(_mode "$SNAPD/.manifest.sha256" 2>/dev/null) $(_mode "$SNAPD/.archived" 2>/dev/null) (run: $(tr '\n' '|' < "$T/fresh-run.out"))"
+[ "$(_mode "$ARCH")" = 700 ] && [ "$(_mode "$ARCH/snap-2026-09-02-0300")" = 700 ] && [ "$(_mode "$ARCH/snap-2026-09-02-0300/.manifest.sha256")" = 600 ] && ok "the new archive dir is 0700 and the archived copy keeps its private modes" || bad "archive modes: $(_mode "$ARCH" 2>/dev/null) $(_mode "$ARCH/snap-2026-09-02-0300" 2>/dev/null)"
+rm -rf "$SNAPD"
+( umask 022; HOME="$FRESH" HOMI_SNAPSHOT_VOL="$VOL" HOMI_SNAPSHOT_ARCHIVE="$ARCH" bash "$SNAP" restore 2026-09-02-0300 >/dev/null 2>&1 )
+[ "$(_mode "$SNAPD")" = 700 ] && [ "$(_mode "$SNAPD/meta.tsv")" = 600 ] && [ "$(_mode "$SNAPD/.archived")" = 600 ] && ok "a restored snapshot keeps the archive copy's private modes" || bad "restored modes: $(_mode "$SNAPD" 2>/dev/null) $(_mode "$SNAPD/meta.tsv" 2>/dev/null) $(_mode "$SNAPD/.archived" 2>/dev/null)"
+chmod 755 "$ARCH/snap-2026-09-02-0300"; rm -rf "$SNAPD"
+( umask 022; HOME="$FRESH" HOMI_SNAPSHOT_VOL="$VOL" HOMI_SNAPSHOT_ARCHIVE="$ARCH" bash "$SNAP" restore 2026-09-02-0300 >/dev/null 2>&1 )
+[ "$(_mode "$SNAPD")" = 755 ] && ok "…and an archive copy that was never private is restored as it is, not claimed private" || bad "imported mode not retained: $(_mode "$SNAPD" 2>/dev/null)"
+chmod 700 "$ARCH/snap-2026-09-02-0300"
+PRE="$T/pre-home"; mkdir -p "$PRE/.local/state/homi/workstation/sessions"; chmod 755 "$PRE/.local/state/homi/workstation" "$PRE/.local/state/homi/workstation/sessions"
+printf 'earlier\n' > "$PRE/.local/state/homi/workstation/snapshots.log"; chmod 644 "$PRE/.local/state/homi/workstation/snapshots.log"
+( umask 022; HOME="$PRE" HOMI_SNAPSHOT_FNS="$T/fake-fns" HOMI_SNAPSHOT_VOL="$VOL" HOMI_SNAPSHOT_ARCHIVE="$ARCH" bash "$SNAP" run snap-2026-09-02-0900 >/dev/null 2>&1 )
+[ "$(_mode "$PRE/.local/state/homi/workstation/sessions")" = 755 ] && [ "$(_mode "$PRE/.local/state/homi/workstation/snapshots.log")" = 644 ] && ok "pre-existing directories and a pre-existing log keep their modes (never re-moded)" || bad "existing data re-moded: $(_mode "$PRE/.local/state/homi/workstation/sessions") $(_mode "$PRE/.local/state/homi/workstation/snapshots.log")"
+got="$( umask 022; export HOME="$FRESH" HOMI_SNAPSHOT_LOG="$T/umask-probe.log"; source "$SNAP" >/dev/null 2>&1; _logline OK probe >/dev/null; umask )"
+[ "$got" = 0022 ] && ok "sourcing the module and logging leaves the invoking shell's umask at 0022" || bad "invoking umask changed to $got"
+[ "$(_mode "$T/umask-probe.log")" = 600 ] && ok "…while the log it created is still 0600" || bad "probe log mode: $(_mode "$T/umask-probe.log" 2>/dev/null)"
+
 echo "== restore resolves every token form"
 S6="$T/s6/sessions"; mkdir -p "$S6"
 _mkfix "$S6" nightly-2026-08-22; _mkfix "$S6" snap-2026-08-23-0300; _mkfix "$S6" snap-2026-08-23-2100
@@ -287,9 +322,6 @@ out="$(_cli "$S4" bogus)"; rc=$?
 
 echo "== an unattended run: fake snapshotter, no tmux server needed"
 S7="$T/s7/sessions"; mkdir -p "$S7"
-cat > "$T/fake-fns" <<'EOF'
-tss() { local d="${HOMI_SNAPSHOT_DIR}/$1"; mkdir -p "$d"; printf 'saved\tnow\nsessions\t2\nwindows\t3\npanes\t5\nagents\t1\n' > "$d/meta.tsv"; printf 'w\n' > "$d/layout.tsv"; }
-EOF
 out="$(HOMI_SNAPSHOT_FNS="$T/fake-fns" _cli "$S7" run snap-2026-09-01-0300)"
 [ -f "$S7/snap-2026-09-01-0300/meta.tsv" ] && ok "run takes the named snapshot" || bad "run snapshot (out: $out)"
 [ ! -e "$S7/snap-2026-09-01-0300.partial" ] && ok "…promoted atomically from its .partial" || bad "partial left behind"
@@ -339,6 +371,7 @@ PA="$(plist_of "$HOME_A")"
 hours="$(plutil -extract StartCalendarInterval json -o - "$PA" 2>/dev/null | python3 -c 'import json,sys; print(" ".join(str(e["Hour"]) for e in json.load(sys.stdin)))' 2>/dev/null)"
 [ "$hours" = "3 9 15 21" ] && ok "…StartCalendarInterval fires at 03/09/15/21" || bad "plist hours (got: $hours)"
 grep -q 'KeepAlive\|RunAtLoad\|StartInterval' "$PA" && bad "plist is a daemon or drifting timer" || ok "…one-shot job: no KeepAlive/RunAtLoad/StartInterval"
+[ "$(_mode "$HOME_A/Library/Logs")" = 700 ] && [ "$(_mode "$HOME_A/Library/Logs/homi-snapshot.out.log")" = 600 ] && [ "$(_mode "$HOME_A/Library/Logs/homi-snapshot.err.log")" = 600 ] && ok "…a fresh launchd log dir is 0700 with its two log files pre-created 0600" || bad "log dir/file modes: $(_mode "$HOME_A/Library/Logs" 2>/dev/null) $(_mode "$HOME_A/Library/Logs/homi-snapshot.out.log" 2>/dev/null)"
 WA="$HOME_A/.local/bin/homi-snapshot"
 [ -x "$WA" ] && grep -q "$WA" "$PA" && ok "…the job runs A's owned wrapper" || bad "wrapper/ProgramArguments"
 python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries']; assert e[sys.argv[2]]['owner']=='snapshots-schedule' and e[sys.argv[3]]['owner']=='snapshots-schedule'" "$HOME_A/.local/state/homi/profiles/ownership.json" "$PA" "$WA" 2>/dev/null && ok "…both files are ledger entries tagged as schedule-owned" || bad "ledger tags"
