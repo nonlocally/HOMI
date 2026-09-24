@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
@@ -23,7 +24,7 @@ class FakeAPI:
         self.users = [{"id": "github-101", "label": "research-owner"},
                       {"id": "github-102", "label": "collaborator"},
                       {"id": "github-103", "label": "<literal-new-person>"}]
-        self.buses = {"study": {"owner": "github-101", "members": ["github-101", "github-102"]}}
+        self.buses = {"study": {"owner": "github-101", "members": ["github-101", "github-102"], "events": []}}
         self.requests = []
         self.lock = threading.RLock()
 
@@ -36,8 +37,9 @@ class FakeAPI:
             owner = self.user == bus["owner"]
             row = {"name": name, "visibility": "private", "owner_user": bus["owner"],
                    "role": "owner" if owner else "member", "agents": [],
-                   "capabilities": {"invite": True, "manage_members": owner, "leave": not owner}}
+                   "capabilities": {"invite": True, "manage_members": owner, "leave": not owner, "event_join": owner}}
             if owner:
+                row["events"] = bus.get("events", [])
                 row["members"] = [{"user": user, "role": "owner" if user == bus["owner"] else "member"}
                                   for user in bus["members"]]
             rows.append(row)
@@ -56,6 +58,23 @@ class FakeAPI:
                 self.buses[request["bus"]] = {"owner": self.user, "members": [self.user]}
                 return {"ok": True, "owner_user": self.user}
             bus = self.buses.get(request.get("bus"))
+            if op == "event_create":
+                assert bus["owner"] == self.user
+                assert request["ttl"] == 14400 and request["max_uses"] == 40
+                event = {"id": "fixture-event-1", "bus": request["bus"], "created_at": time.time(),
+                         "expires_at": time.time() + request["ttl"], "max_uses": request["max_uses"],
+                         "uses": 0, "active": True, "revoked": False, "participants": []}
+                bus.setdefault("events", []).append(event)
+                return {"ok": True, "event": event, "invite": "fixture-shared-event-code"}
+            if op in ("event_revoke", "event_remove"):
+                bus, event = next((bus, event) for bus in self.buses.values() for event in bus.get("events", [])
+                                  if event["id"] == request["event"])
+                assert bus["owner"] == self.user
+                if op == "event_revoke":
+                    event.update(revoked=True, active=False)
+                else:
+                    next(p for p in event["participants"] if p["principal"] == request["principal"])["removed"] = True
+                return {"ok": True}
             if op in ("member_add", "member_remove"):
                 assert bus and request["user"] in {user["id"] for user in self.users}
                 if op == "member_add":
@@ -148,6 +167,31 @@ def main():
             page.locator("#revoke-invite").click()
             expect(page.locator("#invite-output")).to_have_text("Invitation revoked.")
             page.locator('#invite-dialog [data-close]').first.click()
+            page.locator("#event-button").click()
+            expect(page.locator("#event-ttl")).to_have_value("14400")
+            expect(page.locator("#event-limit")).to_have_value("40")
+            page.locator("#event-local").check()
+            page.locator("#event-submit").click()
+            expect(page.locator("#event-output")).to_contain_text("commbus1.")
+            expect(page.locator("#event-list")).to_contain_text("0 of 40 devices")
+            assert not any(r["op"] == "redeem" for r in api.requests), "creating a code must not enroll the viewer"
+            event = api.buses["study"]["events"][0]
+            event["uses"] = 2
+            event["participants"] = [{"principal": "fixture-event-device-1", "user": "event-guest-1",
+                                      "device": "Guest laptop", "joined_at": time.time(), "removed": False},
+                                     {"principal": "fixture-event-device-2", "user": "event-guest-2",
+                                      "device": "<literal guest>", "joined_at": time.time(), "removed": False}]
+            page.locator("#refresh").evaluate("element => element.click()")
+            expect(page.locator("#event-list")).to_contain_text("2 of 40 devices")
+            page.get_by_role("button", name="Close event code fixture-event-1", exact=True).click()
+            expect(page.locator("#event-list")).to_contain_text("Closed")
+            expect(page.locator("#event-result")).to_be_hidden()
+            assert not any(p["removed"] for p in event["participants"]), "closing code must leave participants connected"
+            page.locator("#event-list summary").click()
+            page.get_by_role("button", name="Remove event device fixture-event-device-1", exact=True).click()
+            expect(page.locator("#event-list")).to_contain_text("1 device connected")
+            assert event["participants"][0]["removed"] and not event["participants"][1]["removed"]
+            page.locator('#event-dialog [data-close]').first.click()
             page.locator("#create-button").click()
             page.locator("#new-bus").fill("new-study")
             page.locator("#create-submit").click()
@@ -157,6 +201,7 @@ def main():
             api.user = "github-102"
             page.goto(origin + "/?bus=study")
             expect(page.locator("#members-button")).to_be_hidden()
+            expect(page.locator("#event-button")).to_be_hidden()
             expect(page.locator("#leave-button")).to_be_visible()
             page.locator("#invite-button").click()
             expect(page.locator("#invite-user")).to_be_disabled()
@@ -177,10 +222,19 @@ def main():
             assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= 390
             if os.environ.get("COMM_SELF_SERVICE_SCREENSHOT"):
                 page.screenshot(path=os.environ["COMM_SELF_SERVICE_SCREENSHOT"])
+            page.locator('#members-dialog [data-close]').first.click()
+            page.locator("#event-button").click()
+            expect(page.locator("#event-limit")).to_be_visible()
+            bounds = page.locator("#event-dialog").bounding_box()
+            assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= 390
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "mobile event dialog overflows"
+            if os.environ.get("COMM_SELF_SERVICE_SCREENSHOT"):
+                screenshot = Path(os.environ["COMM_SELF_SERVICE_SCREENSHOT"])
+                page.screenshot(path=str(screenshot.with_name(screenshot.stem + "-event" + screenshot.suffix)))
             assert not errors, errors
             assert not any(r["op"] in ("revoke", "chat_send", "register", "join", "leave") for r in api.requests)
             browser.close()
-        print("PASS self-service owner/member workflow, canonical IDs, invitation scope, graph entry, mobile layout")
+        print("PASS self-service owner/member/event workflow, canonical IDs, invitation scope, graph entry, mobile layout")
     finally:
         server.shutdown()
         server.server_close()

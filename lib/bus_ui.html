@@ -180,6 +180,12 @@
     .device-row strong { font-size: 13px; font-weight: 500; }
     #member-list strong { min-width: 0; overflow-wrap: anywhere; }
     #member-list .role { display: inline-flex; flex-shrink: 0; }
+    .event-record { border-top: 1px solid var(--line); padding: 15px 0; }
+    .event-record > .device-row { border: 0; padding-top: 0; }
+    .event-record details { margin-top: 12px; font-size: 12px; }
+    .event-record summary { color: var(--ink-2); cursor: pointer; }
+    .event-record .device-row > div { min-width: 0; overflow-wrap: anywhere; }
+    .event-record .button { flex: none; }
     .device-row p { font-size: 11px; overflow-wrap: anywhere; }
     .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 10; width: max-content; max-width: calc(100vw - 32px); padding: 11px 17px; border: 1px solid #44443d; border-radius: 6px; background: #1b1b19; color: var(--ink); font-size: 12px; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
@@ -366,7 +372,7 @@
       </div>
     </header>
     <main class="main">
-      <div class="page-heading"><div class="heading-copy"><h1 id="page-title">All buses</h1><p class="subtitle" id="page-description"></p></div><div class="heading-actions"><button id="inbox-button" class="button" aria-haspopup="dialog" hidden>Inbox</button><button id="members-button" class="button" aria-haspopup="dialog" hidden>Members</button><button id="leave-button" class="text-button" hidden>Leave bus</button><button id="invite-button" class="button" hidden>Invite device</button><button id="register-button" class="button primary">Publish agent</button></div></div>
+      <div class="page-heading"><div class="heading-copy"><h1 id="page-title">All buses</h1><p class="subtitle" id="page-description"></p></div><div class="heading-actions"><button id="inbox-button" class="button" aria-haspopup="dialog" hidden>Inbox</button><button id="members-button" class="button" aria-haspopup="dialog" hidden>Members</button><button id="leave-button" class="text-button" hidden>Leave bus</button><button id="event-button" class="button" aria-haspopup="dialog" hidden>Event join code</button><button id="invite-button" class="button" hidden>Invite device</button><button id="register-button" class="button primary">Publish agent</button></div></div>
       <div class="stats"><div class="stat"><p class="stat-label">Live</p><p class="stat-value" id="live-count">0</p></div><div class="stat"><p class="stat-label">Queueable</p><p class="stat-value" id="queueable-count">0</p></div><div class="stat"><p class="stat-label">Publishing devices</p><p class="stat-value" id="device-count">0</p></div></div>
       <p id="stale-notice" class="notice" role="status" hidden></p>
       <section class="roster" aria-labelledby="roster-title">
@@ -394,6 +400,22 @@
   <dialog id="invite-dialog" class="dialog" aria-labelledby="invite-title"><form id="invite-form"><div class="dialog-heading"><h2 id="invite-title">Invite a device</h2><button type="button" class="icon-button" data-close="invite-dialog" aria-label="Close">×</button></div><p>This invitation enrolls one device on the selected bus. It does not publish any agents. Share it privately.</p><div id="invite-user-field" class="field" hidden><label for="invite-user">User</label><select id="invite-user"></select><small>The device and its agents will belong to this user.</small></div><div class="field"><label for="invite-bus">Bus</label><select id="invite-bus"></select></div><p id="invite-access">On general, the device’s agents can contact published recipients without publishing themselves.</p><div class="field"><label for="invite-url">Broker URL</label><input id="invite-url" type="url" required spellcheck="false"><small>Use an HTTPS address the recipient can reach.</small></div><p id="invite-scope" class="scope"></p><label id="local-only-label" class="check" hidden><input id="local-only" type="checkbox">This invitation is for this device only.</label><div class="field"><label for="invite-ttl">Expires in</label><select id="invite-ttl"><option value="3600">1 hour</option><option value="86400">24 hours</option><option value="604800">7 days</option></select></div><p id="invite-error" class="form-error" role="alert"></p><div id="invite-result" hidden><h3>Connect this device</h3><pre id="invite-output" class="output"></pre><p id="invite-expiry" class="small muted"></p><button id="copy-invite" class="button" type="button">Copy command</button> <button id="revoke-invite" class="button danger" type="button" hidden>Revoke invitation</button></div><div class="dialog-actions"><button type="button" class="button" data-close="invite-dialog">Done</button><button id="invite-submit" class="button primary" type="submit">Create invitation</button></div></form></dialog>
 
   <dialog id="devices-dialog" class="dialog" aria-labelledby="devices-title"><div class="dialog-heading"><h2 id="devices-title">Devices</h2><button class="icon-button" data-close="devices-dialog" aria-label="Close">×</button></div><p>These devices have bus access. Their local agents are reachable automatically; only chosen agents are published in this directory. Devices enrolled on general can contact its published recipients without publishing the sender. Private buses also require both agents to join. Revoking a device removes its bus access.</p><div id="device-list" class="device-list"></div><div class="dialog-actions"><button class="button" data-close="devices-dialog">Done</button></div></dialog>
+  <dialog id="event-dialog" class="dialog" aria-labelledby="event-title">
+    <div class="dialog-heading"><h2 id="event-title">Event join codes</h2><button type="button" class="icon-button" data-close="event-dialog" aria-label="Close">×</button></div>
+    <p>Share one code with everyone at your event. Each person gives it to their agent to connect a separate device to this bus. Anyone with the code can join while it is open.</p>
+    <p>This grants one bus only. A guest label does not verify a GitHub identity, and joining does not grant control of another device.</p>
+    <form id="event-form">
+      <div class="field"><label for="event-bus">Bus</label><select id="event-bus"></select></div>
+      <div class="field"><label for="event-url">Broker URL</label><input id="event-url" type="url" required spellcheck="false"><small>Use the HTTPS address your guests can reach.</small></div>
+      <label id="event-local-label" class="check" hidden><input id="event-local" type="checkbox">This is a local test on this device only.</label>
+      <div class="field"><label for="event-ttl">Accept new joins for</label><select id="event-ttl"><option value="3600">1 hour</option><option value="14400" selected>4 hours</option><option value="86400">24 hours</option></select></div>
+      <div class="field"><label for="event-limit">Maximum devices</label><input id="event-limit" type="number" min="1" max="100" step="1" value="40" required><small>Between 1 and 100 devices. Devices use separate credentials.</small></div>
+      <p id="event-error" class="form-error" role="alert"></p>
+      <div id="event-result" hidden><h3>Give this code to your agent</h3><pre id="event-output" class="output"></pre><p id="event-expiry" class="small muted"></p><button id="copy-event" class="button" type="button">Copy event code</button><p>Copy it before closing: the code is shown only once. Your agent connects, then explicitly registers on this bus.</p></div>
+      <div class="dialog-actions"><button type="button" class="button" data-close="event-dialog">Done</button><button id="event-submit" class="button primary" type="submit">Create event code</button></div>
+    </form>
+    <h3>Codes for this bus</h3><p>Closing a code stops future joins. Devices that already joined stay connected; remove a device below to end its access to this bus.</p><div id="event-list" class="device-list"></div>
+  </dialog>
   <dialog id="chat-dialog" class="chat-drawer" aria-labelledby="chat-title">
     <header class="chat-header"><button id="chat-back" class="text-button" type="button" hidden>← Inbox</button><h2 id="chat-title">Inbox</h2><button class="icon-button" data-close="chat-dialog" aria-label="Close chat" type="button">×</button></header>
     <div id="chat-intro" class="chat-intro"><p>Your conversations with published agents. Only messages sent here and their explicit replies appear in this inbox.</p></div>
@@ -431,7 +453,7 @@
       $('graph-search-slot').append($('search-control'));
       $('graph-filter-panel').append($('status-filters'),$('identity-filters'));
     }
-    let toastTimer, activeInvite='', inviteEpoch=0, memberBus=null;
+    let toastTimer, activeInvite='', inviteEpoch=0, memberBus=null, eventEpoch=0, activeEvent=null;
     function getToken() {
       const fragment = new URLSearchParams(location.hash.slice(1));
       const token = fragment.get('token');
@@ -834,6 +856,7 @@
       return Boolean(state.data.is_admin && capability === 'invite');
     }
     function inviteBuses() {return buses().filter(bus => busCapability(bus.name,'invite'));}
+    function eventBuses() {return buses().filter(bus => busCapability(bus.name,'event_join'));}
     function canInviteHere() {return state.bus === null ? inviteBuses().length > 0 : busCapability(state.bus,'invite');}
     function inviteUsers(name) {
       const bus=busRecord(name);
@@ -983,6 +1006,7 @@
       for (const element of document.querySelectorAll('.admin')) element.hidden=!admin;
       for (const id of ['create-button','sidebar-create']) $(id).hidden=!canCreateBus();
       $('invite-button').hidden=!canInviteHere();
+      $('event-button').hidden=!eventBuses().some(bus => state.bus === null || bus.name === state.bus);
       $('members-button').hidden=state.bus === null || !busCapability(state.bus,'manage_members');
       $('leave-button').hidden=state.bus === null || !busCapability(state.bus,'leave');
       const readerName=state.data.browser_session ? state.data.display_name || state.data.user || '' : '';
@@ -1001,6 +1025,7 @@
       $('broker-address').textContent=location.origin;
       renderNav(); renderIdentityFilters();renderRows();
       if ($('members-dialog').open) renderMembers();
+      if ($('event-dialog').open) renderEvents();
       if ($('invite-dialog').open && !busCapability($('invite-bus').value,'invite')) {
         $('invite-dialog').close();toast('Your invitation access changed. Choose an available bus.');
       } else if ($('invite-dialog').open) {
@@ -1084,8 +1109,8 @@
       memberBus=state.bus;$('member-error').textContent='';renderMembers();$('members-dialog').showModal();
     }
     function isLoopback(url) { return url.hostname === 'localhost' || url.hostname.endsWith('.localhost') || url.hostname === '[::1]' || /^127\./.test(url.hostname); }
-    function inviteURL() {
-      const url=new URL($('invite-url').value.trim());
+    function inviteURL(field='invite-url') {
+      const url=new URL($(field).value.trim());
       if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) throw new Error('Enter only the broker origin, such as https://broker.example.com.');
       if (!isLoopback(url) && url.protocol !== 'https:') throw new Error('Another device needs a trusted HTTPS broker URL.');
       return url;
@@ -1123,6 +1148,82 @@
       const bytes=new TextEncoder().encode(JSON.stringify({url,invite}));
       let binary='';for (const byte of bytes) binary+=String.fromCharCode(byte);
       return 'commbus1.' + btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    }
+    function resetEvent() {
+      eventEpoch++;activeEvent=null;$('event-result').hidden=true;$('event-output').textContent='';
+      $('event-expiry').textContent='';$('copy-event').disabled=true;$('event-submit').disabled=false;
+    }
+    function eventStatus(event) {
+      return event.revoked ? 'Closed' : event.expires_at*1000 <= Date.now() ? 'Expired' :
+        event.uses >= event.max_uses ? 'Full' : event.active ? 'Open' : 'Closed';
+    }
+    function renderEvents() {
+      const bus=busRecord($('event-bus').value), list=$('event-list');list.replaceChildren();
+      if (!bus || !busCapability(bus.name,'event_join')) {
+        $('event-dialog').close();toast('Your event-management access changed.');return;
+      }
+      const events=bus.events || [];
+      if (!events.length) list.append(node('p','muted','No event codes created for this bus.'));
+      for (const event of events) {
+        const section=node('section','event-record'), row=node('div','device-row'), info=node('div');
+        info.append(node('strong','',eventStatus(event) + ' · ' + event.uses + ' of ' + event.max_uses + ' devices'),
+          node('p','','Expires ' + new Date(event.expires_at*1000).toLocaleString()),
+          node('p','muted','Created ' + new Date(event.created_at*1000).toLocaleString()));
+        row.append(info);
+        if (event.active) {
+          const close=node('button','button small danger','Close code');
+          close.setAttribute('aria-label','Close event code ' + event.id);
+          close.addEventListener('click',async () => {
+            if (!busCapability(bus.name,'event_join') || !confirm('Stop future joins with this code? Devices already connected to ' + bus.name + ' keep their access.')) return;
+            close.disabled=true;const epoch=eventEpoch;
+            try {
+              await api('event_revoke',{event:event.id});
+              if (epoch !== eventEpoch) return;
+              if (activeEvent && activeEvent.id === event.id) resetEvent();
+              await refresh();toast('Code closed to future joins');
+            } catch(error) {if (epoch === eventEpoch) {$('event-error').textContent=error.message;close.disabled=false;}}
+          });row.append(close);
+        }
+        section.append(row);
+        const participants=event.participants || [];
+        if (participants.length) {
+          const detail=node('details'), connected=participants.filter(participant => !participant.removed).length;
+          detail.append(node('summary','',connected + (connected === 1 ? ' device connected' : ' devices connected')));
+          for (const participant of participants) {
+            const participantRow=node('div','device-row'), label=node('div');
+            label.append(node('strong','',participant.device || 'Guest device'),node('p','muted',accountLabel(participant.user)));
+            participantRow.append(label);
+            if (participant.removed) participantRow.append(node('span','muted','Removed'));
+            else {
+              const remove=node('button','button small danger','Remove');
+              remove.setAttribute('aria-label','Remove event device ' + participant.principal);
+              remove.addEventListener('click',async () => {
+                if (!busCapability(bus.name,'event_join') || !confirm('Remove ' + (participant.device || 'this device') + ' from ' + bus.name + '? Its other bus access stays unchanged. It cannot rejoin using this event code.')) return;
+                remove.disabled=true;const epoch=eventEpoch;
+                try {await api('event_remove',{event:event.id,principal:participant.principal});if(epoch !== eventEpoch)return;await refresh();toast('Device removed from ' + bus.name);}
+                catch(error) {if(epoch === eventEpoch){$('event-error').textContent=error.message;remove.disabled=false;}}
+              });participantRow.append(remove);
+            }
+            detail.append(participantRow);
+          }section.append(detail);
+        }list.append(section);
+      }
+      if (activeEvent) {
+        const event=events.find(event => event.id === activeEvent.id) || activeEvent, status=eventStatus(event);
+        $('event-expiry').textContent=bus.name + ' · ' + event.uses + ' of ' + event.max_uses + ' devices · ' + status + ' · Expires ' + new Date(event.expires_at*1000).toLocaleString();
+        $('copy-event').disabled=status !== 'Open';
+        if (status !== 'Open') $('event-output').textContent='This code is ' + status.toLowerCase() + '.';
+      }
+    }
+    function openEvent() {
+      const allowed=eventBuses();
+      if (!allowed.some(bus => state.bus === null || bus.name === state.bus)) return;
+      resetEvent();$('event-error').textContent='';$('event-bus').replaceChildren();
+      for (const bus of allowed) {const option=node('option','',bus.name);option.value=bus.name;$('event-bus').append(option);}
+      $('event-bus').value=allowed.some(bus => bus.name === chosenBus()) ? chosenBus() : allowed[0].name;
+      $('event-url').value=location.origin;$('event-ttl').value='14400';$('event-limit').value='40';$('event-local').checked=false;
+      $('event-local-label').hidden=!isLoopback(new URL(location.origin));
+      renderEvents();$('event-dialog').showModal();
     }
     function renderDevices() {
       const list=$('device-list');list.replaceChildren();
@@ -1213,6 +1314,30 @@
       catch(error) {toast(error.message);}
       finally {$('leave-button').disabled=false;}
     });
+    $('event-button').addEventListener('click',openEvent);
+    $('event-dialog').addEventListener('close',() => {resetEvent();$('event-list').replaceChildren();});
+    $('event-bus').addEventListener('change',() => {resetEvent();$('event-error').textContent='';renderEvents();});
+    $('event-url').addEventListener('input',() => {
+      resetEvent();$('event-local').checked=false;
+      try {$('event-local-label').hidden=!isLoopback(new URL($('event-url').value.trim()));} catch(_) {$('event-local-label').hidden=true;}
+    });
+    for (const id of ['event-ttl','event-limit']) $(id).addEventListener('change',resetEvent);
+    $('event-form').addEventListener('submit',async event => {
+      event.preventDefault();$('event-submit').disabled=true;$('event-error').textContent='';const epoch=eventEpoch;
+      try {
+        const bus=$('event-bus').value,url=inviteURL('event-url'),ttl=Number($('event-ttl').value),max_uses=Number($('event-limit').value);
+        if (!busCapability(bus,'event_join')) throw new Error('You do not have permission to create an event code for this bus.');
+        if (isLoopback(url) && !$('event-local').checked) throw new Error('Guests need a reachable HTTPS address. Acknowledge a local test only if all devices are on this computer.');
+        if (!Number.isInteger(ttl) || ttl < 60 || ttl > 86400) throw new Error('Choose an expiry between one minute and 24 hours.');
+        if (!Number.isInteger(max_uses) || max_uses < 1 || max_uses > 100) throw new Error('Choose a limit between 1 and 100 devices.');
+        const data=await api('event_create',{bus,ttl,max_uses});
+        if (epoch !== eventEpoch) return;
+        activeEvent=data.event;$('event-output').textContent=encodeInvite(url.origin,data.invite);
+        $('event-result').hidden=false;renderEvents();await refresh();
+      } catch(error) {if (epoch === eventEpoch) $('event-error').textContent=error.message;}
+      finally {if (epoch === eventEpoch) $('event-submit').disabled=false;}
+    });
+    $('copy-event').addEventListener('click',() => {if (!$('copy-event').disabled) copy($('event-output').textContent);});
     $('invite-button').addEventListener('click',openInvite);
     $('empty-invite').addEventListener('click',openInvite);
     $('invite-url').addEventListener('input',() => {resetInvite();$('local-only').checked=false;updateScope();});

@@ -91,6 +91,14 @@ function accountFixture(user='owner') {
         capabilities:capabilities(true,false,true),agents:[]}]};
 }
 
+function eventFixture() {
+  const data=accountFixture();data.buses[1].capabilities.event_join=true;data.buses[1].events=[];return data;
+}
+function eventRecord() {
+  return {id:'event-fixture',bus:'study',created_at:Date.now()/1000,expires_at:Date.now()/1000+14400,
+    max_uses:40,uses:0,revoked:false,active:true,participants:[]};
+}
+
 (async () => {
   const p=page();await flush();
   assert.deepEqual(p.history,['/'],'consume fragment before sending any requests');
@@ -249,6 +257,81 @@ function accountFixture(user='owner') {
   assert.equal(labelled.ids['invite-user'].children[2].textContent,'<label-colleague>');
   assert.equal(labelled.ids['invite-user'].children[2].value,'colleague');
   console.log('ok account display labels are literal text while membership and invitation values remain canonical IDs');
+
+  const eventData=eventFixture(), eventPage=page({snapshot:eventData,origin:'https://bus.example'});await flush();
+  await eventPage.ids['event-button'].fire('click');
+  assert.deepEqual(eventPage.ids['event-bus'].children.map(el=>el.value),['study']);
+  assert.equal(eventPage.ids['event-ttl'].value,'14400');assert.equal(eventPage.ids['event-limit'].value,'40');
+  const generatedEvent=eventRecord();
+  eventPage.setHandler(r=>{
+    if(r.op==='event_create'){eventData.buses[1].events.push(generatedEvent);return {ok:true,event:generatedEvent,invite:'event-shared-fixture-secret'};}
+    if(r.op==='event_revoke'){generatedEvent.revoked=true;generatedEvent.active=false;}
+    if(r.op==='event_remove') generatedEvent.participants.find(p=>p.principal===r.principal).removed=true;
+    return r.op==='snapshot'?eventData:{ok:true};
+  });
+  await eventPage.ids['event-form'].fire('submit');
+  const createEvent=eventPage.requests.find(r=>r.op==='event_create');
+  assert.equal(createEvent.bus,'study');assert.equal(createEvent.ttl,14400);assert.equal(createEvent.max_uses,40);
+  assert.equal(createEvent.user,undefined,'event join never claims the issuer account for guests');
+  const sharedCode=eventPage.ids['event-output'].textContent;
+  assert.deepEqual(JSON.parse(Buffer.from(sharedCode.split('.')[1],'base64url').toString()),{url:'https://bus.example',invite:'event-shared-fixture-secret'});
+  await eventPage.ids['copy-event'].fire('click');assert.equal(eventPage.copies[0],sharedCode);
+  assert.ok(![...eventPage.storage.values()].some(v=>String(v).includes('event-shared-fixture-secret')));
+  generatedEvent.uses=1;generatedEvent.participants.push({principal:'event-device-one',user:'event-guest-one',device:'<img onerror=bad()>',joined_at:Date.now()/1000,removed:false});
+  await eventPage.ids.refresh.fire('click');
+  assert.ok(eventPage.ids['event-list'].textContent.includes('1 of 40 devices'));
+  assert.ok(eventPage.ids['event-list'].textContent.includes('<img onerror=bad()>'));
+  await children(eventPage.ids['event-list']).find(el=>el.attrs['aria-label']==='Close event code event-fixture').fire('click');
+  assert.ok(eventPage.requests.some(r=>r.op==='event_revoke' && r.event==='event-fixture'));
+  assert.equal(generatedEvent.participants[0].removed,false,'closing a code leaves existing entrants connected');
+  assert.equal(eventPage.ids['event-output'].textContent,'','closing a code clears its displayed credential');
+  await children(eventPage.ids['event-list']).find(el=>el.attrs['aria-label']==='Remove event device event-device-one').fire('click');
+  assert.ok(eventPage.requests.some(r=>r.op==='event_remove' && r.event==='event-fixture' && r.principal==='event-device-one'));
+  assert.equal(generatedEvent.participants[0].removed,true);
+  assert.ok(!eventPage.requests.some(r=>r.op==='revoke' || r.op==='member_remove' || r.op.startsWith('chat_')));
+  console.log('ok event code is bounded, copyable, scoped, secret-free in storage, and tracks separate close/removal actions');
+
+  const noEvents=page({snapshot:accountFixture()});await flush();
+  assert.equal(noEvents.ids['event-button'].hidden,true,'matching owner role without event capability grants nothing');
+  await noEvents.ids['event-button'].fire('click');assert.equal(noEvents.ids['event-dialog'].open,false);
+  const oldAdmin=page();await flush();assert.equal(oldAdmin.ids['event-button'].hidden,true,'older broker does not imply event support');
+  const eventAdminData=eventFixture();eventAdminData.is_admin=true;
+  const eventAdmin=page({snapshot:eventAdminData});await flush();assert.equal(eventAdmin.ids['event-button'].hidden,false);
+  const revokedEventData=eventFixture(), revokedEvent=page({snapshot:revokedEventData,origin:'https://bus.example'});await flush();
+  await revokedEvent.ids['event-button'].fire('click');let finishEvent;
+  revokedEvent.setHandler(r=>r.op==='event_create'?new Promise(resolve=>{finishEvent=resolve;}):revokedEventData);
+  const eventPending=revokedEvent.ids['event-form'].fire('submit');await flush();
+  revokedEventData.buses[1].capabilities.event_join=false;await revokedEvent.ids.refresh.fire('click');
+  assert.equal(revokedEvent.ids['event-dialog'].open,false);
+  finishEvent({ok:true,event:eventRecord(),invite:'late-event-secret'});await eventPending;
+  assert.equal(revokedEvent.ids['event-output'].textContent,'');assert.equal(revokedEvent.ids['event-result'].hidden,true);
+  console.log('ok event capability is explicit for admin/owner, and lost permission discards an in-flight join code');
+
+  const invalidEvent=page({snapshot:eventFixture()});await flush();await invalidEvent.ids['event-button'].fire('click');
+  let eventRequests=invalidEvent.requests.length;await invalidEvent.ids['event-form'].fire('submit');
+  assert.equal(invalidEvent.requests.length,eventRequests,'local addresses require explicit test acknowledgement');
+  invalidEvent.ids['event-url'].value='http://untrusted.example';await invalidEvent.ids['event-form'].fire('submit');
+  assert.equal(invalidEvent.requests.length,eventRequests,'remote event codes require HTTPS');
+  invalidEvent.ids['event-url'].value='https://bus.example';
+  for(const bad of ['0','101','1.5']) {invalidEvent.ids['event-limit'].value=bad;await invalidEvent.ids['event-form'].fire('submit');}
+  invalidEvent.ids['event-limit'].value='40';invalidEvent.ids['event-ttl'].value='86401';await invalidEvent.ids['event-form'].fire('submit');
+  assert.equal(invalidEvent.requests.length,eventRequests,'out-of-bound creation never reaches the broker');
+  invalidEvent.ids['event-ttl'].value='14400';
+  invalidEvent.setHandler(()=>({ok:false,status:403,error:'Event management denied'}));await invalidEvent.ids['event-form'].fire('submit');
+  assert.equal(invalidEvent.ids['event-error'].textContent,'Event management denied');assert.equal(invalidEvent.ids['event-result'].hidden,true);
+  assert.equal(invalidEvent.ids['event-submit'].disabled,false);
+  console.log('ok event URL, duration and device limits fail closed; denied creation remains visible and retryable');
+
+  const fullData=eventFixture(), fullPage=page({snapshot:fullData,origin:'https://bus.example'});await flush();
+  await fullPage.ids['event-button'].fire('click');const filling=eventRecord();
+  fullPage.setHandler(r=>{if(r.op==='event_create'){fullData.buses[1].events=[filling];return {ok:true,event:filling,invite:'soon-full'};}return fullData;});
+  await fullPage.ids['event-form'].fire('submit');filling.uses=40;filling.active=false;await fullPage.ids.refresh.fire('click');
+  assert.equal(fullPage.ids['copy-event'].disabled,true);assert.equal(fullPage.ids['event-output'].textContent,'This code is full.');
+  filling.uses=1;filling.expires_at=Date.now()/1000-1;await fullPage.ids.refresh.fire('click');
+  assert.equal(fullPage.ids['event-output'].textContent,'This code is expired.');
+  fullPage.ids['event-dialog'].close();assert.equal(fullPage.ids['event-output'].textContent,'');
+  assert.equal(fullPage.ids['event-list'].children.length,0);
+  console.log('ok event usage and expiry refresh live; closed dialog clears displayed code and participants');
 
   const readerData={...fixture(),is_admin:false,read_only:true,browser_session:true,user:'owui.00000000-0000-4000-8000-000000000001',display_name:'<img src=x onerror=alert(1)>',principals:undefined};
   const reader=page({snapshot:readerData});await flush();
