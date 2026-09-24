@@ -67,12 +67,14 @@ Claiming creates an address and a mailbox; it does not start a model. To run a
 model *as* that identity, in a tmux seat:
 
 ```sh
-homi spawn researcher --cli claude --cwd "$PWD"
+homi spawn researcher --cli claude --cwd "$PWD" --json
 homi agents                                   # identities, mail, current execution
 homi seat ls                                  # the terminal seats HOMI is driving
 ```
 
-Ask and get an answer back, correlated to your question:
+For Claude, `"adopted": true` confirms that the running session is associated
+with this name and can receive its mail natively. Once adopted, ask for an answer
+correlated to your question:
 
 ```sh
 homi ask researcher 'Which test is flaky, and why?' --timeout 120
@@ -80,6 +82,8 @@ homi ask researcher 'Which test is flaky, and why?' --timeout 120
 
 The identity receives the question with a reply token and answers with
 `homi reply TOKEN 'the answer'`; `ask` returns when that reply arrives.
+If adoption did not complete, mail stays in the inbox until the agent reads it.
+Typing mail into a seat is a separate, explicit [relay permission](docs/CLI.md).
 [QUICKSTART.md](docs/QUICKSTART.md) walks through this end to end, including a
 second identity that waits for mail and replies.
 

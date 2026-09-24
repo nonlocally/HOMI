@@ -98,11 +98,15 @@ queued message does not wake one.
 With tmux installed and a client authenticated:
 
 ```sh
-homi spawn researcher --cli claude --cwd "$PWD"
+homi spawn researcher --cli claude --cwd "$PWD" --json
 homi agents                  # researcher is now bound to a running seat
 homi seat ls
 homi seat read SEAT --lines 40
 ```
+
+With Claude, `"adopted": true` confirms native mail delivery to the named session.
+A Codex seat or an unadopted session can read its durable inbox through the plugin;
+typing mail into a seat requires a separate, explicit relay permission.
 
 A seat is a tmux pane HOMI drives: read its screen, send it input, interrupt it,
 kill it. Screen text is observation, not an agent reply, and a pane is not a
