@@ -70,12 +70,21 @@ There is no bus-delete API. The private mode therefore requires an existing
 bus explicitly approved for qualification; it does not create a new bus on
 every run. Do not point it at an arbitrary private project bus.
 
-The two remote workers own only their prepared disposable homes, one generated
+The two device workers own only their prepared disposable homes, one generated
 script/state directory each, the fresh provider sessions, and the installed
 integrations in those homes. They use `setup --claude|--codex --no-service` from
 the reviewed extracted archive. No repository clone is needed. SSH agent
 forwarding and inherited agent sockets are disabled. No provider credentials
 are copied between devices.
+
+When one device is the coordinator itself, its device definition may explicitly
+set `"transport": "local"` and an absolute `"python"` path. The same bounded
+three-file bootstrap, protocol, process group and EOF cleanup then run as a
+local child, with `SSH_AUTH_SOCK` and `SSH_AGENT_PID` removed. This does not need
+SSH authorization to the same machine. The other device still uses ordinary
+SSH with existing authentication and strict host-key checking. Omitting
+`transport` means SSH; there is no automatic fallback. The distinct physical
+device fingerprint check still applies.
 
 Incoming replies start disarmed. After both exact identities exist, the
 controller names only the other test identity as an allowed peer. No unrelated
@@ -127,6 +136,8 @@ and extracted runtime. Use a separately reviewed bundle of these three scripts
 on the coordinator: `qualify-hosted.py`, `qualify-provider-fleet.py`, and
 `qualify-provider.py`. The coordinator streams exactly those files to each
 worker; the product itself is installed from the archive.
+For a coordinator-local worker, the shared configuration format still requires
+a valid `ssh` placeholder, but that value is unused when `transport` is `local`.
 
 ```sh
 # Reads and validates configuration only. No remote calls or provider requests.

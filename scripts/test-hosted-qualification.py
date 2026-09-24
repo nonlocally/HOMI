@@ -267,6 +267,50 @@ class HostedTests(unittest.TestCase):
         self.assertTrue(process.stdin.closed)
         self.assertTrue(process.stdout.closed)
 
+    def test_transport_selection_and_local_agent_socket_removal(self):
+        for transport in (None, "ssh", "local"):
+            with self.subTest(transport=transport):
+                spec = {"provider": "codex", "ssh": "fixture-never-contacted", "python": sys.executable}
+                if transport is not None:
+                    spec["transport"] = transport
+                env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "SSH_AUTH_SOCK": "private-agent", "SSH_AGENT_PID": "999"}
+                process = SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO(""))
+                evidence = self.root / str(transport)
+                evidence.mkdir()
+                with patch.object(hosted.subprocess, "Popen", return_value=process) as launch:
+                    worker = hosted.HostedRemote(spec, evidence, 1, env)
+                worker.reader.join(timeout=2)
+                args, kwargs = launch.call_args
+                self.assertTrue(kwargs["start_new_session"])
+                if transport == "local":
+                    self.assertEqual(args[0], [sys.executable, "-u", "-c", hosted.BOOTSTRAP])
+                    self.assertNotIn("SSH_AUTH_SOCK", kwargs["env"])
+                    self.assertNotIn("SSH_AGENT_PID", kwargs["env"])
+                else:
+                    self.assertEqual(args[0][:1 + len(hosted.fleet.SSH_OPTIONS)], ["ssh", *hosted.fleet.SSH_OPTIONS])
+                    self.assertEqual(args[0][-2], spec["ssh"])
+                    self.assertEqual(kwargs["env"], env)
+                self.assertEqual(set(json.loads(process.stdin.getvalue())), set(hosted.FILES))
+                process.stdin.close(); process.stdout.close(); worker.error_file.close()
+
+    def test_local_worker_real_bootstrap_eof_cleanup(self):
+        spec = {"provider": "codex", "transport": "local", "python": sys.executable, "ssh": "unused-placeholder"}
+        env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "TMPDIR": str(self.root),
+               "SSH_AUTH_SOCK": "must-not-be-inherited", "SSH_AGENT_PID": "999", "PYTHONDONTWRITEBYTECODE": "1"}
+        worker = hosted.HostedRemote(spec, self.root, 1, env)
+        # No configure/authentication/provider action; worker starts and exits
+        # through the exact production EOF/finally path.
+        worker.close()
+        self.assertTrue(worker.fleet_group_stopped)
+        self.assertEqual(worker.process.returncode, 0)
+        self.assertFalse(list(self.root.glob("homi-fleet-*")))
+
+    def test_invalid_local_transport_refused_before_process(self):
+        for spec in ({"transport": "automatic"}, {"transport": "local", "python": "python3"}):
+            with self.subTest(spec=spec), patch.object(hosted.subprocess, "Popen") as launch, self.assertRaises(RuntimeError):
+                hosted.HostedRemote(spec, self.root, 1, {})
+            launch.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

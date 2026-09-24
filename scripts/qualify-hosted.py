@@ -409,10 +409,18 @@ BOOTSTRAP = fleet.BOOTSTRAP.replace("{'qualify-provider-fleet.py','qualify-provi
 class HostedRemote(fleet.RemoteWorker):
     def __init__(self, spec, evidence, timeout, ssh_env):
         self.spec, self.timeout, self.sequence = spec, timeout, 0
+        self.transport = spec.get("transport", "ssh")
+        require(self.transport in ("ssh", "local"), "worker transport must be ssh or explicit local")
+        if self.transport == "local":
+            require(isinstance(spec.get("python"), str) and Path(spec["python"]).is_absolute(),
+                    "local worker requires an explicit absolute Python path")
         self.responses = queue.Queue()
         bundle = json.dumps({name: base64.b64encode(Path(__file__).with_name(name).read_bytes()).decode() for name in FILES}) + "\n"
-        self.error_file = gate.private_file(evidence / (spec["provider"] + "-ssh.stderr.log"))
-        command = ["ssh", *fleet.SSH_OPTIONS, spec["ssh"], shlex.join([spec.get("python", "python3"), "-u", "-c", BOOTSTRAP])]
+        self.error_file = gate.private_file(evidence / (spec["provider"] + "-" + self.transport + ".stderr.log"))
+        bootstrap = [spec.get("python", "python3"), "-u", "-c", BOOTSTRAP]
+        command = bootstrap if self.transport == "local" else ["ssh", *fleet.SSH_OPTIONS, spec["ssh"], shlex.join(bootstrap)]
+        launch_env = ({key: value for key, value in ssh_env.items() if key not in ("SSH_AUTH_SOCK", "SSH_AGENT_PID")}
+                      if self.transport == "local" else ssh_env)
         def collect():
             for line in self.process.stdout:
                 try:
@@ -423,7 +431,7 @@ class HostedRemote(fleet.RemoteWorker):
         self.process, self.reader = None, None
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.error_file,
-                                            text=True, start_new_session=True, env=ssh_env)
+                                            text=True, start_new_session=True, env=launch_env)
             self.reader = threading.Thread(target=collect, daemon=True)
             self.reader.start()
             self.process.stdin.write(bundle)
@@ -432,7 +440,7 @@ class HostedRemote(fleet.RemoteWorker):
             if self.process:
                 with contextlib.suppress(OSError):
                     self.process.stdin.close()
-                require(fleet.stop_owned_group(self.process), "owned SSH constructor cleanup unconfirmed; preserve evidence")
+                require(fleet.stop_owned_group(self.process), "owned worker constructor cleanup unconfirmed; preserve evidence")
                 if self.reader and self.reader.is_alive():
                     self.reader.join(timeout=2)
                 self.process.stdout.close()
@@ -484,6 +492,11 @@ def load_config(path):
     require(isinstance(config.get("server_id"), str) and config["server_id"], "reviewed server identity required")
     for key in ("broker_database", "admin_token_file"):
         require(Path(config[key]).is_absolute(), "operator input path must be absolute")
+    for spec in config["devices"].values():
+        require(spec.get("transport", "ssh") in ("ssh", "local"), "worker transport must be ssh or explicit local")
+        if spec.get("transport") == "local":
+            require(isinstance(spec.get("python"), str) and Path(spec["python"]).is_absolute(),
+                    "local worker requires an explicit absolute Python path")
     return config
 
 
@@ -516,6 +529,7 @@ def run(config, evidence):
             prepared = worker.call("configure", spec={**spec, "archive_sha256": config["archive_sha256"], "source": config["source"],
                 "timeout": timeout, "run_id": run_id, "name": name, "bus": config["bus"], "origin": ORIGIN})
             report["devices"][kind] = prepared
+            prepared["worker_transport"] = spec.get("transport", "ssh")
             prepared["transport"] = worker.call("probe")
             rejected = broker.invitation(spec["recipient_user"], name)
             broker.owner("invite_revoke", invite=broker.invites[-1])
