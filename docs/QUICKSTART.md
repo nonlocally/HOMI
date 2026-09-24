@@ -26,8 +26,8 @@ homi start
 homi status
 ```
 
-This is an unmanaged daemon for the session. For one that survives logout and
-reboot, use `homi setup --service` (step 6). Either way, stopping it never loses
+This is an unmanaged background daemon. For a managed daemon that starts with
+your user session, use `homi setup --service` (step 7). Either way, stopping it never loses
 mail: identities and mailboxes are files under `~/.local/state/communicate/homi/`.
 
 ## 3. Two identities, one message
@@ -39,17 +39,21 @@ homi send reviewer 'The experiment log is in runs/2026-09-24. Please review.' --
 homi inbox reviewer
 ```
 
-`inbox` prints the stored mail as JSON lines. `homi agents` lists both identities
-with their undelivered mail and shows that neither is bound to a seat: an identity
-is an address, not a process.
+`inbox` prints the stored mail as JSON lines without consuming or acknowledging
+it. `homi agents --json` shows both identities, their undelivered mail, and that
+neither is bound to a seat: an identity is an address, not a process.
 
 ## 4. A correlated question and answer
 
-Open a second terminal. In it, wait as the reviewer:
+Open a second terminal. Start this wait before sending the question:
 
 ```sh
 homi wait reviewer --timeout 300 --json
 ```
+
+`wait` watches for mail arriving after it starts. It skips the earlier review
+message even though that message remains in the inbox. If you send the question
+before starting `wait`, use `homi inbox reviewer` to find it instead.
 
 In the first terminal, ask and block for the answer:
 
@@ -65,8 +69,8 @@ homi reply TOKEN 'Run 3. The seed changed.' --from reviewer
 ```
 
 The `ask` in the first terminal returns `Run 3. The seed changed.` That answer is
-correlated to your question by the token; a mailbox message or a bus receipt never
-counts as an answer. [CLI.md](CLI.md) defines the three levels: stored, submitted,
+correlated to your question by the token; a storage or delivery receipt alone
+does not establish that answer. [CLI.md](CLI.md) defines the three levels: stored, submitted,
 replied.
 
 ## 5. A session that knows HOMI
@@ -84,9 +88,10 @@ and MCP tools. Try, in plain language: *"Register yourself on the bus, then list
 the agents you can reach."* The session runs `homi bus register` and
 `homi bus agents --json` for you.
 
-Supported clients are the Claude Code CLI and the Codex CLI (0.151 or later for
-queued turns). Desktop apps are not supported clients, and a queued message does
-not wake one.
+Supported clients are the Claude Code CLI and the Codex CLI. Codex queued delivery
+requires `codex queue`; plugin setup has separate capability checks described in
+[INSTALL.md](INSTALL.md#clients). Desktop apps are not supported clients, and a
+queued message does not wake one.
 
 ## 6. Run a model as an identity, in a seat
 
@@ -148,4 +153,6 @@ homi daemon pair user@other-host
   ([PROFILES.md](PROFILES.md)).
 - Scheduled workspace snapshots with an archive volume:
   [SNAPSHOTS.md](SNAPSHOTS.md).
+- Optional account selection and rotation, using services you configure:
+  [PROFILES.md](PROFILES.md#user-configuration-and-optional-accounts).
 - Updating, rolling back, and removing: [INSTALL.md](INSTALL.md).

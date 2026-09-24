@@ -27,12 +27,13 @@ afterwards. The full flag reference, service, update, rollback, uninstall,
 and troubleshooting are in [docs/INSTALL.md](../../docs/INSTALL.md).
 
 ```sh
-homi setup --claude | --codex | --no-clients      # which clients to register
+homi setup --claude                             # or --codex; --no-clients for CLI only
 homi setup --service                             # per-user launchd or systemd --user service
 homi setup --dry-run                             # show every change without making it
 /path/to/new-release/bin/homi update             # activate a newer release
 homi rollback                                    # retained previous release
-homi uninstall [--claude|--codex] [--purge]      # owned objects only; state preserved
+homi uninstall --claude                         # restore this client's previous registration
+homi uninstall --purge                          # remove owned integrations/payloads; state preserved
 ```
 
 ## Commands
@@ -43,8 +44,8 @@ homi claim NAME                                  # a durable identity with a mai
 homi send NAME 'message' --from NAME             # stored mail
 homi ask NAME 'question' --timeout SEC           # blocks for a correlated reply
 homi reply TOKEN 'answer' --from NAME            # answer a received question
-homi wait NAME --timeout SEC --json              # long-poll a mailbox
-homi inbox NAME                                  # the stored JSONL
+homi wait NAME --timeout SEC --json              # wait for mail arriving after this call starts
+homi inbox NAME                                  # stored JSONL; reading does not acknowledge it
 homi spawn NAME --cli claude|codex --cwd DIR     # run a model as an identity in a seat
 homi seat ls | read | send | state | interrupt | kill
 homi bus register | agents | send | reply | receipt | dashboard | connect | use

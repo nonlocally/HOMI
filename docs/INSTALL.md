@@ -11,11 +11,11 @@
 |---|---|
 | Everything | macOS or Linux; Node.js 20 or later; Python 3.9 or later; Bash |
 | Terminal seats and spawned executions | tmux |
-| Agent sessions | Claude Code CLI and/or Codex CLI, installed and authenticated by you (Codex 0.151+ for queued turns) |
+| Agent sessions | Claude Code CLI and/or Codex CLI, installed and authenticated by you; see [Clients](#clients) |
 | Other devices | SSH; Tailscale optional |
 | Optional profiles | Bash 4+, fzf, jq for the terminal and mesh modules; see [PROFILES.md](PROFILES.md) |
 
-HOMI never installs a model client, obtains credentials, or enrolls you in a
+Setup does not install a model client, obtain credentials, or enroll you in a
 hosted service.
 
 ## Get the archive
@@ -45,7 +45,7 @@ downloaded one.
 | `--no-clients` | Install the CLI only; register clients later with `homi setup --claude` or `--codex`. |
 | `--service` | Also install the per-user daemon service (launchd or systemd `--user`). |
 | `--no-service` | Leave an existing managed service untouched during an update. |
-| `--service-inherit=NAME` | Pass one named variable from your environment into the service (for example a provider profile). Nothing is inherited otherwise. |
+| `--service-inherit=NAME` | Add an allowed variable to the service environment, such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Repeat for each variable. |
 | `--dry-run` | Print every path, setting, and command setup would touch, and change nothing. |
 
 What setup does, in order: verifies the archive against its manifest; copies the
@@ -53,8 +53,8 @@ release to `~/.local/share/communicate/<version>-<hash>/`, which is never modifi
 again; points the stable link `~/.local/share/communicate/current` at it; creates
 `~/.local/share/communicate/bin/homi` and `bin/communicate`; registers the plugin
 with the clients you named through their own CLIs; optionally installs the
-service. If any step fails, everything is restored to the previous state and
-setup reports why.
+service. If activation fails, setup attempts to restore the previous state and
+reports any recovery still needed.
 
 Then:
 
@@ -82,6 +82,17 @@ until you reconcile the change; they are never silently overwritten. Client
 plugin registration is verified with Claude Code's `claude plugin` commands and
 Codex CLI 0.156.1's `codex plugin` commands.
 
+Codex queued delivery requires `codex queue`. Plugin setup also requires the
+client's versioned configuration API so existing settings can be restored safely;
+setup checks these capabilities before replacing a registration. Installation and
+restoration are verified with Codex 0.156.1; queued input is also verified with
+0.153.4. These are separate from full model and platform qualification, recorded
+in [PROVIDER-QUALIFICATION.md](PROVIDER-QUALIFICATION.md).
+
+Avoid concurrent edits to client configuration while setup, rollback, or removal
+is running. Changes already present are checked before replacement; client CLI
+commands do not provide a transaction spanning all registration changes.
+
 ## The daemon
 
 `homi start` runs an unmanaged daemon for the current login. `homi setup --service`
@@ -91,7 +102,9 @@ installs a managed one:
 - Linux: `~/.config/systemd/user/communicate-homi.service`
 
 The service runs the installed release with an explicit environment: your home,
-the state directory, the device name, and the PATH setup saw. An installation in
+the state directory, the device name, and a PATH containing the selected Python
+and standard executable directories. Use `--service-inherit=PATH` to pass your
+current PATH explicitly. An installation in
 an isolated home gets a scoped service name, so a qualification install can
 never replace your real service. A previous definition under the same name is
 backed up before replacement. Only one daemon owns a state root at a time.

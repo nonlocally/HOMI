@@ -16,8 +16,8 @@ Agents lose each other. A session ends, a pane closes, a machine sleeps, and the
 address you had for an agent is gone with it. HOMI separates three things that
 usually get tangled:
 
-- **Identity.** A durable name with a mailbox. It keeps receiving mail while
-  nothing is running.
+- **Identity.** A durable name with a mailbox. The daemon keeps receiving mail
+  for it while no model is running.
 - **Execution.** Where that identity is running right now: a Claude Code or Codex
   session, a tmux seat, a linked device. It can stop and restart without the
   identity changing.
@@ -25,8 +25,9 @@ usually get tangled:
   or *replied* to. HOMI reports which one happened and never upgrades a weaker
   result into a stronger claim.
 
-Everything runs on your machine with your own client logins. Nothing is hosted
-for you, and nothing phones home.
+HOMI runs on your machine and sends no usage telemetry. Local communication needs
+no hosted account. Your model clients use their configured providers; remote
+communication uses the brokers and hosts you choose.
 
 ## Install
 
@@ -50,7 +51,8 @@ settings beyond that plugin registration. Full details, flags, and the
 lifecycle are in [INSTALL.md](docs/INSTALL.md).
 
 Homebrew (`brew install nonlocally/tap/homi`) is the planned channel once the tap
-is published; it runs the same `setup`.
+is published. It installs the commands; then run `homi setup --claude --codex`
+yourself to enable the clients you use. Service installation is also explicit.
 
 ## First success
 
@@ -89,8 +91,9 @@ can find agents, register itself on a bus, send and reply, and create or drive a
 execution, through skills and MCP tools. Ask it in plain language ("register on
 the bus", "send this to researcher", "open a seat for the reviewer").
 
-Supported clients are the **Claude Code CLI** and the **Codex CLI** (Codex 0.151 or
-later for queued turns into an existing session). Desktop apps are not supported
+Supported clients are the **Claude Code CLI** and the **Codex CLI**. Queued Codex
+delivery requires `codex queue`; plugin setup checks additional client
+capabilities ([requirements](docs/INSTALL.md#clients)). Desktop apps are not supported
 clients: a message queued for a session does not wake a desktop application, and
 HOMI does not promise it will.
 
@@ -137,6 +140,8 @@ homi profile install --terminal --mesh
 - `--snapshots`: scheduled workspace snapshots mirrored to an archive volume,
   with an explicit, reversible schedule ([SNAPSHOTS.md](docs/SNAPSHOTS.md)).
 - `--box`: a contained execution adapter ([CONTAINED-EXECUTION.md](docs/CONTAINED-EXECUTION.md)).
+- `--accounts`: account selection and rotation using services you configure
+  ([account setup](docs/PROFILES.md#user-configuration-and-optional-accounts)).
 
 Every file the profile writes is recorded, backed up, and removed only if it is
 still what HOMI wrote. [PROFILES.md](docs/PROFILES.md) has the details.
