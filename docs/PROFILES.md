@@ -25,6 +25,8 @@ installed software. Clipboard integration selects pbcopy, wl-copy, or xclip.
 The profile is written for macOS/Linux; automated macOS checks do not establish
 full Linux runtime coverage. On a nonstandard Bash installation, put its bin
 directory on PATH. No default-shell changes are made for you.
+Fresh zsh sessions do not load these Bash helpers; run Bash explicitly or configure
+your terminal's command deliberately. The installer does not write zsh startup files.
 
 ## What is retained
 
@@ -108,6 +110,10 @@ and file modes are preserved. Repeated installs preserve the first backup and
 later user edits outside the block. A preflight conflict aborts installation.
 A write failure during install or uninstall rolls back files already changed.
 Edited generated files and edited managed blocks are not overwritten automatically.
+Profile-owned configuration and ownership directories are restricted to the owner.
+New snapshots (including terminal scrollback) and mesh data use private permissions
+without changing the invoking shell's umask. Pre-existing snapshot data is retained;
+review its permissions separately during personal migration.
 
 Uninstall removes only matching owned content. If a target was replaced or an
 owned block changed, it refuses the operation rather than deleting new content

@@ -578,7 +578,9 @@ _mesh_info() {
 # ------------------------------------------------------------------------------
 
 # Main entry point with subcommand routing
-mesh() {
+mesh() (
+  # Private host inventories/caches; never alter the invoking shell's umask.
+  umask 077
   local subcmd="${1:-hub}"
   shift 2>/dev/null
 
@@ -613,7 +615,7 @@ mesh() {
       return 1
       ;;
   esac
-}
+)
 
 # ------------------------------------------------------------------------------
 # Host management (manual SSH hosts)

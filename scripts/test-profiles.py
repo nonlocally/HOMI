@@ -69,6 +69,16 @@ class Profiles(unittest.TestCase):
         self.assertTrue(self.profile.uninstall()["ok"])
         self.assertEqual(rc.read_bytes(), b"# no newline")
 
+    def test_owned_config_and_backup_directories_are_private(self):
+        self.install()
+        self.assertEqual(self.profile.config.stat().st_mode & 0o077, 0)
+        self.assertEqual(self.profile.state.stat().st_mode & 0o077, 0)
+        self.profile.config.chmod(0o755)
+        self.profile.state.chmod(0o755)
+        self.install()
+        self.assertEqual(self.profile.config.stat().st_mode & 0o077, 0)
+        self.assertEqual(self.profile.state.stat().st_mode & 0o077, 0)
+
     def test_legacy_symlink_is_never_followed(self):
         original = Path(self.temp.name) / "legacy-config"
         original.write_text("keep this exactly\n")
@@ -169,6 +179,11 @@ class Profiles(unittest.TestCase):
         self.install(["mesh"])
         mesh = str(self.home / ".local/bin/homi-mesh")
         self.run_tool(mesh, "host", "add", "lab", "scientist@lab.example", "2222")
+        self.assertEqual((self.profile.config / "mesh/hosts.json").stat().st_mode & 0o077, 0)
+        result = self.run_tool(BASH, "--noprofile", "--norc", "-c",
+                               '. "$1"; umask 022; mesh help >/dev/null; umask',
+                               "test", str(self.profile.config / "active.sh"))
+        self.assertEqual(result.stdout.strip(), "0022")
         self.assertIn("lab", self.run_tool(mesh, "host", "list").stdout)
         sshdir = self.home / ".ssh"
         sshdir.mkdir()
@@ -219,7 +234,14 @@ class Profiles(unittest.TestCase):
             self.run_tool(wrapper, "tile", "new", env=env)
             self.assertEqual(len(self.run_tool(*tm, "list-panes", "-t", "fixture").stdout.splitlines()), 2)
             self.run_tool(wrapper, "shell", "tss", "proof", env=env)
-            self.assertTrue((self.home / ".local/state/homi/workstation/sessions/proof/windows.tsv").exists())
+            snapshot = self.home / ".local/state/homi/workstation/sessions/proof"
+            self.assertTrue((snapshot / "windows.tsv").exists())
+            for path in [snapshot, *snapshot.rglob("*")]:
+                self.assertEqual(path.stat().st_mode & 0o077, 0, str(path))
+            result = self.run_tool(BASH, "--noprofile", "--norc", "-c",
+                                   '. "$1"; umask 022; tss umask-check >/dev/null; umask',
+                                   "test", str(self.profile.config / "active.sh"), env=env)
+            self.assertEqual(result.stdout.strip(), "0022")
             self.assertIn("fixture", self.run_tool(wrapper, "shell", "tsr", "-n", "proof", env=env).stdout)
             result = self.run_tool(wrapper, "shell", "tss", "../escape", check=False, env=env)
             self.assertNotEqual(result.returncode, 0)

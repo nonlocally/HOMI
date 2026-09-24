@@ -22,6 +22,9 @@ uninstall/reinstall preserving mail, and profile preview/install/repeat/uninstal
 reinstall preserving user edits and private overlays. Provider, network, Git,
 package-manager, service-manager and tmux commands are blocked; attempts fail the
 run. No user services or current terminal sessions are changed.
+Fresh login and non-login Bash startup must resolve helpers from the installed
+profile; fresh zsh is checked to remain unchanged. Profile configuration and
+ownership/backups must be private to the owner.
 
 To qualify an upgrade and rollback, supply a second **real** release:
 

@@ -602,7 +602,10 @@ _tss_resolve() {
 }
 
 # Save the whole workspace.   Usage: tss [name]   (default: "default")
-tss() {
+tss() (
+  # Captured terminal history can contain private material. Keep this local to
+  # the save operation rather than changing the caller's interactive umask.
+  umask 077
   local name="${1:-default}"
   local dir="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}/sessions/$name"
   command -v tmux >/dev/null || { echo "tss: tmux not found"; return 1; }
@@ -641,7 +644,7 @@ tss() {
   rm -f "$_TSS_SNAP" "$_TSS_CLAIMED"
   printf '\033[32mtss\033[0m saved \033[1m%s\033[0m: %d sessions, %d windows, %d panes (%d agent)\n     -> %s\n' \
     "$name" "$ns" "$nw" "$np" "$na" "$dir"
-}
+)
 
 _tsr_run() { if [[ $_TSR_DRY == 1 ]]; then printf '  + tmux %s\n' "$*" >&2; else tmux "$@"; fi; }
 

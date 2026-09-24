@@ -192,7 +192,8 @@ class Profile:
     def lock(self):
         self.check_parent(self.state / "install.lock")
         self.check_parent(self.payloads)
-        self.state.mkdir(parents=True, exist_ok=True)
+        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.state.chmod(0o700)
         lock = self.state / "install.lock"
         try:
             lock.mkdir()
@@ -211,6 +212,8 @@ class Profile:
             conflicts = [p for p in plan if p["action"] == "conflict"]
             if conflicts:
                 raise Conflict("; ".join(p["path"] + ": " + p["reason"] for p in conflicts))
+            self.config.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.config.chmod(0o700)
             dest = self.payloads / self.payload_id()
             self.check_parent(dest)
             if not dest.exists():

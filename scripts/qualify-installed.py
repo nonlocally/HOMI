@@ -288,6 +288,24 @@ class Qualification:
             self.run(cli, "profile", "install", "--terminal", "--mesh")
             require(rc.read_text().count("# >>> HOMI profile") == 1, "profile reinstall duplicated block")
             row["payload"] = json.loads(ledger.read_text())["payload"]
+        with self.check("fresh interactive Bash startup") as row:
+            command = 'for fn in t cx cxx cxc cdx cdxx cdxxs mesh; do declare -F "$fn" >/dev/null || exit 9; done; printf "READY\\n%s\\n%s\\n" "$HOME" "$HOMI_PROFILE_RUNTIME"; command -v homi-workstation'
+            observations = {}
+            for label, args in [("nonlogin", ["--noprofile", "-ic"]), ("login", ["-lic"])]:
+                result = self.run("bash", *args, command)
+                lines = result.stdout.splitlines()
+                require(lines[0] == "READY" and Path(lines[1]) == self.home, f"{label} Bash did not use its temporary profile")
+                require(within(lines[2], self.home / ".local/share/homi/profiles"), f"{label} Bash loaded a legacy profile")
+                require(Path(lines[3]) == self.home / ".local/bin/homi-workstation", f"{label} Bash launcher is shadowed")
+                observations[label] = {"runtime": lines[2], "launcher": lines[3]}
+            row["shells"] = observations
+        if Path("/bin/zsh").exists():
+            with self.check("fresh zsh remains unchanged; Bash helpers are explicit") as row:
+                command = 'for fn in t cx mesh; do (( $+functions[$fn] )) && exit 9; done; print -r -- "$HOME"'
+                result = self.run("/bin/zsh", "-d", "-lic", command)
+                require(result.stdout.strip() == str(self.home), "zsh did not use its temporary home")
+                require(not (self.home / ".zshrc").exists() and not (self.home / ".zprofile").exists(), "profile unexpectedly modified zsh startup")
+                row["support"] = "Interactive helpers require Bash 4+; zsh is not automatically integrated or replaced."
 
     def execute(self, runtime, previous=None):
         with self.check("archive manifest and complete payload") as row:
@@ -352,6 +370,10 @@ class Qualification:
         else:
             self.report["checks"].append({"name": "different-release upgrade and rollback", "status": "unqualified",
                                           "reason": "Pass --previous-runtime with a distinct real release; same-artifact update is tested separately."})
+        with self.check("profile configuration and ownership are private") as row:
+            paths = [self.home / ".config/homi/profiles", self.home / ".local/state/homi/profiles"]
+            row["directories"] = [{"path": str(path), "mode": oct(path.stat().st_mode & 0o777)} for path in paths]
+            require(all(path.stat().st_mode & 0o077 == 0 for path in paths), "profile configuration/backups permit access by other users")
         with self.check("no external tools, credentials, services, or source fallback"):
             require(not self.blocked.exists(), "forbidden external command attempted: " + (self.blocked.read_text() if self.blocked.exists() else ""))
             require(not (self.home / "Library/LaunchAgents").exists(), "unexpected launchd configuration")
