@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socketserver
 import sqlite3
 import tempfile
 import threading
@@ -1411,6 +1412,12 @@ class BusHTTPServer(http.server.ThreadingHTTPServer):
             self.address_family = socket.AF_INET6
         self.slots = threading.BoundedSemaphore(max_connections)
         super().__init__(address, handler)
+
+    def server_bind(self):
+        # HTTPServer resolves the bound address with getfqdn. The broker only
+        # advertises its numeric loopback address, so DNS must not delay startup.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
