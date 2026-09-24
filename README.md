@@ -1,94 +1,191 @@
 # HOMI
 
-Persistent agent identities, communication, and execution. HOMI combines the working
-Communicate session router and bus with durable identities and mailboxes. Claude
-Code and Codex are the supported native adapters. Terminal execution uses tmux.
+HOMI gives coding agents durable identities with mailboxes, lets them message each
+other across sessions and machines, and runs them in terminal seats you can observe
+and control. One `homi` command, one Claude Code/Codex plugin, one MCP server.
+macOS and Linux.
 
-**Release candidate:** the 0.3.0 distribution is being qualified. The installation
-commands below become the public channel when its tagged release and tap are published.
-See [release qualification](docs/RELEASING.md).
+> **Status.** 0.3.0 is a release candidate. The public release archive and the
+> Homebrew tap are not published yet. Until they are, install from a release
+> archive obtained from the maintainers; the commands below are the ones that
+> archive uses. See [release qualification](docs/RELEASING.md).
+
+## Why
+
+Agents lose each other. A session ends, a pane closes, a machine sleeps, and the
+address you had for an agent is gone with it. HOMI separates three things that
+usually get tangled:
+
+- **Identity.** A durable name with a mailbox. It keeps receiving mail while
+  nothing is running.
+- **Execution.** Where that identity is running right now: a Claude Code or Codex
+  session, a tmux seat, a linked device. It can stop and restart without the
+  identity changing.
+- **Delivery.** Whether a message was *stored*, *submitted* to a running client,
+  or *replied* to. HOMI reports which one happened and never upgrades a weaker
+  result into a stronger claim.
+
+Everything runs on your machine with your own client logins. Nothing is hosted
+for you, and nothing phones home.
 
 ## Install
 
+Requirements: macOS or Linux, Node.js 20+, Python 3.9+, Bash. Optional:
+tmux for terminal seats; Claude Code and/or Codex CLI, authenticated by you,
+for agent sessions; SSH (and optionally Tailscale) for other devices.
+
 ```sh
-brew install nonlocally/tap/homi
-homi setup --claude --codex
-homi doctor
+shasum -a 256 -c homi-0.3.0.tar.gz.sha256
+tar -xzf homi-0.3.0.tar.gz
+./homi-0.3.0/bin/homi setup --claude --codex     # enable only the clients you use
+./homi-0.3.0/bin/homi doctor
+export PATH="$HOME/.local/share/communicate/bin:$PATH"   # put this in your shell rc
 ```
 
-Enable only the clients you use. Installing the package does not replace terminal,
-shell, editor, or Git configuration. Provider authentication remains your own.
-The `communicate` command and existing plugin identities remain compatible.
+`setup` copies the release into an immutable directory under
+`~/.local/share/communicate/`, points the stable `current` link at it, and
+registers the plugin with the clients you named. The extracted archive can be
+deleted afterwards. Nothing else changes: no shell rc, editor, Git, or client
+settings beyond that plugin registration. Full details, flags, and the
+lifecycle are in [INSTALL.md](docs/INSTALL.md).
 
-A versioned runtime archive is also available through the release channel for
-macOS and Linux. It includes Node dependencies and requires no source checkout or
-npm account. See [installation](docs/INSTALL.md).
+Homebrew (`brew install nonlocally/tap/homi`) is the planned channel once the tap
+is published; it runs the same `setup`.
 
-## Four capabilities
+## First success
 
 ```sh
-homi start
-homi claim researcher
+homi start                                    # the local daemon (or: homi setup --service)
+homi claim researcher                         # a durable identity with a mailbox
 homi send researcher 'Review the experiment when you resume.'
-homi inbox researcher
+homi inbox researcher                         # the stored mail, one JSON line each
 ```
 
-Claiming an identity creates an addressed mailbox; it does not start a model.
-An identity retains mail while its execution is stopped. To start a model in a seat:
+Claiming creates an address and a mailbox; it does not start a model. To run a
+model *as* that identity, in a tmux seat:
 
 ```sh
 homi spawn researcher --cli claude --cwd "$PWD"
-homi agents
-homi seat ls
+homi agents                                   # identities, mail, current execution
+homi seat ls                                  # the terminal seats HOMI is driving
 ```
 
-Execution, identity, and stored state have separate lifetimes. A pane number is an
-execution handle within its device and tmux server, not a global identity or an
-isolation boundary. See [CLI and delivery semantics](docs/CLI.md).
-
-## Agent integrations and communication
-
-After setup, open a new supported Claude or Codex session so it loads the plugin.
-Ask it to find agents, register on your configured bus, send a message, or create
-an execution. Existing Communicate skills and MCP tools remain compatible.
-
-Bus registration publishes the exact current session, separately from creating a
-persistent mailbox:
+Ask and get an answer back, correlated to your question:
 
 ```sh
-homi bus status --no-start --json
-homi bus register
+homi ask researcher 'Which test is flaky, and why?' --timeout 120
+```
+
+The identity receives the question with a reply token and answers with
+`homi reply TOKEN 'the answer'`; `ask` returns when that reply arrives.
+[QUICKSTART.md](docs/QUICKSTART.md) walks through this end to end, including a
+second identity that waits for mail and replies.
+
+## Claude Code and Codex
+
+`setup --claude` and `setup --codex` register the plugin `communicate@communicate`.
+Restart Claude Code, or start a new Codex thread, and the session knows HOMI: it
+can find agents, register itself on a bus, send and reply, and create or drive an
+execution, through skills and MCP tools. Ask it in plain language ("register on
+the bus", "send this to researcher", "open a seat for the reviewer").
+
+Supported clients are the **Claude Code CLI** and the **Codex CLI** (Codex 0.151 or
+later for queued turns into an existing session). Desktop apps are not supported
+clients: a message queued for a session does not wake a desktop application, and
+HOMI does not promise it will.
+
+## Talk across sessions and machines
+
+A **bus** is a directory and message gateway for sessions that explicitly
+register. It works locally with no account:
+
+```sh
+homi bus status --no-start --json             # what is configured, without starting anything
+homi bus register                             # publish this exact session on "general"
 homi bus agents --json
-homi bus dashboard --open
+homi bus send AGENT_ID 'Can you take the frontend half?'
+homi bus dashboard --open                     # the graph, roster, and human inbox
 ```
 
-Use your configured hub, explicitly choose local/self-hosted operation, or connect
-using a scoped invitation. Public software does not grant access to a private bus.
-The bus retains its graph, dashboard, human inbox, membership checks and receipts.
-See [bus operations](docs/BUSES.md).
-
-Existing native routes remain available through `homi native agents` and
-`homi native route NAME MESSAGE`. These address spaces stay explicit so a failed
-lookup cannot silently target another agent. Queue acceptance is not proof that
-the model consumed a message.
-
-## Optional terminal and mesh profile
+To join someone else's bus, its owner gives you a scoped invitation privately:
 
 ```sh
-homi profile preview --terminal --mesh
+homi bus connect INVITE_CODE --device my-laptop
+homi bus register --bus project
 ```
 
-The optional profile carries selected Ghostty/tmux navigation, layouts, launch
-helpers, and configured mesh access from Anu. It separates packaged defaults from
-private overrides and records ownership for reversible changes. tmux, fzf, jq,
-Ghostty and Tailscale are capability-specific dependencies, not prerequisites for
-every user. See [profiles](docs/PROFILES.md).
+Installing HOMI grants no access to any hosted bus; membership is always an
+explicit invitation. For durable mail between your own machines, HOMI links
+daemons over SSH (`homi daemon pair user@host`). Native routes to sessions on this
+machine and over SSH remain available as `homi native ...`. Each address space is
+explicit, so a failed lookup never silently targets a different agent. See
+[BUSES.md](docs/BUSES.md) and [CLI.md](docs/CLI.md).
 
-Browser, phone, research and application workspaces are outside the core release.
-Personal hosts, credentials and account services are never public defaults.
+## Optional: terminal, mesh, snapshots, containers
 
-## Development and license
+None of this is installed by default, and none of it touches your editor, shell,
+or Git setup:
 
-The implementation continues Communicate under [nonlocally/HOMI](https://github.com/nonlocally/HOMI).
-See [the repository briefing](AGENTS.md) and [release qualification](docs/RELEASING.md).
-[MIT](LICENSE), with applicable bundled third-party notices retained.
+```sh
+homi profile preview --terminal --mesh        # shows exactly which files would change
+homi profile install --terminal --mesh
+```
+
+- `--terminal`: tmux navigation, tiling, an agent launch picker, workspace
+  snapshots (`tss`/`tsr`), Ghostty settings.
+- `--mesh`: manual and Tailscale host discovery, SSH helpers.
+- `--snapshots`: scheduled workspace snapshots mirrored to an archive volume,
+  with an explicit, reversible schedule ([SNAPSHOTS.md](docs/SNAPSHOTS.md)).
+- `--box`: a contained execution adapter ([CONTAINED-EXECUTION.md](docs/CONTAINED-EXECUTION.md)).
+
+Every file the profile writes is recorded, backed up, and removed only if it is
+still what HOMI wrote. [PROFILES.md](docs/PROFILES.md) has the details.
+
+## Keep it running, update, roll back, remove
+
+```sh
+homi setup --service                          # per-user launchd or systemd service
+/path/to/homi-0.3.1/bin/homi update           # activate a newer release
+homi rollback                                 # back to the retained previous release
+homi uninstall                                # remove owned integrations; keep identities and mail
+homi uninstall --purge                        # also remove retained release payloads
+```
+
+Releases are never replaced in place. A failed activation restores the previous
+one. Uninstall keeps identities, mail, credentials, and configuration under
+`~/.local/state/communicate/`.
+
+## Where things live
+
+| What | Where | Override |
+|---|---|---|
+| Installed releases, `current`, `bin/` | `~/.local/share/communicate/` | `COMMUNICATE_DATA` |
+| Identities, mail, daemon state, bus state | `~/.local/state/communicate/` | `COMM_STATE` |
+| Optional profile configuration and private overrides | `~/.config/homi/profiles/` | |
+| Python used by the daemon | `python3` on PATH | `HOMI_PYTHON` |
+
+Private settings, hosts, and credentials never live in the package or the
+release; they stay in your state and configuration directories. `homi doctor`
+reports the executable in use, the installed release, the running daemon, client
+registration, and missing optional dependencies, without printing credentials.
+
+## Documentation
+
+- [QUICKSTART.md](docs/QUICKSTART.md) — the first ten minutes.
+- [INSTALL.md](docs/INSTALL.md) — requirements, setup flags, service, lifecycle,
+  private configuration, troubleshooting.
+- [CLI.md](docs/CLI.md) — command semantics and what a receipt means.
+- [BUSES.md](docs/BUSES.md) — buses, invitations, self-hosting, browser access.
+- [PROFILES.md](docs/PROFILES.md), [SNAPSHOTS.md](docs/SNAPSHOTS.md),
+  [CONTAINED-EXECUTION.md](docs/CONTAINED-EXECUTION.md) — optional modules.
+- [RELEASING.md](docs/RELEASING.md) — how a release is built and qualified.
+- [docs/index.md](docs/index.md) — everything else, including qualification harnesses.
+
+## Compatibility and license
+
+HOMI continues Communicate. The `communicate` command, the npm package name
+`@aadarwal/communicate`, the plugin identity `communicate@communicate`, and the
+state directory are kept on purpose, so an existing installation upgrades in
+place. Contributors: see [AGENTS.md](AGENTS.md).
+
+[MIT](LICENSE), with bundled third-party notices retained.

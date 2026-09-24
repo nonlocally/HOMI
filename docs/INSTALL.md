@@ -1,84 +1,188 @@
 # Installation
 
-Version 0.3.0 is a release candidate until qualification is complete. Do not treat
-an unpublished tap or private archive as a completed public installation channel.
+> **Status.** 0.3.0 is a release candidate. The public release archive and the
+> Homebrew tap are not published yet. Install from a release archive obtained
+> from the maintainers; the same archive and commands become the public channel
+> when publication completes.
+
+## Requirements
+
+| Needed for | Requirement |
+|---|---|
+| Everything | macOS or Linux; Node.js 20 or later; Python 3.9 or later; Bash |
+| Terminal seats and spawned executions | tmux |
+| Agent sessions | Claude Code CLI and/or Codex CLI, installed and authenticated by you (Codex 0.151+ for queued turns) |
+| Other devices | SSH; Tailscale optional |
+| Optional profiles | Bash 4+, fzf, jq for the terminal and mesh modules; see [PROFILES.md](PROFILES.md) |
+
+HOMI never installs a model client, obtains credentials, or enrolls you in a
+hosted service.
+
+## Get the archive
+
+The release is `homi-VERSION.tar.gz` with a `.sha256` beside it. Verify before
+extracting:
+
+```sh
+shasum -a 256 -c homi-0.3.0.tar.gz.sha256
+tar -xzf homi-0.3.0.tar.gz
+```
+
+The archive contains the CLI, the MCP server, the plugin, the daemon, and its
+production Node dependencies. It needs no Git checkout, npm account, or registry
+access. An archive copied to a machine over SSH installs exactly like a
+downloaded one.
+
+## Run setup
+
+```sh
+./homi-0.3.0/bin/homi setup --claude --codex
+```
+
+| Flag | Effect |
+|---|---|
+| `--claude`, `--codex` | Register the plugin with that client. With neither flag, both are attempted when their CLIs are present. |
+| `--no-clients` | Install the CLI only; register clients later with `homi setup --claude` or `--codex`. |
+| `--service` | Also install the per-user daemon service (launchd or systemd `--user`). |
+| `--no-service` | Leave an existing managed service untouched during an update. |
+| `--service-inherit=NAME` | Pass one named variable from your environment into the service (for example a provider profile). Nothing is inherited otherwise. |
+| `--dry-run` | Print every path, setting, and command setup would touch, and change nothing. |
+
+What setup does, in order: verifies the archive against its manifest; copies the
+release to `~/.local/share/communicate/<version>-<hash>/`, which is never modified
+again; points the stable link `~/.local/share/communicate/current` at it; creates
+`~/.local/share/communicate/bin/homi` and `bin/communicate`; registers the plugin
+with the clients you named through their own CLIs; optionally installs the
+service. If any step fails, everything is restored to the previous state and
+setup reports why.
+
+Then:
+
+```sh
+export PATH="$HOME/.local/share/communicate/bin:$PATH"   # add to ~/.bashrc, ~/.zshrc, or equivalent
+homi doctor
+```
+
+`doctor` reports the executable in use, the installed release and its source
+commit, the running daemon and whether it runs the installed release, client
+registration and the cached plugin version, the managed service, and optional
+dependencies. It never starts a daemon and never prints credentials.
+
+## Clients
+
+After `setup --claude`, restart Claude Code. After `setup --codex`, start a new
+Codex thread. A running session keeps the plugin it loaded at start.
+
+The plugin is `communicate@communicate` from the marketplace `communicate`, served
+from the installed release. Setup records what was registered before it ran
+(installed, enabled, marketplace source, and for Codex the plugin's user
+configuration) and restores exactly that on uninstall. If you edit those client
+settings after setup, later setup, rollback, or uninstall refuse to replace them
+until you reconcile the change; they are never silently overwritten. Client
+plugin registration is verified with Claude Code's `claude plugin` commands and
+Codex CLI 0.156.1's `codex plugin` commands.
+
+## The daemon
+
+`homi start` runs an unmanaged daemon for the current login. `homi setup --service`
+installs a managed one:
+
+- macOS: `~/Library/LaunchAgents/com.communicate.homi.plist`
+- Linux: `~/.config/systemd/user/communicate-homi.service`
+
+The service runs the installed release with an explicit environment: your home,
+the state directory, the device name, and the PATH setup saw. An installation in
+an isolated home gets a scoped service name, so a qualification install can
+never replace your real service. A previous definition under the same name is
+backed up before replacement. Only one daemon owns a state root at a time.
+
+## Update, roll back, uninstall
+
+```sh
+/path/to/homi-0.3.1/bin/homi update     # from the newly verified archive
+homi rollback --dry-run
+homi rollback
+homi uninstall --claude                 # remove only this client's registration
+homi uninstall                          # remove owned integrations, service, executable links
+homi uninstall --purge                  # also delete retained release payloads
+```
+
+Rules that hold throughout:
+
+- A release directory is never changed in place; `update` stages the new one
+  and switches `current`. `rollback` switches back to the retained previous
+  release and re-registers clients on it.
+- Setup only ever replaces what it still owns. A client registration, executable
+  link, or service file that someone else changed is kept, and setup says so.
+- Uninstall preserves identities, mail, credentials, and configuration under
+  `~/.local/state/communicate/`. `--purge` removes release payloads only, and
+  refuses while any owned integration remains.
+- An interrupted run leaves `~/.local/share/communicate/install.lock` with the
+  owner's PID and start time. `doctor` shows it. After confirming that process is
+  gone, rename that exact directory out of the way and retry; HOMI never removes
+  another process's lock.
+
+Upgrading from Communicate 0.1.x or 0.2.x keeps the original payload. Use the
+new release's `bin/homi` for lifecycle commands; the old package has no `homi`
+entry point.
+
+## Private configuration
+
+Nothing personal ships in the package. Where your settings go:
+
+| Purpose | Location |
+|---|---|
+| Installed releases, `current`, `bin/` | `~/.local/share/communicate/` (`COMMUNICATE_DATA`) |
+| Identities, mail, daemon and bus state, device links | `~/.local/state/communicate/` (`COMM_STATE`) |
+| Bus broker selection, enrollment, device credential | `~/.local/state/communicate/bus/` |
+| Optional profile files, `local.sh`, tmux/Ghostty overrides, mesh hosts | `~/.config/homi/profiles/` |
+| Python for the daemon | `HOMI_PYTHON=/path/to/python3` |
+
+Keep invitations, device credentials, and hosts out of source control and
+public logs. A bus invitation grants membership on one bus; it never grants
+shell access or seat control on any device.
+
+## Optional profiles
+
+```sh
+homi profile preview --terminal --mesh    # read-only: every file, action, and conflict
+homi profile install --terminal --mesh
+homi profile status
+homi profile uninstall
+```
+
+Modules: `--terminal`, `--mesh`, `--snapshots`, `--box`, `--accounts`. Profile
+installation starts no service, runs no package manager, changes no login shell,
+and reloads no tmux server. It records every file it writes with a backup and
+removes only what is still exactly what it wrote. See [PROFILES.md](PROFILES.md),
+[SNAPSHOTS.md](SNAPSHOTS.md), and [CONTAINED-EXECUTION.md](CONTAINED-EXECUTION.md).
+
+## Troubleshooting
+
+- **`homi: command not found`** — add `~/.local/share/communicate/bin` to PATH, or
+  call the installed `~/.local/share/communicate/bin/homi` directly.
+- **The session does not see HOMI** — restart Claude Code or start a new Codex
+  thread; `homi doctor` shows the registration and cached version. A cached
+  plugin proves installation, not that a running client loaded it.
+- **`daemon release parity: different`** in `doctor` — the running daemon was
+  started from another source (an unmanaged `homi start`, or an older service).
+  `homi setup --service` restarts it on the installed release.
+- **`MCP dependencies are missing`** — the installed payload was damaged.
+  `uninstall --purge` from the retained archive, then `setup` again; state is
+  preserved.
+- **Setup refuses a file or registration** — it is no longer what HOMI wrote.
+  The message names it; move it aside or reconcile the change, then retry.
 
 ## Homebrew
 
-The intended public command is `brew install nonlocally/tap/homi`. Its formula uses
-a versioned SHA-256-verified archive and declares core runtime dependencies. Formula
-installation does not activate plugins/services or replace terminal configuration.
+`brew install nonlocally/tap/homi` is the planned channel once the tap is
+published. The formula installs the same archive under Homebrew's prefix and
+puts `homi` and `communicate` on PATH; you still run `homi setup` to register
+clients and, optionally, the service. Formula installation never configures your
+machine by itself.
 
-Run `homi setup --claude --codex`, selecting the clients you use. Add `--service`
-for daemon persistence. `--no-clients` supports CLI/service use without plugins.
-Use `--dry-run` to inspect setup and `homi doctor` to check actual installed paths.
+## Qualification
 
-## Runtime archive
-
-Download `homi-VERSION.tar.gz` and its checksum from the matching GitHub release.
-Verify the SHA-256 before extracting. The archive includes production Node
-modules; supply Node20+, Python3.9+, and Bash. Run the extracted `bin/homi setup` to
-create a stable per-user installation and enable selected integrations. Follow its
-PATH guidance for a new shell. A source checkout or temporary npm cache is not
-required after installation.
-
-## Optional capabilities
-
-tmux is needed for terminal seats. The terminal/mesh profile may need fzf and jq.
-Ghostty and Tailscale are optional; manual SSH hosts do not require Tailscale.
-Install model clients and authentication separately. Preview optional config with
-`homi profile preview --terminal --mesh`. Private overrides stay outside packages;
-core upgrades do not silently update the workstation profile.
-
-## Upgrade and removal
-
-Obtain the new version through the installation channel, then run its setup/update
-operation to activate selected integrations. A Homebrew upgrade downloads the new
-package; `homi update` activates it. Runtime commands continue using the installed
-active release until activation succeeds, and follow that release after rollback.
-Setup/update and doctor run from the invoked package so a newer download can
-activate or diagnose an older installation. Source checkouts execute their own code.
-Keep the previous payload available
-until acceptance. Rollback preserves user data and restores the former payload.
-
-Ordinary uninstall removes only owned integration objects and preserves state.
-Package and profile removal are separate. Never run an old Anu/Communicate
-uninstaller blindly after replacement paths or plugin identifiers are installed.
-
-Migration requires an ownership/backup record. Verify executable, plugin and daemon
-paths in a fresh client: falling back to an old checkout does not qualify the new
-installation. Disable conflicting legacy integration reversibly only on designated
-test machines, preserving their configuration and active work.
-
-Claude setup records whether the previous user-scope plugin was installed,
-separately from whether it was enabled. Uninstall restores an installed but
-disabled original through the Claude CLI, then restores the owned settings keys.
-First originals survive updates and rollback. A later change to the owned
-enablement, an earlier ledger lacking installed-state evidence, or another scope
-using the same marketplace requires reconciliation before replacement.
-If a previous Claude marketplace points through this installer's mutable
-`current` link, setup records its resolved old payload before changing the link.
-Restoration uses that retained payload's path and original plugin version; the
-literal old path remains in the ledger. Unrelated user symlinks are not changed.
-
-Codex setup records the previous local marketplace, installed/enabled state and
-the exact user configuration for `communicate@communicate` in its private install
-ledger. It retains custom tool policies while enabling the new installation, and
-restores the first recorded original on uninstall. Updates and rollback preserve
-that original. Later user edits to the owned plugin table cause setup, rollback
-or uninstall to refuse replacement until the settings are reconciled; they are
-never silently overwritten.
-
-This requires Codex's installed/enabled JSON listing and versioned configuration
-API, verified with Codex CLI 0.156.1. No model request is made during installation.
-Unsupported clients, nonlocal prior marketplaces and plugin settings supplied by
-another profile or managed layer fail preflight before registration is replaced.
-An older install ledger without original plugin-state evidence cannot safely
-infer it: preserve the current settings and restore/manage that registration
-manually before retrying. `homi doctor` distinguishes missing, installed-disabled
-and installed-enabled plugins.
-
-Keep client configuration unchanged while setup, rollback or uninstall runs.
-Configuration API writes check their expected version, but the clients' separate
-plugin registration commands do not provide an atomic transaction with concurrent
-edits made by another process.
+How a release is built, tested, and qualified before publication is described in
+[RELEASING.md](RELEASING.md), with the installed-artifact, client-restoration,
+and provider harnesses linked from [index.md](index.md).
