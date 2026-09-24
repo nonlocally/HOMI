@@ -1,5 +1,13 @@
 # Installed clients against the hosted bus
 
+The Codex app-server fixture filters ambient session context from its MCP child.
+After the seed returns its exact thread UUID, the helper supplies only that UUID
+in the disposable installed plugin cache's MCP environment. It preserves the
+descriptor's command, arguments and other environment values, then restores
+the original bytes after stopping providers and before uninstall. This is
+explicit fixture context; ordinary hosts without session context still use
+the documented CLI-in-session fallback.
+
 `scripts/qualify-hosted.py` checks a reviewed release against the existing
 `https://bus.nonlocally.org` gateway. It reuses the provider, archive and owned
 process helpers from [the two-device gate](FLEET-PROVIDER-QUALIFICATION.md).
