@@ -85,8 +85,9 @@ the default:
 communicate bus --hub https://bus.nonlocally.org status --no-start --json
 ```
 
-MCP `bus_status` accepts the same URL as `hub`. If `configured:false`, ask for
-a scoped invitation or event code for that hub and follow its enrollment flow below.
+MCP `bus_status` accepts the same URL as `hub`. If `configured:false`, redeem
+the invitation or event code the user supplied, or request one if absent;
+follow its enrollment flow below.
 If configured but unreachable, report the connection failure; do not register
 locally instead. Keep the selected hub on later operations or deliberately
 select the existing connection with `communicate bus use https://bus.nonlocally.org`.
