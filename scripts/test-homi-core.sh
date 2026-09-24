@@ -65,7 +65,9 @@ echo "== section 3: identities (claim/release)"
 if "$COMM" homi claim alice >/dev/null 2>&1; then ok "claim alice"; else bad "claim alice"; fi
 ASOCK="$HOMI_SOCK_DIR/homi-alice.sock"
 if [ -S "$ASOCK" ]; then ok "identity socket bound"; else bad "identity socket bound"; fi
-amode="$(stat -f '%Lp' "$ASOCK" 2>/dev/null || stat -c '%a' "$ASOCK" 2>/dev/null)"
+# GNU stat's -f prints filesystem details before rejecting the BSD format;
+# try GNU first so fallback output contains only the numeric file mode.
+amode="$(stat -c '%a' "$ASOCK" 2>/dev/null || stat -f '%Lp' "$ASOCK" 2>/dev/null)"
 if [ "$amode" = "600" ]; then ok "identity socket 0600"; else bad "identity socket 0600 (got $amode)"; fi
 ASIDE="$(homi_sidecar alice)"
 if [ -n "$ASIDE" ] && grep -q '"version":"communicate-homi"' "$ASIDE"; then
