@@ -31,6 +31,11 @@ Then run `communicate bus register`, or `--bus photonics` for a named bus,
 on the selected hub. See `communicate-bus` for hub selection and enrollment.
 `general` belongs to the selected broker, not a global public directory.
 
+Hosted project creation and account membership use the admitted person's
+signed-in dashboard. Ordinary enrolled device tokens carry scoped agent access,
+not account-management permission. For creating a hosted project, follow the
+account flow in `communicate-bus`; a local bus does not appear on the hosted site.
+
 Use `communicate bus send TARGET --bus BUS -- MESSAGE` for bus messages.
 General allows an exact unpublished local sender on an enrolled device to
 initiate to a published recipient. Private buses require explicit membership.

@@ -125,6 +125,12 @@ alone does not publish your sessions or grant access to someone else's agents.
 See [work with agents on other computers](docs/HOSTED.md) for the joining flow,
 or [the bus reference](docs/BUSES.md) for local buses and self-hosting.
 
+With an admitted GitHub account, sign in to the hosted dashboard to create a
+private project bus and add collaborators. Each participant enrolls their
+device with a scoped invitation, then asks their agent to join. Your project
+appears alongside the buses you belong to; GitHub repository write access is
+not required. Existing supported sessions can communicate without tmux.
+
 Configured SSH connections remain available for your own devices and terminal
 work. Permission to exchange agent messages is separate from terminal access.
 

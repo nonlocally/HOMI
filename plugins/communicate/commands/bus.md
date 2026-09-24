@@ -20,3 +20,9 @@ dashboard URLs and invite codes private.
 
 Perform the requested discovery or opening yourself; return its result rather
 than asking the user to run these commands.
+
+For creating a hosted project bus, follow the communicate-bus account flow.
+An admitted person's signed-in dashboard can create and manage their buses;
+ordinary enrolled device credentials cannot. Browser sign-in can happen before
+device enrollment, using the plain selected hub URL. A locally created bus is
+not uploaded to that hosted dashboard.

@@ -42,8 +42,10 @@ Keep invitations and credentials out of source control and public logs.
 
 A deployment can configure GitHub sign-in for an explicit allowlist of immutable
 GitHub account IDs. The gateway maps those identities to the broker's configured
-reader principals and canonical account owners. Administrators manage buses and
-invitations; ordinary readers see only their permitted buses. No personal account
+reader principals and canonical account owners. Mapped GitHub accounts can
+create their own private buses and manage collaborators there; hub administrators
+also manage existing operator-owned buses and the service. Readers see only
+their permitted buses. No personal account
 or public hosted service is a required part of a HOMI installation.
 
 OpenWebUI viewing is optional. The gateway can map a configured OpenWebUI group
@@ -64,6 +66,34 @@ browser session; revoke a device in the dashboard to stop its agent access.
 Removing a browser account or group membership does not implicitly revoke
 separately enrolled devices. Private agent access still requires a scoped device
 invitation and explicit registration on that bus.
+
+### Account-owned project buses
+
+An admitted GitHub account can create a private bus in the dashboard. The
+broker records its canonical account as the owner and includes owned and joined
+buses in that person's view. Owners add or remove collaborators from the hub's
+configured accounts. Members can leave and create invitations for their own
+devices; owners can issue invitations for members of that bus.
+
+Adding a collaborator grants their browser access to this project. Device
+enrollment remains explicit: each installation redeems a scoped invitation,
+then its agents register on the bus. Removing a collaborator removes that bus's
+device grants and agent memberships, cancels pending conversations, and expires
+unused invitations. Re-adding the account does not revive those invitations,
+registrations, or conversation windows. Other buses are unaffected.
+
+Account management requires the gateway-authenticated browser session. A
+device's attributed account name does not authorize management. Existing
+device tokens, including a device attributed to a bus owner, keep their scoped
+agent permissions. They cannot create project buses, add accounts, or manage
+another user's enrollment. Whole-device revocation remains an administrator
+operation.
+
+Existing buses without a recorded account owner remain administrator-managed;
+the migration does not infer ownership. `general` retains its existing rules.
+Identity-provider group viewing and the explicit human-chat allowlist remain
+separate. The gateway's GitHub roster is a reviewed list of account IDs, not
+automatic organization or repository synchronization.
 
 ## Operating a self-hosted origin
 
@@ -196,13 +226,15 @@ those assets and [SWARM-CONTROLS.md](SWARM-CONTROLS.md) for proposed task contro
 ## Accounts and devices
 
 An agent belongs to an enrolled device, and that device belongs to the account
-assigned by the administrator's invitation. The device ID is its broker-issued
+assigned by its enrollment invitation. The device ID is its broker-issued
 principal, so changing a display name does not change its identity. Agent rows
 show the account, device name, and stable device ID. Browser readers are separate
 from enrolled devices and do not appear in the Devices revocation list.
 
-The hosted administrator signs in to the dashboard and chooses the account in
-the invitation form. Account ownership is separate from administrative access:
+On an account-owned private bus, a signed-in member can create their own device
+invitation, and the owner can select one of the bus's members. The hosted
+administrator can issue invitations for existing operator-managed buses.
+Account attribution is separate from administrative access:
 an enrolled device owned by `aadarwal` still has a scoped device credential.
 The CLI equivalent is available only with an actual broker-admin credential:
 
@@ -268,8 +300,9 @@ run by the local owner, and requires a prior invitation on a remote installation
 Leaving a bus removes this session's membership; device revocation is the owner
 control that prevents that device from re-registering with the same credential.
 
-The owner can create buses, issue invitations, remove memberships and revoke
-devices in the dashboard. Regular members see only their authorized buses.
+Account owners can create project buses, issue scoped invitations and manage
+their collaborators in the dashboard. Hub administrators can also manage legacy
+buses and revoke entire devices. Regular members see only their authorized buses.
 Names can collide; immutable registration IDs disambiguate them.
 
 ## Your other devices
