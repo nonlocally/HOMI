@@ -141,7 +141,7 @@ function serviceScope() {
 export function serviceDefinition(platform, py, device, options = {}) {
   const daemon = path.join(currentLink(), "vendor/lib/homi.py");
   const scope = serviceScope();
-  const vars = { HOME: home(), COMM_STATE: stateRoot(), HOMI_SELF: device,
+  let vars = { HOME: home(), COMM_STATE: stateRoot(), HOMI_SELF: device,
     PATH: [...new Set([path.dirname(py), "/opt/homebrew/bin", "/usr/local/bin", path.join(home(), ".local/bin"), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(path.delimiter) };
   for (const name of INHERITABLE) if (options.environment?.[name] !== undefined) vars[name] = options.environment[name];
   for (const name of options.inherit || []) {
@@ -149,6 +149,9 @@ export function serviceDefinition(platform, py, device, options = {}) {
     if (process.env[name] === undefined) throw new Error(`Cannot inherit unset service variable: ${name}`);
     vars[name] = process.env[name];
   }
+  // Flag order and replaying a saved environment must not change service bytes
+  // or restart an unchanged daemon. Resolve values first, then order them once.
+  vars = Object.fromEntries(Object.keys(vars).sort().map((name) => [name, vars[name]]));
   const macLabel = "com.communicate.homi" + (scope.suffix ? "." + scope.suffix : "");
   const linuxLabel = "communicate-homi" + (scope.suffix ? "-" + scope.suffix : "") + ".service";
   if (platform === "darwin") return { platform, label: macLabel, scope, environment: vars, python: py,

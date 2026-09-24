@@ -130,8 +130,26 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   assert.deepEqual(newCalls, oldCalls);
 
   const firstOriginal = record.original;
-  record = await installService(false, () => {}, record, { inherit: ["CODEX_HOME"] });
+  Object.assign(process.env, { HOMI_SOCK_DIR: path.join(temp, "socks"), HOMI_SESSIONS_DIR: path.join(temp, "sessions"),
+    HOMI_TMUX_SOCKET: path.join(temp, "tmux.sock"), CLAUDE_CONFIG_DIR: path.join(temp, "claude") });
+  const inherited = ["HOMI_SOCK_DIR", "HOMI_SESSIONS_DIR", "HOMI_TMUX_SOCKET", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+  // Equal explicit values must produce identical unit bytes regardless of flag
+  // order or the order used when replaying the saved service environment.
+  for (const platform of ["darwin", "linux"]) {
+    const initial = serviceDefinition(platform, "/usr/bin/python3", "fixture", { inherit: inherited });
+    const reordered = serviceDefinition(platform, "/usr/bin/python3", "fixture", { inherit: [...inherited].reverse() });
+    const replayed = serviceDefinition(platform, "/usr/bin/python3", "fixture", { environment: initial.environment });
+    assert.equal(reordered.content, initial.content, `${platform}: reordered flags changed equivalent unit bytes`);
+    assert.equal(replayed.content, initial.content, `${platform}: saved environment changed equivalent unit bytes`);
+  }
+  record = await installService(false, () => {}, record, { inherit: inherited });
   assert.equal(record.environment.CODEX_HOME, process.env.CODEX_HOME);
+  const beforeReordered = fs.readFileSync(calls, "utf8").split("\n").filter((s) => s.includes("bootout") || s.includes("bootstrap") || s.includes("disable") || s.includes("enable") || s.includes('"start"'));
+  assert.equal(await installService(false, () => {}, record, { inherit: [...inherited].reverse() }), record,
+    "equivalent flag order restarted the managed daemon");
+  assert.equal(await installService(false, () => {}, record), record, "saved environment restarted the managed daemon");
+  const afterReordered = fs.readFileSync(calls, "utf8").split("\n").filter((s) => s.includes("bootout") || s.includes("bootstrap") || s.includes("disable") || s.includes("enable") || s.includes('"start"'));
+  assert.deepEqual(afterReordered, beforeReordered, "equivalent setup mutated manager state");
   process.env.CODEX_HOME = path.join(temp, "another-account");
   assert.equal(await installService(false, () => {}, record), record, "repeat captured a different ambient account");
   fs.unlinkSync(path.join(data, "current")); fs.symlinkSync(second, path.join(data, "current"));
