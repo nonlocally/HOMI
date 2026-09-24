@@ -25,6 +25,14 @@ to remove persistence. `homi daemon install|uninstall` selects the compatible da
 lifecycle. `homi uninstall` is package lifecycle. Ordinary uninstall preserves saved
 identities, mail, histories and credentials.
 
+`homi daemon pair USER@HOST` enrolls another of your devices. It discovers the far
+daemon in this order: an installed HOMI release (`~/.local/share/communicate/current`,
+run through its own `homi` CLI and upgraded only by `homi update` there), a kernel
+pair itself staged earlier, then `communicate` on the remote PATH. It never stages a
+kernel over an installed release, never overwrites a service definition it did not
+write (the fix is `homi setup --service` on that device, or `--no-persist`), and
+backs its own previous definition up beside it before refreshing it.
+
 ## Receipts
 
 - **Stored:** a mailbox or broker accepted the message durably.

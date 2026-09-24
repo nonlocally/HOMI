@@ -18,7 +18,13 @@ bcomm() { COMM_STATE="$B_STATE" HOMI_SOCK_DIR="$B_SOCKS" HOMI_SESSIONS_DIR="$B_S
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s\n' "$*"; }
-cleanup() { acomm homi stop >/dev/null 2>&1 || true; bcomm homi stop >/dev/null 2>&1 || true; rm -rf "$T"; }
+cleanup() {
+  acomm homi stop >/dev/null 2>&1 || true; bcomm homi stop >/dev/null 2>&1 || true
+  for st in "$T/c-state" "$T/far-installed/state" "$T/far-own/.local/state/communicate" "$T/far-foreign/.local/state/communicate"; do
+    COMM_STATE="$st" python3 "$HERE/lib/homi.py" call stop >/dev/null 2>&1 || true
+  done
+  rm -rf "$T"
+}
 trap cleanup EXIT
 
 jget() { python3 -c '
@@ -135,6 +141,113 @@ if [ $rc -ne 0 ]; then ok "pair against unreachable host fails"; else bad "pair 
 if printf '%s' "$out" | grep -q "ssh-copy-id"; then
   ok "failure prints the exact fix"
 else bad "failure prints the exact fix (got: $out)"; fi
+
+echo "== pair against an INSTALLED far side (fake batch ssh: far commands run here, isolated far HOME)"
+# A fake ssh/scp on PATH runs every far-side command on THIS host under
+# $FAR_HOME with its own sockets/sessions and stubbed launchctl/systemctl/
+# tailscale: no sshd, no service manager, no real HOME. It emulates batch
+# command execution only; `ssh -N` (a link dial) fails fast, so a run that
+# links over --addr is expected to fail at step 7 — what these cases prove is
+# step 2, the far-side provisioning, and what it leaves on the far disk.
+FAKEBIN="$T/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/ssh" <<'FAKE'
+#!/usr/bin/env bash
+addr=""; cmd=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2;;
+    -N) echo "fake ssh: port forwarding is not emulated" >&2; exit 255;;
+    -*) shift;;
+    *) if [ -z "$addr" ]; then addr="$1"; shift; else cmd="$*"; break; fi;;
+  esac
+done
+printf '%s\n' "$cmd" >> "${FAKE_SSH_LOG:-/dev/null}"
+[ -n "$cmd" ] || exit 255
+export HOME="$FAR_HOME" PATH="$FAKE_PATH" HOMI_SOCK_DIR="$FAR_HOME/socks" \
+  HOMI_SESSIONS_DIR="$FAR_HOME/sess" HOMI_SELF="${FAR_SELF:-farbox}" HOMI_TICK=1
+unset COMM_STATE COMMUNICATE_DATA CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CONFIG_DIR XDG_RUNTIME_DIR XDG_CONFIG_HOME
+exec bash -c "$cmd"
+FAKE
+cat > "$FAKEBIN/scp" <<'FAKE'
+#!/usr/bin/env bash
+files=()
+for a in "$@"; do case "$a" in -q|-o|BatchMode=yes) ;; *) files+=("$a");; esac; done
+dest="${files[${#files[@]}-1]}"; unset 'files[${#files[@]}-1]'
+dest="${dest#*:}"; case "$dest" in "~"*) dest="$FAR_HOME${dest#\~}";; esac
+mkdir -p "$dest" && cp "${files[@]}" "$dest"/
+FAKE
+for stub in launchctl systemctl tailscale; do
+  printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" "%s" "$*" >> "${FAKE_SSH_LOG:-/dev/null}"\nexit 0\n' "$stub" > "$FAKEBIN/$stub"
+done
+chmod +x "$FAKEBIN"/*
+C_STATE="$T/c-state"; C_SOCKS="$T/c-socks"; C_SESS="$T/c-sess"; mkdir -p "$C_SESS"
+FAR=""; FARSELF=farbox
+# The near daemon and every pair run see the fake ssh first on PATH.
+ccomm() { PATH="$FAKEBIN:$PATH" FAKE_PATH="$FAKEBIN:$PATH" FAKE_SSH_LOG="$T/ssh.log" FAR_HOME="$FAR" FAR_SELF="$FARSELF" \
+  COMM_STATE="$C_STATE" HOMI_SOCK_DIR="$C_SOCKS" HOMI_SESSIONS_DIR="$C_SESS" HOMI_SELF=gamma HOMI_TICK=1 "$COMM" "$@"; }
+far_stop() { COMM_STATE="$1" python3 "$HERE/lib/homi.py" call stop >/dev/null 2>&1 || true; }
+ccomm homi start >/dev/null 2>&1 || bad "C start"
+ccomm homi init --handle pairtester --force >/dev/null 2>&1 || bad "C claims a handle"
+realp() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+srcv="$(grep -m1 '^HOMI_VERSION' "$HERE/lib/homi.py" | cut -d'"' -f2)"
+
+echo "-- an installed release on the far side (stopped): found, started via its own CLI, never staged over"
+# The installed layout the release lifecycle creates: <data>/current/vendor/{bin,lib}.
+FAR_A="$T/far-installed"; INST_A="$FAR_A/share/communicate/current/vendor"
+mkdir -p "$INST_A"; cp -R "$HERE/bin" "$INST_A/bin"; cp -R "$HERE/lib" "$INST_A/lib"
+FAR="$FAR_A"; FARSELF=fardev
+out="$(HOMI_PAIR_FAR_HOME="$FAR_A" ccomm homi pair tester@far.invalid --name farbox 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then ok "pair completes all 7 steps against an installed far release"; else bad "pair completes against an installed far release (rc=$rc; out: $out)"; fi
+if printf '%s' "$out" | grep -q "installed release"; then ok "step 2 names the installed release"; else bad "step 2 names the installed release (out: $out)"; fi
+if [ ! -e "$FAR_A/daemon" ]; then ok "no legacy kernel staged beside an installed release"; else bad "legacy kernel staged beside an installed release"; fi
+farsrc="$(COMM_STATE="$FAR_A/state" python3 "$HERE/lib/homi.py" call status --json 2>/dev/null | jget self source_file)"
+if [ "$farsrc" = "$(realp "$INST_A/lib/homi.py")" ]; then ok "the far daemon runs the installed release's own kernel"; else bad "far daemon runs the installed kernel (got: $farsrc)"; fi
+out2="$(HOMI_PAIR_FAR_HOME="$FAR_A" ccomm homi pair tester@far.invalid --name farbox 2>&1)"; rc2=$?
+if [ $rc2 -eq 0 ] && printf '%s' "$out2" | grep -q "installed release, current"; then ok "second run: installed release reported current, nothing restaged"; else bad "second run reports the installed release current (rc=$rc2; out: $out2)"; fi
+far_stop "$FAR_A/state"
+
+echo "-- a service definition pair did not write is never overwritten (refused before staging)"
+FAR_B="$T/far-foreign"; mkdir -p "$FAR_B"
+case "$(uname -s)" in
+  Darwin) unit_b="$FAR_B/Library/LaunchAgents/com.communicate.homi.plist";;
+  *)      unit_b="$FAR_B/.config/systemd/user/communicate-homi.service";;
+esac
+mkdir -p "$(dirname "$unit_b")"
+printf 'managed by homi setup --service: %s/.local/share/communicate/current/vendor/lib/homi.py daemon\n' "$FAR_B" > "$unit_b"
+before_b="$(cat "$unit_b")"
+FAR="$FAR_B"; FARSELF=farbox
+out="$(ccomm homi pair tester@far.invalid 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then ok "pair refuses to take over a foreign service definition"; else bad "pair refuses a foreign service definition (out: $out)"; fi
+if printf '%s' "$out" | grep -q "pair did not write"; then ok "refusal names the service definition it will not touch"; else bad "refusal names the definition (out: $out)"; fi
+if printf '%s' "$out" | grep -q "homi setup --service"; then ok "refusal prints the release-channel fix"; else bad "refusal prints the fix (out: $out)"; fi
+if [ "$(cat "$unit_b")" = "$before_b" ]; then ok "the foreign service definition is byte-identical afterwards"; else bad "foreign service definition was modified"; fi
+if [ ! -e "$FAR_B/.local/share/homi" ]; then ok "nothing was staged on the far side"; else bad "a legacy kernel was staged despite the refusal"; fi
+
+echo "-- pair's OWN previous service definition is backed up before it is refreshed"
+FAR_D="$T/far-own"; mkdir -p "$FAR_D"
+case "$(uname -s)" in
+  Darwin) unit_d="$FAR_D/Library/LaunchAgents/com.communicate.homi.plist";;
+  *)      unit_d="$FAR_D/.config/systemd/user/homi.service";;
+esac
+mkdir -p "$(dirname "$unit_d")"
+printf 'previous pair unit: %s/.local/share/homi/daemon/current/homi.py daemon\n' "$FAR_D" > "$unit_d"
+before_d="$(cat "$unit_d")"
+FAR="$FAR_D"; FARSELF=farown
+out="$(ccomm homi pair tester@far.invalid 2>&1)"; rc=$?   # steps 3+ may fail: no link forwarding here
+if printf '%s' "$out" | grep -q "staged v$srcv and started"; then ok "a legacy far side with pair's own unit is staged and started"; else bad "own-unit far side staged and started (out: $out)"; fi
+backup_d="$(ls "$unit_d".pair-backup-* 2>/dev/null | head -1)"
+if [ -n "$backup_d" ] && [ "$(cat "$backup_d")" = "$before_d" ]; then ok "the previous definition is backed up beside it, byte-identical"; else bad "previous definition backed up (found: $backup_d)"; fi
+if printf '%s' "$out" | grep -q "pair-backup"; then ok "the backup is reported"; else bad "the backup is reported (out: $out)"; fi
+far_stop "$FAR_D/.local/state/communicate"
+
+echo "-- an absent far daemon with --no-install points at the release, not a registry"
+FAR_C="$T/far-empty"; mkdir -p "$FAR_C"
+FAR="$FAR_C"; FARSELF=farbox
+out="$(ccomm homi pair tester@far.invalid --no-install 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then ok "--no-install with no far daemon fails"; else bad "--no-install with no far daemon fails"; fi
+if printf '%s' "$out" | grep -q "homi setup --service"; then ok "the hint names the release-channel setup"; else bad "hint names homi setup --service (out: $out)"; fi
+if ! printf '%s' "$out" | grep -q "npx"; then ok "the hint no longer advertises an npm registry package"; else bad "hint still says npx"; fi
+ccomm homi stop >/dev/null 2>&1 || true
 
 if [ "${HOMI_TEST_SSH:-0}" = "1" ]; then
   echo "== full pair over ssh localhost (opt-in)"

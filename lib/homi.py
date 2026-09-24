@@ -3578,9 +3578,15 @@ def _cli_pair(args):
     """homi pair <user@host> — enroll another of YOUR devices, one-sided.
 
     The step order kills the recorded onboarding pains in order of pain:
-    reachability is probed (never assumed), the far kernel is staged/upgraded
-    from THIS install's own files (pair is also the fleet's upgrade vehicle —
-    a KeepAlive'd daemon never restarts itself), device names are read from
+    reachability is probed (never assumed); the far daemon is discovered — an
+    installed HOMI release first (its own CLI runs it; only `homi update`
+    there upgrades it, pair never stages a kernel over it), then a kernel pair
+    itself staged, then `communicate` on the far PATH — and only a pair-staged
+    kernel is staged/upgraded from THIS install's own files (for those, pair
+    is the fleet's upgrade vehicle — a KeepAlive'd daemon never restarts
+    itself); a service definition pair did not write is never overwritten,
+    and its own is backed up beside itself before a refresh; device names are
+    read from
     the daemons (never typed — a mistyped petname queues mail forever), links
     are created on BOTH sides, the handle is synced, and the result is a
     measured round trip in each direction: an honest pass/fail, not
@@ -3624,8 +3630,9 @@ def _cli_pair(args):
     if dry:
         print("pair %s — the plan (nothing will be run):" % addr)
         print("  [1/7] ssh reachability      ssh -o BatchMode=yes %s true" % addr)
-        print("  [2/7] far daemon            probe `communicate homi` / the staged "
-              "kernel; stage v%s and start/upgrade if needed" % HOMI_VERSION)
+        print("  [2/7] far daemon            probe an installed release, the staged "
+              "kernel, `communicate homi`; start it, or stage v%s (never over an "
+              "installed release or a foreign service definition)" % HOMI_VERSION)
         print("  [3/7] device names          read from BOTH daemons (never typed)")
         print("  [4/7] link here -> there    link <far-device> --addr %s" % addr)
         print("  [5/7] link there -> here    far side links back, or the exact fix is printed")
@@ -3646,25 +3653,84 @@ def _cli_pair(args):
                      shlex.quote(far_home), shlex.quote(name_override or "fardev")))
         far_stage_dir = "%s/daemon" % far_home  # test: no version/current split
         far_run = far_stage_dir + "/homi.py"
+        far_installed_dir = shlex.quote("%s/share/communicate" % far_home)
     else:
         # STAGE into a versioned dir; RUN/PROBE through `current` — so an
         # existing install of ANY version is found (a version-pinned run path
         # would miss a live far daemon and misclassify it ABSENT).
         far_stage_dir = "~/.local/share/homi/daemon/%s" % HOMI_VERSION
         far_run = "~/.local/share/homi/daemon/current/homi.py"
+        # The release installer's data root (`homi setup`), expanded THERE.
+        far_installed_dir = '"${COMMUNICATE_DATA:-$HOME/.local/share/communicate}"'
 
-    far_prefix = [None]  # "communicate" | "kernel"
+    far_prefix = [None]  # "installed" | "kernel" | "communicate"
+    far_installed_cli = [None]  # the installed release's own CLI, shell-quoted
 
     def far_cli(verb_args, timeout=25):
+        if far_prefix[0] == "installed":
+            return _pair_ssh(addr, "%s%s %s" % (farenv, far_installed_cli[0],
+                                                 verb_args), timeout)
         if far_prefix[0] == "communicate":
             return _pair_ssh(addr, "%scommunicate homi %s" % (farenv, verb_args),
                              timeout)
         return _pair_ssh(addr, "%spython3 %s call %s"
                          % (farenv, far_run, verb_args), timeout)
 
+    def far_installed_layout():
+        # An installed HOMI release (`homi setup`): <data>/current/vendor is
+        # its immutable payload and vendor/bin/homi its own CLI — bash and
+        # python3 only, so it runs on a bare batch PATH. This reads FILES, not
+        # a daemon: a stopped installed release must still never be staged
+        # over. Found once, remembered for every later probe.
+        if far_installed_cli[0]:
+            return True
+        rc, out = _pair_ssh(addr, 'c=%s/current/vendor/bin/homi; '
+                            '[ -x "$c" ] && printf %%s "$c"' % far_installed_dir)
+        out = out.strip()
+        if rc == 0 and out.endswith("/current/vendor/bin/homi"):
+            far_installed_cli[0] = shlex.quote(out)
+            return True
+        return False
+
+    def far_unit_state():
+        # Every service definition a homi daemon may live under on the far
+        # side: pair's own (the launchd label / homi.service it writes, which
+        # point at the kernel pair stages) or anything else — the release
+        # installer's unit, a hand-written one. ("absent"|"own"|"foreign"|
+        # "unknown", the foreign paths). Never overwrite what pair did not
+        # write; never trust a probe that did not answer.
+        rc, out = _pair_ssh(
+            addr,
+            'own=0; foreign=0; '
+            'for u in "$HOME/Library/LaunchAgents/com.communicate.homi.plist" '
+            '"${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/homi.service" '
+            '"${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/communicate-homi.service"; do '
+            '[ -e "$u" ] || continue; '
+            'if grep -q "share/homi/daemon/current/homi.py" "$u"; then own=1; '
+            'else foreign=1; printf "%s\\n" "$u"; fi; done; '
+            'if [ $foreign = 1 ]; then echo foreign; elif [ $own = 1 ]; '
+            'then echo own; else echo absent; fi')
+        lines = [l for l in out.splitlines() if l.strip()]
+        if rc != 0 or not lines or lines[-1] not in ("absent", "own", "foreign"):
+            return "unknown", []
+        return lines[-1], lines[:-1]
+
+    def _ver_of(raw):
+        try:
+            return (json.loads(raw).get("self") or {}).get("version")
+        except (ValueError, AttributeError, TypeError):
+            return None
+
     def far_probe():
-        # Try the kernel path FIRST (works on a bare batch PATH); fall back to
+        # An installed release FIRST (its CLI is the truth for that layout);
+        # then the kernel pair staged (works on a bare batch PATH); then
         # `communicate` (a repo install, only if it happens to be on PATH).
+        if far_installed_layout():
+            rc, out = _pair_ssh(addr, "%s%s status --json"
+                                % (farenv, far_installed_cli[0]))
+            if rc == 0 and out.lstrip().startswith("{"):
+                far_prefix[0] = "installed"
+                return out
         rc, out = _pair_ssh(addr, "%spython3 %s call status --json"
                             % (farenv, far_run))
         if rc == 0 and out.lstrip().startswith("{"):
@@ -3712,11 +3778,58 @@ def _cli_pair(args):
         return r.returncode == 0
 
     far_status_raw = far_probe()
-    if far_status_raw is None:
+    if far_status_raw is None and far_installed_cli[0]:
+        # An installed release is present but its daemon is not answering. Its
+        # payload is immutable and its own CLI starts it — a kernel is NEVER
+        # staged over it. If a service definition manages it, the daemon is
+        # that manager's to restart, not a nohup from here (two owners of one
+        # state root is the takeover this refuses).
+        state, _foreign = ("absent", []) if far_home else far_unit_state()
+        if state != "absent":
+            print("  [2/7] far daemon            installed release present, its daemon "
+                  "not answering, and %s — not started from here"
+                  % ("a service definition manages it" if state != "unknown"
+                     else "its service definitions could not be read"))
+            print("        fix, on %s:  homi setup --service   (restarts the installed "
+                  "release under its service) — then re-run pair" % addr)
+            return 1
+        far_prefix[0] = "installed"
+        far_cli("start", timeout=40)
+        for _ in range(20):
+            far_status_raw = far_probe()
+            if far_status_raw:
+                break
+            time.sleep(0.5)
+        if far_status_raw is None:
+            print("  [2/7] far daemon            installed release present but its daemon "
+                  "did not start — check %s/homi/daemon.log on %s"
+                  % (far_state or "~/.local/state/communicate", addr))
+            return 1
+        print("  [2/7] far daemon            installed release (was stopped) -> started "
+              "via its own CLI, v%s" % (_ver_of(far_status_raw) or "unversioned"))
+    elif far_status_raw is None:
         if no_install:
             print("  [2/7] far daemon            ABSENT (--no-install given)")
-            print("        fix: run `npx @aadarwal/homi setup` (or clone the repo) on %s" % addr)
+            print("        fix: install the HOMI release on %s and run `homi setup "
+                  "--service` (or `homi start`) there — see docs/INSTALL.md — or "
+                  "re-run pair without --no-install to stage a kernel" % addr)
             return 1
+        unit_state = "absent"
+        if not (no_persist or far_home):
+            unit_state, foreign = far_unit_state()
+            if unit_state == "foreign":
+                print("  [2/7] far daemon            REFUSED — %s is a service definition "
+                      "pair did not write; it is left untouched" % ", ".join(foreign))
+                print("        fix, on %s:  homi setup --service   (an installed release "
+                      "manages its own daemon) — or re-run pair with --no-persist to "
+                      "leave the service alone" % addr)
+                return 1
+            if unit_state == "unknown":
+                print("  [2/7] far daemon            could not read the far service "
+                      "definitions — not persisting blind")
+                print("        fix: re-run pair with --no-persist, or check batch ssh "
+                      "output on %s" % addr)
+                return 1
         if not stage_kernel():
             print("  [2/7] far daemon            FAILED to stage the kernel (scp)")
             return 1
@@ -3745,6 +3858,9 @@ def _cli_pair(args):
             rc, uname = _pair_ssh(addr, "uname")
             sockline = ('    <key>HOMI_SOCK_DIR</key><string>%s</string>\n'
                         % sock_d) if sock_d else ""
+            # pair's own previous definition (it points at the kernel pair
+            # stages) is refreshed, never silently: a copy stays beside it.
+            backup = 'u=%s; [ ! -e "$u" ] || cp "$u" "$u.pair-backup-$(date +%%s)"; '
             if "Darwin" in uname:
                 # The same unit the fixed installer writes: PATH baked,
                 # COMM_STATE one level above the far state root.
@@ -3765,7 +3881,8 @@ def _cli_pair(args):
                     '  </dict>\n'
                     '  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n'
                     '</dict></plist>\n')
-                _pair_ssh(addr, "mkdir -p ~/Library/LaunchAgents && "
+                _pair_ssh(addr, backup % "~/Library/LaunchAgents/com.communicate.homi.plist"
+                          + "mkdir -p ~/Library/LaunchAgents && "
                           "printf %s > ~/Library/LaunchAgents/com.communicate.homi.plist"
                           " && sed -i '' \"s|HOMEDIR|$HOME|\" "
                           "~/Library/LaunchAgents/com.communicate.homi.plist && "
@@ -3782,11 +3899,15 @@ def _cli_pair(args):
                            if sock_d else "")
                         + "Restart=always\n"
                         "[Install]\nWantedBy=default.target\n")
-                _pair_ssh(addr, "mkdir -p ~/.config/systemd/user && printf %s > "
+                _pair_ssh(addr, backup % "~/.config/systemd/user/homi.service"
+                          + "mkdir -p ~/.config/systemd/user && printf %s > "
                           "~/.config/systemd/user/homi.service && "
                           "systemctl --user daemon-reload && "
                           "systemctl --user enable --now homi.service"
                           % shlex.quote(unit), timeout=30)
+            if unit_state == "own":
+                print("        (pair's previous service definition is backed up beside "
+                      "it as *.pair-backup-<epoch>)")
             far_start_nohup()  # belt-and-braces: measured status decides below
         for _ in range(20):
             far_status_raw = far_probe()
@@ -3799,13 +3920,16 @@ def _cli_pair(args):
             return 1
         print("  [2/7] far daemon            staged v%s and started" % HOMI_VERSION)
     else:
-        def _far_version():
-            try:
-                return (json.loads(far_status_raw).get("self") or {}).get("version")
-            except (ValueError, AttributeError):
-                return None
-        far_ver = _far_version()
-        if far_ver != HOMI_VERSION and far_prefix[0] == "communicate":
+        far_ver = _ver_of(far_status_raw)
+        if far_ver != HOMI_VERSION and far_prefix[0] == "installed":
+            # An installed release runs its immutable payload; the staged
+            # kernel under ~/.local/share/homi is a path it never reads.
+            print("  [2/7] far daemon            %s (stale) — an INSTALLED release; "
+                  "staging cannot upgrade it" % (far_ver or "unversioned"))
+            print("        fix, on %s:  homi update   (its own release channel; a "
+                  "managed service restarts on the new payload)" % addr)
+            fail = 1
+        elif far_ver != HOMI_VERSION and far_prefix[0] == "communicate":
             # A repo-managed install runs $COMM_HOME/lib/homi.py — the staged
             # kernel under ~/.local/share is a path it never reads, so pushing
             # files would be theater. Say exactly what updates it.
@@ -3835,7 +3959,7 @@ def _cli_pair(args):
                 return 1
             # MEASURED: re-read the version — a respawn through an old unit
             # can bring the old kernel straight back.
-            new_ver = _far_version()
+            new_ver = _ver_of(far_status_raw)
             if new_ver == HOMI_VERSION:
                 print("  [2/7] far daemon            %s (stale) -> pushed kernel "
                       "v%s, restarted, VERIFIED" % (far_ver or "unversioned",
@@ -3846,7 +3970,9 @@ def _cli_pair(args):
                       % (new_ver or "unversioned"))
                 fail = 1
         else:
-            print("  [2/7] far daemon            v%s (current)" % far_ver)
+            print("  [2/7] far daemon            v%s (%s)"
+                  % (far_ver, "installed release, current"
+                     if far_prefix[0] == "installed" else "current"))
     # One truth for step 7: is the far kernel current ENOUGH to be asked for a
     # measured check (an old cli_call silently treats `link --check` as a
     # plain re-link — a mutation, not a measurement).
