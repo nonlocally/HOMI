@@ -14,3 +14,12 @@ editor/Git/agent settings, and swarm distribution are not imported.
 Adaptations separate package/config/state paths, select shell modules explicitly,
 use native agent authentication by default, preserve SSH configuration, and add
 ownership-aware configuration installation. See the repository MIT license.
+
+The optional snapshot module (`runtime/modules/snapshots`) is adapted from the
+same Anu commit: `config/bash/bin/anu-snapshot` and
+`config/launchd/com.anu.snapshot.plist` (the 03/09/15/21 cadence and the
+`snap-`/`nightly-` naming are preserved). Its prune and restore paths were
+tightened during the port: a local copy is deleted only after a mounted archive
+holds byte-identical verified files, and a corrupt archived copy is never
+restored. Personal volume names and paths are not imported; they belong in
+private configuration.
