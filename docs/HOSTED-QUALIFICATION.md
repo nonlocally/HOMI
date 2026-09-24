@@ -4,7 +4,8 @@ The Codex app-server fixture filters ambient session context from its MCP child.
 After the seed returns its exact thread UUID, the helper supplies only that UUID
 in the disposable installed plugin cache's MCP environment. It preserves the
 descriptor's command, arguments and other environment values, then restores
-the original bytes after stopping providers and before uninstall. This is
+the original bytes during cleanup before uninstall, after provider shutdown
+has been attempted. Any shutdown failure keeps qualification failed. This is
 explicit fixture context; ordinary hosts without session context still use
 the documented CLI-in-session fallback.
 

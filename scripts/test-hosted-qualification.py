@@ -300,6 +300,17 @@ class HostedTests(unittest.TestCase):
             worker.send_hidden("peer", "fixture")
         lookup.assert_not_called()
 
+    def test_command_preserves_parse_contract_and_restores_only_at_uninstall(self):
+        worker = hosted.HostedWorker.__new__(hosted.HostedWorker)
+        with patch.object(hosted.fleet.DeviceWorker, "command", return_value={"configured": False}) as command, \
+                patch.object(worker, "restore_codex_mcp_context") as restore:
+            self.assertEqual(worker.command(["bus", "status"], "status-before-enrollment", parse=True), {"configured": False})
+            command.assert_called_once_with(["bus", "status"], "status-before-enrollment", parse=True)
+            restore.assert_not_called()
+            worker.command(["uninstall", "--purge"], "uninstall")
+            restore.assert_called_once_with()
+            command.assert_called_with(["uninstall", "--purge"], "uninstall", parse=False)
+
     def test_extra_rejected_send_still_invalidates_model_proof(self):
         def calls(send, reply, register):
             return {"calls": [(tool, {}) for tool, count in (("bus_send", send), ("bus_reply", reply), ("bus_register", register))

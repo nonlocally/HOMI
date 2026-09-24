@@ -279,14 +279,13 @@ class HostedWorker(fleet.DeviceWorker):
             context["path"].write_bytes(context["original"])
             self.mcp_context = None
 
-    def command(self, args, label):
-        # The base cleanup reaches uninstall only after stopping owned model
-        # and adapter processes. A restore failure follows its existing
-        # failed-uninstall path and keeps cleanup failed. The base may still
-        # remove this disposable HOME once every owned process has stopped.
+    def command(self, args, label, parse=False):
+        # The base cleanup reaches uninstall after attempting to stop owned
+        # model and adapter processes. A restore failure follows its existing
+        # failed-uninstall path without bypassing process cleanup.
         if label == "uninstall":
             self.restore_codex_mcp_context()
-        return super().command(args, label)
+        return super().command(args, label, parse=parse)
 
     def codex(self, label, session=None, reply=None):
         # Set the exact hosted scope before thread/resume can dispatch queued
