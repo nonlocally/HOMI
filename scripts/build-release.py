@@ -25,7 +25,12 @@ def git(*args, cwd=ROOT, text=True):
 
 
 def run(*args, cwd=ROOT):
-    subprocess.run(args, cwd=cwd, check=True)
+    # Node/npm can retain a compile cache in os.tmpdir(). Keep tool-created
+    # scratch data inside an owned directory too, not the caller's TMPDIR.
+    with tempfile.TemporaryDirectory(prefix="homi-release-tools-", dir=Path(cwd).parent) as temp:
+        env = {**os.environ, "TMPDIR": temp, "TMP": temp, "TEMP": temp,
+               "NODE_COMPILE_CACHE": str(Path(temp) / "node-compile-cache")}
+        subprocess.run(args, cwd=cwd, env=env, check=True)
 
 
 def worktree_snapshot(revision, root=ROOT):
