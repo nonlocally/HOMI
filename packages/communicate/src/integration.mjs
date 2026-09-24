@@ -69,31 +69,32 @@ export function buildIntegration(sourceRoot, { dry = false } = {}) {
     verify(root, record);
     return record;
   }
-  const temp = root + '.tmp-' + process.pid;
-  fs.rmSync(temp, { recursive: true, force: true });
-  fs.mkdirSync(temp, { recursive: true, mode: 0o700 });
-  for (const folder of ['plugins', '.agents']) fs.cpSync(path.join(source, folder), path.join(temp, folder), { recursive: true });
-  const plugin = path.join(temp, 'plugins/communicate');
-  for (const kind of ['.claude-plugin', '.codex-plugin']) {
-    const file = path.join(plugin, kind, 'plugin.json');
-    const contents = JSON.parse(fs.readFileSync(file)); contents.version = pluginVersion;
-    fs.writeFileSync(file, JSON.stringify(contents, null, 2) + '\n');
-  }
-  const mcp = JSON.parse(fs.readFileSync(path.join(plugin, '.mcp.json')));
-  mcp.mcpServers.communicate = { type: 'stdio', command: node,
-    args: [absolute(path.join(currentLink(), 'src/cli.mjs')), 'serve'], env: environment };
-  fs.writeFileSync(path.join(plugin, '.mcp.json'), JSON.stringify(mcp, null, 2) + '\n');
-  const exported = Object.entries(environment).map(([key, value]) => `export ${key}=${shell(value)}`).join('\n');
-  fs.writeFileSync(path.join(plugin, 'bin/communicate'), `#!/usr/bin/env bash\nset -euo pipefail\n${exported}\nexec ${shell(absolute(path.join(currentLink(), 'vendor/bin/communicate')))} "$@"\n`, { mode: 0o755 });
-  fs.writeFileSync(path.join(plugin, 'bin/communicate-mcp'), `#!/usr/bin/env bash\nset -euo pipefail\n${exported}\nexec ${shell(node)} ${shell(absolute(path.join(currentLink(), 'src/cli.mjs')))} serve\n`, { mode: 0o755 });
-  const files = {};
-  for (const file of walk(temp).sort()) files[path.relative(temp, file)] = hash(fs.readFileSync(file));
-  const metadata = JSON.stringify({ ...partial, files }, null, 2) + '\n';
-  fs.writeFileSync(path.join(temp, 'integration.json'), metadata, { mode: 0o600 });
-  fs.renameSync(temp, root);
-  console.log(`client projection -> ${root} (${pluginVersion})`);
-  console.log(`MCP runtime paths: ${JSON.stringify(environment)}`);
-  return { ...partial, manifestHash: hash(metadata), created: true };
+  fs.mkdirSync(path.dirname(root), { recursive: true, mode: 0o700 });
+  const temp = fs.mkdtempSync(path.join(path.dirname(root), '.homi-integration-'));
+  try {
+    for (const folder of ['plugins', '.agents']) fs.cpSync(path.join(source, folder), path.join(temp, folder), { recursive: true });
+    const plugin = path.join(temp, 'plugins/communicate');
+    for (const kind of ['.claude-plugin', '.codex-plugin']) {
+      const file = path.join(plugin, kind, 'plugin.json');
+      const contents = JSON.parse(fs.readFileSync(file)); contents.version = pluginVersion;
+      fs.writeFileSync(file, JSON.stringify(contents, null, 2) + '\n');
+    }
+    const mcp = JSON.parse(fs.readFileSync(path.join(plugin, '.mcp.json')));
+    mcp.mcpServers.communicate = { type: 'stdio', command: node,
+      args: [absolute(path.join(currentLink(), 'src/cli.mjs')), 'serve'], env: environment };
+    fs.writeFileSync(path.join(plugin, '.mcp.json'), JSON.stringify(mcp, null, 2) + '\n');
+    const exported = Object.entries(environment).map(([key, value]) => `export ${key}=${shell(value)}`).join('\n');
+    fs.writeFileSync(path.join(plugin, 'bin/communicate'), `#!/usr/bin/env bash\nset -euo pipefail\n${exported}\nexec ${shell(absolute(path.join(currentLink(), 'vendor/bin/communicate')))} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(plugin, 'bin/communicate-mcp'), `#!/usr/bin/env bash\nset -euo pipefail\n${exported}\nexec ${shell(node)} ${shell(absolute(path.join(currentLink(), 'src/cli.mjs')))} serve\n`, { mode: 0o755 });
+    const files = {};
+    for (const file of walk(temp).sort()) files[path.relative(temp, file)] = hash(fs.readFileSync(file));
+    const metadata = JSON.stringify({ ...partial, files }, null, 2) + '\n';
+    fs.writeFileSync(path.join(temp, 'integration.json'), metadata, { mode: 0o600 });
+    fs.renameSync(temp, root);
+    console.log(`client projection -> ${root} (${pluginVersion})`);
+    console.log(`MCP runtime paths: ${JSON.stringify(environment)}`);
+    return { ...partial, manifestHash: hash(metadata), created: true };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
 export function removeIntegration(record) {
   if (!record?.root || !fs.existsSync(record.root)) return true;

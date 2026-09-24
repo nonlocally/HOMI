@@ -54,6 +54,16 @@ try {
   fs.symlinkSync(path.join(outside,'config.toml'),path.join(codexLink.env.CODEX_HOME,'config.toml'));
   run(codexLink, ['setup','--codex'], false);
   assert.equal(fs.readFileSync(path.join(outside,'config.toml'),'utf8'),'sentinel = true\n');
+
+  const core = fixture('core-without-clients');
+  fs.symlinkSync(outside,path.dirname(core.settings));
+  fs.symlinkSync(outside,core.env.CODEX_HOME);
+  for (const provider of ['claude','codex']) fs.writeFileSync(path.join(core.home,'bin',provider),
+    '#!/bin/sh\nprintf forbidden >> "$HOME/forbidden-provider"\nexit 93\n',{mode:0o755});
+  run(core,['setup','--no-clients']);
+  run(core,['uninstall','--no-clients','--no-service','--purge']);
+  assert(!fs.existsSync(path.join(core.home,'forbidden-provider')),'CLI-only lifecycle invoked a provider');
+  assert.equal(fs.readFileSync(path.join(outside,'settings.json'),'utf8'),original);
   assert.deepEqual(fs.readdirSync(path.dirname(fileLink.settings)), ['settings.json']);
   const dirLink = fixture('config-symlink'); fs.symlinkSync(outside, path.dirname(dirLink.settings));
   run(dirLink, ['setup', '--claude'], false);

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { copyRuntimeDependencies, hasRuntimeDependencies } from "./runtime-deps.mjs";
 import { home, dataRoot, currentLink, ledgerPath, readJson, writeJson, hash, linkTarget, switchCurrent,
-  withInstallLock, executable, stateRoot, daemonRequest, installService, uninstallService, unloadService, loadService, assertManagedPath } from "./lifecycle.mjs";
+  withInstallLock, executable, stateRoot, daemonRequest, installService, uninstallService, unloadService, loadService, assertManagedPath, installLockStatus } from "./lifecycle.mjs";
 import { communicateCli } from "./paths.mjs";
 import { buildIntegration, removeIntegration } from "./integration.mjs";
 
@@ -221,6 +221,7 @@ function codexInstall(dry, integration) {
 }
 
 function codexUninstall(dry, record = {}) {
+  assertManagedPath(path.join(codexHome(), "config.toml"));
   if (!executable("codex")) { log("kept Codex registration: its CLI is unavailable to verify ownership"); return false; }
   const market = codexMarketplace(true);
   const ownedRoot = record.marketRoot || path.join(currentLink(), "vendor");
@@ -284,8 +285,8 @@ function restoreService(record) {
 
 export async function runSetup(argv) {
   const f = parseFlags(argv);
-  if (f.claude) assertManagedPath(settingsPath());
-  if (f.codex) assertManagedPath(path.join(codexHome(), "config.toml"));
+  if (!f.uninstall && f.claude) assertManagedPath(settingsPath());
+  if (!f.uninstall && f.codex) assertManagedPath(path.join(codexHome(), "config.toml"));
   if (f.dryRun) {
     if (f.uninstall) {
       log(`[dry-run] would remove only owned registrations and executable links; preserve ${stateRoot()}`);
@@ -305,6 +306,7 @@ export async function runSetup(argv) {
     const saved = readJson(ledgerPath(), { schema: 1, releases: [], clients: {}, links: {} });
     saved.clients ||= {}; saved.links ||= {}; saved.releases ||= []; saved.integrations ||= [];
     if (f.uninstall) {
+      const inspectClients = Object.keys(saved.clients).length > 0 || saved.integrations.length > 0;
       if (f.claude && saved.clients.claude && claudeUninstall(false, saved.clients.claude)) {
         delete saved.clients.claude; writeJson(ledgerPath(), saved);
       }
@@ -318,7 +320,7 @@ export async function runSetup(argv) {
           else { log(`kept changed executable link and released ownership: ${file}`); delete saved.links[file]; }
         } catch (e) { delete saved.links[file]; if (e.code !== "ENOENT") log(`kept user-owned executable: ${file}`); }
       }
-      if (!f.selective && !Object.keys(saved.clients).length) {
+      if (!f.selective && !Object.keys(saved.clients).length && saved.integrations.length) {
         const roots = [readSettings().extraKnownMarketplaces?.[MARKET_ID]?.source?.path, codexMarketplace()?.root].filter(Boolean);
         saved.integrations = saved.integrations.filter((item) => {
           if (roots.some((root) => root === item.root || root.startsWith(item.root + path.sep))) {
@@ -335,8 +337,8 @@ export async function runSetup(argv) {
         if (f.selective || Object.keys(saved.clients).length || saved.service || Object.keys(saved.links).length || saved.integrations.length)
           throw new Error("Cannot purge while integrations remain; inspect ownership changes with homi doctor");
         const runtime = path.resolve(stateRoot());
-        const registered = [readSettings().extraKnownMarketplaces?.[MARKET_ID]?.source?.path,
-          codexMarketplace()?.root].filter(Boolean).map((entry) => path.resolve(entry));
+        const registered = inspectClients ? [readSettings().extraKnownMarketplaces?.[MARKET_ID]?.source?.path,
+          codexMarketplace()?.root].filter(Boolean).map((entry) => path.resolve(entry)) : [];
         const running = await daemonRequest();
         for (const release of saved.releases) {
           const resolved = path.resolve(release);
@@ -515,6 +517,9 @@ export async function runDoctor() {
   rows.push(["package version", pkg.version]);
   rows.push(["payload", payloadOk ? `ok (${ver} at ${realpathSync(cur)})` : "MISSING — run setup"]);
   rows.push(["runtime state", stateRoot()]);
+  const lock = installLockStatus();
+  rows.push(["installation lock", lock ? `${lock.path}: pid=${lock.pid ?? "unknown"}, ${lock.status}, started=${lock.started || "unrecorded"}` : "none"]);
+  if (lock) rows.push(["lock recovery", lock.recovery]);
   rows.push(["Claude configuration", path.dirname(settingsPath())]);
   rows.push(["Codex configuration", codexHome()]);
   const legacyPointer = path.join(dataRoot(), "repo-path");

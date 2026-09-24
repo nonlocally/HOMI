@@ -123,6 +123,11 @@ mail, credentials, and runtime configuration under
 `${COMM_STATE:-~/.local/state/communicate}`. They do not rewrite external model
 state or restart already-open agent sessions.
 
+An interrupted installer leaves an ownership record in `install.lock`. The next
+attempt and `homi doctor` show its PID, observed status, and start time. After
+confirming no installer is still running, rename that exact lock directory out
+of the way and retry. HOMI does not automatically remove another process's lock.
+
 Upgrading a retained Communicate 0.1.x/0.2.x installation preserves its original
 payload. Without a newly managed daemon service, rollback can restore that
 legacy communication package and refresh its client integrations. It does not

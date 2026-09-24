@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export const home = () => process.env.HOME || os.homedir();
 export const dataRoot = () => process.env.COMMUNICATE_DATA || path.join(home(), ".local/share/communicate");
@@ -61,15 +61,52 @@ export function switchCurrent(target) {
   fs.symlinkSync(target, tmp);
   fs.renameSync(tmp, currentLink());
 }
+export function installLockStatus() {
+  const lock = path.join(dataRoot(), "install.lock");
+  let stat;
+  try { stat = fs.lstatSync(lock); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  assertManagedPath(lock);
+  if (!stat.isDirectory()) throw new Error(`Installation lock is not a directory: ${lock}`);
+  let owner = {};
+  try { owner = readJson(path.join(lock, "owner.json")); } catch {}
+  let rawPid = owner.pid;
+  if (rawPid === undefined) try { rawPid = fs.readFileSync(path.join(lock, "pid"), "utf8").trim(); } catch {}
+  const pid = /^\d+$/.test(String(rawPid)) && Number(rawPid) > 0 ? Number(rawPid) : null;
+  let status = "owner unknown";
+  if (pid) {
+    try { process.kill(pid, 0); status = "PID exists (may have been reused)"; }
+    catch (error) { status = error.code === "ESRCH" ? "PID is not running" : "PID cannot be inspected"; }
+  }
+  return { path: lock, pid, status, started: owner.started || null, host: owner.host || null,
+    recovery: "Confirm no installer is running, then rename this exact lock directory out of the way and retry. Existing locks are never removed automatically." };
+}
 export async function withInstallLock(action) {
   assertManagedPath(dataRoot());
   fs.mkdirSync(dataRoot(), { recursive: true, mode: 0o700 });
   fs.chmodSync(dataRoot(), 0o700);
   const lock = path.join(dataRoot(), "install.lock");
-  try { fs.mkdirSync(lock); }
-  catch { throw new Error(`Another installation may be active (${lock}); inspect its owner before removing a stale lock`); }
-  fs.writeFileSync(path.join(lock, "pid"), String(process.pid));
-  try { return await action(); } finally { fs.rmSync(lock, { recursive: true, force: true }); }
+  try { fs.mkdirSync(lock, { mode: 0o700 }); }
+  catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    const owner = installLockStatus();
+    throw new Error(`Installation is locked: ${lock} (pid=${owner?.pid ?? "unknown"}, ${owner?.status || "owner unknown"}; started=${owner?.started || "unrecorded"}). ${owner?.recovery || "Inspect the lock before retrying."}`);
+  }
+  const identity = fs.statSync(lock);
+  const owner = { pid: process.pid, started: new Date().toISOString(), host: os.hostname(), token: randomUUID() };
+  let recorded = false;
+  try {
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner) + "\n", { mode: 0o600, flag: "wx" });
+    recorded = true;
+    fs.writeFileSync(path.join(lock, "pid"), String(process.pid), { mode: 0o600, flag: "wx" });
+    return await action();
+  } finally {
+    // If an operator moved a live lock, do not delete a replacement installer's
+    // lock at the same path. A killed process leaves its owner record intact.
+    let current;
+    try { current = fs.lstatSync(lock); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (current && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino &&
+        (!recorded || readJson(path.join(lock, "owner.json")).token === owner.token)) fs.rmSync(lock, { recursive: true });
+  }
 }
 export function executable(name) {
   if (name.includes(path.sep)) return name;
