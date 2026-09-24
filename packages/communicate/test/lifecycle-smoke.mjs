@@ -97,9 +97,9 @@ try {
   fs.writeFileSync(path.join(home, "bin", manager), `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),a=process.argv.slice(2);
 if(a[0]==='print'||a.includes('show')){
- console.log(a[0]==='print'?'path = '+process.env.SERVICE_TEST_PATH:'FragmentPath='+process.env.SERVICE_TEST_PATH+'\\nActiveState=active');process.exit(0);
+ console.log(a[0]==='print'?'path = '+process.env.SERVICE_TEST_PATH:'FragmentPath='+process.env.SERVICE_TEST_PATH+'\\nActiveState=active\\nUnitFileState=enabled');process.exit(0);
 }
-if (a.includes('bootstrap') || a.includes('enable')) {
+if (a.includes('bootstrap') || a.includes('start')) {
  const target=fs.realpathSync(path.join(process.env.COMMUNICATE_DATA,'current'));
  fs.appendFileSync(path.join(process.env.HOME,'service-calls'),target+'\\n');
  const version=JSON.parse(fs.readFileSync(path.join(target,'package.json'))).version;

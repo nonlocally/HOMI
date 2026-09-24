@@ -141,32 +141,41 @@ function serviceState(definition) {
   assertManagedPath(definition.path);
   const result = definition.platform === "darwin"
     ? spawnSync("launchctl", ["print", `gui/${process.getuid()}/${definition.label}`], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] })
-    : spawnSync("systemctl", ["--user", "show", definition.label, "--property=FragmentPath", "--property=ActiveState"], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] });
+    : spawnSync("systemctl", ["--user", "show", definition.label, "--property=FragmentPath", "--property=ActiveState", "--property=UnitFileState"], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] });
   if (result.error) throw new Error(`Could not inspect service ownership: ${result.error.message}`);
   if (result.status !== 0) {
-    if (/could not find service|not found|not loaded|does not exist/i.test((result.stderr || "") + (result.stdout || ""))) return { active: false };
+    if (/could not find service|not found|not loaded|does not exist/i.test((result.stderr || "") + (result.stdout || ""))) return { active: false, enabled: false };
     throw new Error(`Could not verify service ownership: ${(result.stderr || result.stdout || "unknown manager error").trim()}`);
   }
   const activePath = definition.platform === "darwin"
     ? result.stdout.match(/^\s*path = (.+)$/m)?.[1]?.trim()
     : result.stdout.match(/^FragmentPath=(.*)$/m)?.[1]?.trim();
-  if (!activePath && definition.platform === "linux") return { active: false };
+  if (!activePath && definition.platform === "linux") return { active: false, enabled: false };
   if (!activePath || canonical(activePath) !== canonical(definition.path))
     throw new Error(`Refusing to replace a loaded service from another/unknown unit: ${activePath || definition.label}`);
   const running = definition.platform === "darwin" || /^(active|activating|reloading)$/.test(result.stdout.match(/^ActiveState=(.*)$/m)?.[1] || "");
-  return { active: running, path: activePath };
+  const unitFileState = definition.platform === "linux" ? result.stdout.match(/^UnitFileState=(.*)$/m)?.[1] : undefined;
+  if (definition.platform === "linux" && !unitFileState)
+    throw new Error("Could not verify service enablement: UnitFileState was not reported");
+  return { active: running, enabled: definition.platform === "darwin" ? running : /^(enabled|enabled-runtime)$/.test(unitFileState), unitFileState, path: activePath };
 }
 export function unloadService(definition) {
-  if (!serviceState(definition).active) return;
-  if (definition.platform === "darwin") serviceRun("launchctl", ["bootout", `gui/${process.getuid()}/${definition.label}`], true);
-  else serviceRun("systemctl", ["--user", "disable", "--now", definition.label], true);
+  const status = serviceState(definition);
+  if (definition.platform === "darwin") {
+    if (status.active) serviceRun("launchctl", ["bootout", `gui/${process.getuid()}/${definition.label}`], true);
+  } else if (status.active || status.enabled) serviceRun("systemctl", ["--user", "disable", ...(status.unitFileState === "enabled-runtime" ? ["--runtime"] : []), "--now", definition.label], true);
 }
-export function loadService(definition) {
+export function loadService(definition, activation = { active: true, enabled: true }) {
   serviceState(definition); // A colliding manager label is never ours to replace.
-  if (definition.platform === "darwin") serviceRun("launchctl", ["bootstrap", `gui/${process.getuid()}`, definition.path]);
-  else {
+  if (definition.platform === "darwin") {
+    if (activation.active !== false) serviceRun("launchctl", ["bootstrap", `gui/${process.getuid()}`, definition.path]);
+  } else {
     serviceRun("systemctl", ["--user", "daemon-reload"]);
-    serviceRun("systemctl", ["--user", "enable", "--now", definition.label]);
+    // Starting and enabling are independent. An original manually started
+    // service must not gain autostart, nor should an enabled idle one start.
+    if (activation.enabled !== false)
+      serviceRun("systemctl", ["--user", "enable", ...(activation.unitFileState === "enabled-runtime" ? ["--runtime"] : []), definition.label]);
+    if (activation.active !== false) serviceRun("systemctl", ["--user", "start", definition.label]);
   }
 }
 export function daemonRequest(op = "status", timeout = 3000, serviceControl = false) {
@@ -257,7 +266,7 @@ export async function installService(dry = false, beforeRestore = () => {}, prio
   }
   if (original === undefined && before === null) original = null;
   else if (original === undefined) {
-    original = { backup, hash: hash(before), mode: beforeMode, active: active.active };
+    original = { backup, hash: hash(before), mode: beforeMode, active: active.active, enabled: active.enabled, unitFileState: active.unitFileState };
   }
   unloadService(definition);
   await daemonRequest("stop", 3000, true);
@@ -270,7 +279,7 @@ export async function installService(dry = false, beforeRestore = () => {}, prio
       const status = await daemonRequest("status", 3000, true);
       if (status?.ok && status.self?.source_file === expectedSource) {
         console.log(`managed service: ${JSON.stringify(receipt)}`);
-        return { ...definition, hash: hash(definition.content), original, backup, previousActive: active.active, previousMode: beforeMode, state: stateRoot() };
+        return { ...definition, hash: hash(definition.content), original, backup, previousActive: active.active, previousEnabled: active.enabled, previousUnitFileState: active.unitFileState, previousMode: beforeMode, state: stateRoot() };
       }
       await new Promise((r) => setTimeout(r, 200));
     }
@@ -283,7 +292,7 @@ export async function installService(dry = false, beforeRestore = () => {}, prio
     if (before === null) fs.rmSync(definition.path, { force: true });
     else {
       writeService(definition.path, before, beforeMode);
-      try { if (active.active) loadService(definition); }
+      try { loadService(definition, active); }
       catch (restoreError) { throw new Error(`${error.message}; previous service also failed to restart: ${restoreError.message}`); }
     }
     throw error;
@@ -304,10 +313,10 @@ export async function uninstallService(record, dry = false) {
     if (originalData === null) fs.rmSync(record.path);
     else writeService(record.path, originalData, original.mode ?? 0o600);
     if (record.platform === "linux") serviceRun("systemctl", ["--user", "daemon-reload"]);
-    if (original?.active) loadService(record);
+    if (original) loadService(record, original);
   } catch (error) {
     writeService(record.path, before);
-    if (active.active) loadService(record);
+    loadService(record, active);
     throw error;
   }
   console.log(original ? `restored original service ${record.path}${original.active ? " and reloaded it" : " (previously inactive)"}` : `removed owned service ${record.path}`);

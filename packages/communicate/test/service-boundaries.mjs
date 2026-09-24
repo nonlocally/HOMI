@@ -9,6 +9,8 @@ import net from "node:net";
 import { once } from "node:events";
 import { serviceDefinition, installService, uninstallService, assertManagedPath, withInstallLock, writeJson, daemonRequest, hash } from "../src/lifecycle.mjs";
 
+// Exercise the actual Linux command branch on macOS without a Linux manager.
+if (process.argv.includes("--linux-fixture")) Object.defineProperty(process, "platform", { value: "linux" });
 const priorEnv = { ...process.env };
 const temp = fs.mkdtempSync("/tmp/homi-svc-");
 const home = path.join(temp, "home"), data = path.join(home, "data"), state = path.join(home, "state");
@@ -35,13 +37,13 @@ try {
   process.env.COMM_STATE = path.join(home, "other-state");
   assert.notEqual(serviceDefinition(process.platform, "/usr/bin/python3", "fixture").label, definition.label);
   process.env.COMM_STATE = state;
-  const production = { active: true, path: standard.path, source: "/production/daemon.py" };
+  const production = { active: true, enabled: true, path: standard.path, source: "/production/daemon.py" };
   const original = "# original operator service\n";
   fs.mkdirSync(path.dirname(definition.path), { recursive: true });
   fs.writeFileSync(definition.path, original, { mode: 0o640 });
   const readRegistry = () => JSON.parse(fs.readFileSync(registry));
   const writeRegistry = (value) => fs.writeFileSync(registry, JSON.stringify(value));
-  writeRegistry({ [standard.label]: production, [definition.label]: { active: true, path: definition.path, source: "/legacy/daemon.py" } });
+  writeRegistry({ [standard.label]: production, [definition.label]: { active: true, enabled: false, path: definition.path, source: "/legacy/daemon.py" } });
   const manager = `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),a=process.argv.slice(2),file=process.env.SERVICE_REGISTRY;
 const jobs=JSON.parse(fs.readFileSync(file));
@@ -51,19 +53,25 @@ if(a[0]==='print'||a[0]==='bootout'){op=a[0];label=a[1].split('/').at(-1);}
 else if(a[0]==='bootstrap'){op='load';label=path.basename(a[2],'.plist');}
 else if(a.includes('show')){op='print';label=a[a.indexOf('show')+1];}
 else if(a.includes('disable')){op='bootout';label=a.at(-1);}
-else if(a.includes('enable')){op='load';label=a.at(-1);}
+else if(a.includes('enable')){op='enable';label=a.at(-1);}
+else if(a.includes('start')){op='load';label=a.at(-1);}
 else if(a.includes('daemon-reload'))process.exit(0);
 if(op==='print'){
  const job=jobs[label];
- if(!job||!job.active){console.error('Could not find service');process.exit(113);}
- console.log(a[0]==='print'?'path = '+job.path:'FragmentPath='+job.path+'\\nActiveState=active');process.exit(0);
+ if(!job||(a[0]==='print'&&!job.active)){console.error('Could not find service');process.exit(113);}
+ console.log(a[0]==='print'?'path = '+job.path:'FragmentPath='+job.path+'\\nActiveState='+(job.active?'active':'inactive')+'\\nUnitFileState='+(job.enabled?(job.runtime?'enabled-runtime':'enabled'):'disabled'));process.exit(0);
 }
-if(op==='bootout'){if(jobs[label])jobs[label].active=false;}
+if(op==='bootout'){if(jobs[label]){jobs[label].active=false;if(a[0]!=='bootout')jobs[label].enabled=false;}}
+if(op==='enable'){
+ jobs[label]??={active:false,path:path.join(process.env.XDG_CONFIG_HOME,'systemd/user',label)};
+ jobs[label].enabled=true;jobs[label].runtime=a.includes('--runtime');
+}
 if(op==='load'){
  const unit=a[0]==='bootstrap'?a[2]:path.join(process.env.XDG_CONFIG_HOME,'systemd/user',label);
  const text=fs.readFileSync(unit,'utf8');
  if(process.env.FAIL_ORIGINAL==='1'&&text.startsWith('# original'))process.exit(9);
- jobs[label]={active:true,path:unit,source:text.startsWith('# original')?'/legacy/daemon.py':fs.realpathSync(path.join(process.env.COMMUNICATE_DATA,'current/vendor/lib/homi.py'))};
+ if(process.env.FAIL_CURRENT==='1'&&!text.startsWith('# original'))process.exit(9);
+ jobs[label]={...jobs[label],active:true,path:unit,source:text.startsWith('# original')?'/legacy/daemon.py':fs.realpathSync(path.join(process.env.COMMUNICATE_DATA,'current/vendor/lib/homi.py'))};
 }
 fs.writeFileSync(file,JSON.stringify(jobs));
 `;
@@ -101,9 +109,9 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   assert.equal(fs.statSync(record.original.backup).mode & 0o077, 0);
   assert(!record.environment.CODEX_HOME, "ambient account home leaked into service");
   assert(!record.environment.PATH.includes(bin), "invoking agent PATH leaked into service");
-  const oldCalls = fs.readFileSync(calls, "utf8").split("\n").filter((s) => s.includes("bootout") || s.includes("bootstrap") || s.includes("disable") || s.includes("enable"));
+  const oldCalls = fs.readFileSync(calls, "utf8").split("\n").filter((s) => s.includes("bootout") || s.includes("bootstrap") || s.includes("disable") || s.includes("enable") || s.includes('"start"'));
   assert.equal(await installService(false, () => {}, record), record, "same release restarted its daemon");
-  const newCalls = fs.readFileSync(calls, "utf8").split("\n").filter((s) => s.includes("bootout") || s.includes("bootstrap") || s.includes("disable") || s.includes("enable"));
+  const newCalls = fs.readFileSync(calls, "utf8").split("\n").filter((s) => s.includes("bootout") || s.includes("bootstrap") || s.includes("disable") || s.includes("enable") || s.includes('"start"'));
   assert.deepEqual(newCalls, oldCalls);
 
   const firstOriginal = record.original;
@@ -127,6 +135,34 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   assert.equal(fs.readFileSync(definition.path, "utf8"), original, "uninstall did not restore original bytes");
   assert.equal(fs.statSync(definition.path).mode & 0o777, 0o640, "uninstall lost original unit mode");
   assert.equal(readRegistry()[definition.label].source, "/legacy/daemon.py", "uninstall did not restore original loaded job");
+  if (process.platform === "linux") {
+    assert.equal(readRegistry()[definition.label].enabled, false, "manually started original gained autostart");
+    for (const enabled of [true, false]) {
+      const jobs = readRegistry(); jobs[definition.label].active = false; jobs[definition.label].enabled = enabled; writeRegistry(jobs);
+      if (enabled) {
+        process.env.FAIL_CURRENT = "1";
+        await assert.rejects(installService(), /failed/);
+        delete process.env.FAIL_CURRENT;
+        assert.equal(readRegistry()[definition.label].active, false, "failed replacement started original idle unit");
+        assert.equal(readRegistry()[definition.label].enabled, true, "failed replacement lost original autostart");
+        assert.equal(fs.readFileSync(definition.path, "utf8"), original);
+      }
+      const inactiveOriginal = await installService();
+      assert.equal(inactiveOriginal.original.active, false);
+      assert.equal(inactiveOriginal.original.enabled, enabled);
+      await uninstallService(inactiveOriginal);
+      const restored = readRegistry()[definition.label];
+      assert.equal(restored.active, false, "original inactive service unexpectedly started");
+      assert.equal(restored.enabled, enabled, "original inactive service lost enablement state");
+      assert.equal(fs.readFileSync(definition.path, "utf8"), original);
+    }
+    // A temporary autostart setting must not become persistent on restoration.
+    const jobs = readRegistry(); jobs[definition.label].enabled = true; jobs[definition.label].runtime = true; writeRegistry(jobs);
+    const runtimeOriginal = await installService();
+    await uninstallService(runtimeOriginal);
+    assert.equal(readRegistry()[definition.label].runtime, true);
+    assert.equal(readRegistry()[definition.label].active, false);
+  }
   assert.deepEqual(readRegistry()[standard.label], production, "isolated service changed production manager job");
 
   // Managed-path guards must stop aliases before writes; system /tmp aliases and
@@ -143,7 +179,7 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   process.env.COMMUNICATE_DATA = alias;
   await assert.rejects(withInstallLock(() => {}), /symlink/);
   assert.deepEqual(fs.readdirSync(outside), []);
-  console.log("PASS: scoped global service ownership, explicit environment, unchanged refresh, original lineage, restoration failure, and symlink boundaries");
+  console.log(`PASS (${process.platform} fixture): scoped service ownership, explicit environment, unchanged refresh, original lineage/activity/enablement, restoration failure, and symlink boundaries`);
 } finally {
   if (server) await new Promise((resolve) => server.close(resolve));
   for (const key of Object.keys(process.env)) if (!(key in priorEnv)) delete process.env[key];
