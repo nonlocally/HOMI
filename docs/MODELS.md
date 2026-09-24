@@ -174,6 +174,10 @@ These commands target the Claude Code CLI and Codex CLI. They do not configure
 desktop apps. Claude Code with a non-Claude model requires deployment-specific
 compatibility qualification; it is not vendor certification.
 
+Administrator-managed client policy may take precedence over a launch profile.
+HOMI preserves that policy; confirm the actual selected endpoint and model in
+such environments before treating a run as qualified.
+
 For a new endpoint, verify an actual read/edit/test task with each intended
 client, including a tool result returned to the model, streamed completion and
 cancellation. Match those calls to the issuing account's usage records where
