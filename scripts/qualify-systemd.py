@@ -284,6 +284,13 @@ def main():
     except Exception as error:
         proof.report["error"] = str(error)
         print("FAIL: " + str(error), file=sys.stderr, flush=True)
+        if proof.setup_attempted and proof.label:
+            try:
+                journal = proof.run("journalctl", "--user-unit=" + proof.label,
+                                    "--no-pager", "-n", "80", check=False, timeout=10)
+                proof.report["owned_unit_journal"] = (journal.stdout + journal.stderr)[-16000:]
+            except Exception as journal_error:
+                proof.report["journal_error"] = str(journal_error)
     finally:
         proof.cleanup()
     return 0 if proof.report["ok"] else 1
