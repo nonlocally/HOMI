@@ -117,6 +117,32 @@ desktop client. Terminal-client success cannot qualify desktop discovery or wake
 The Claude desktop application and Claude Code are different client surfaces;
 do not list either as supported merely because the other passed.
 
+## Two-model proof on one device
+
+With both providers privately authenticated in one prepared isolated home, run:
+
+```sh
+python3 scripts/qualify-provider-pair.py /path/to/homi-0.3.0 \
+  --client-home /private/fresh-pair-home \
+  --evidence /private/new-pair-evidence --run-live
+```
+
+This installs the unchanged artifact for both clients, registers the exact Claude
+session and Codex thread, and exercises Claude→Codex and Codex→Claude. Each
+model originates its challenge with `bus_send`; the receiving model uses
+`bus_reply` for the byte-exact response in the same conversation. The controller
+supplies prompts and reads receipts and the local database. It never sends,
+replies, polls, or acknowledges on either model's behalf.
+
+Claude exposes only the four named bus tools needed for this test and no built-in
+shell/file tools. Codex retains the strict one-call approval responder, extended
+to allow an outbound send only to the exact fixture peer with the exact challenge
+and local broker. Each direction records both delivery receipts separately.
+Codex resumes explicitly to consume queued challenges; queued answers are not
+reported as automatically consumed. The test stops its provider processes and
+broker, uninstalls its owned integrations, and preserves private evidence.
+It qualifies two models on one device, not remote transport or desktop wake.
+
 ## Two-model, two-device proof
 
 Use two designated devices with the same reviewed installed release. Each needs

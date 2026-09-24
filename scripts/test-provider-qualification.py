@@ -58,6 +58,16 @@ class ProofTests(unittest.TestCase):
         _, events = self.approval("bus_reply", {"id":"message-fixture"})
         self.assertEqual(gate.tool_calls(events),[("bus_reply",{"id":"message-fixture"})])
 
+    def test_outbound_approval_is_disabled_without_exact_peer_challenge(self):
+        outgoing = {"sender":"agent-self","target":"agent-peer","message":"nonce-fixture\nliteral $HOME", "hub":"http://127.0.0.1:1234"}
+        arguments = {"from":outgoing["sender"],"target":outgoing["target"],"message":outgoing["message"],"hub":outgoing["hub"]}
+        params, _ = self.approval("bus_send", arguments)
+        self.assertFalse(gate.authorize_fixture_tool(params,"thread-fixture","fixture",tool="bus_send"))
+        self.assertTrue(gate.authorize_fixture_tool(params,"thread-fixture","fixture",tool="bus_send",outgoing=outgoing))
+        for key, changed in [("target","unrelated"),("from","another-agent"),("message","changed"),("hub","https://unrelated.invalid"),("bus","private")]:
+            modified = json.loads(json.dumps(params));modified["_meta"]["tool_params"][key] = changed
+            self.assertFalse(gate.authorize_fixture_tool(modified,"thread-fixture","fixture",tool="bus_send",outgoing=outgoing))
+
     def test_assistant_claim_is_not_a_tool_call(self):
         self.assertEqual(gate.tool_calls([{"type": "assistant", "message": {"content": [
             {"type": "text", "text": "I called bus_register and bus_reply successfully"}]}}]), [])

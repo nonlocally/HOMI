@@ -149,7 +149,7 @@ def pending_approval_tool(events, params):
     return matches[0].get("tool") if len(matches) == 1 else None
 
 
-def authorize_fixture_tool(params, session, name, reply=None, tool=None):
+def authorize_fixture_tool(params, session, name, reply=None, tool=None, outgoing=None):
     """One-call authorization, restricted to this fixture's exact participants."""
     meta = params.get("_meta") or {}
     if (params.get("threadId") != session or params.get("serverName") != "communicate"
@@ -172,20 +172,27 @@ def authorize_fixture_tool(params, session, name, reply=None, tool=None):
         return (arguments.get("id") == reply["id"] and arguments.get("message") == reply["payload"]
                 and arguments.get("from") == reply["recipient"] and arguments.get("hub") in (None, "", reply.get("hub"))
                 and set(arguments) <= {"id", "message", "from", "hub"})
+    if tool == "bus_send" and outgoing:
+        return (arguments.get("target") == outgoing["target"] and arguments.get("from") == outgoing["sender"]
+                and arguments.get("message") == outgoing["message"] and arguments.get("bus", "general") == "general"
+                and arguments.get("hub") in (None, "", outgoing["hub"])
+                and set(arguments) <= {"target", "message", "from", "hub", "bus"})
     return False
 
 
 class CodexAppServer:
     """Real installed plugin discovery with a narrowly scoped approval client."""
-    def __init__(self, executable, env, cwd, evidence, label, name, timeout, profile=None):
+    def __init__(self, executable, env, cwd, evidence, label, name, timeout, profile=None, allow_send=False):
         self.events, self.approvals, self.pending = [], [], {}
         self.sequence, self.session, self.turn, self.reply = 0, None, None, None
+        self.outgoing = None
         self.name, self.timeout, self.cwd = name, timeout, str(cwd)
         self.write_lock = threading.Lock()
         self.outputs = [private_file(evidence / (label + suffix))
                         for suffix in (".events.jsonl", ".stderr.log", ".requests.jsonl")]
         prefix = 'plugins."communicate@communicate".mcp_servers.communicate'
-        command = [executable, "app-server", "-c", prefix + '.enabled_tools=["bus_status","bus_register","bus_reply"]',
+        allowed = ["bus_status", "bus_register", "bus_reply"] + (["bus_send"] if allow_send else [])
+        command = [executable, "app-server", "-c", prefix + '.enabled_tools=' + json.dumps(allowed),
                    "-c", "features.shell_tool=false", "-c", "web_search=\"disabled\""]
         if profile:
             command += ["-c", "profile=" + json.dumps(profile)]
@@ -204,7 +211,7 @@ class CodexAppServer:
                     params = message.get("params", {})
                     tool = pending_approval_tool(self.events, params)
                     accepted = (message["method"] == "mcpServer/elicitation/request"
-                                and authorize_fixture_tool(params, self.session, self.name, self.reply, tool))
+                                and authorize_fixture_tool(params, self.session, self.name, self.reply, tool, self.outgoing))
                     self.approvals.append({"method": message["method"], "tool": tool,
                                            "accepted": accepted})
                     if message["method"] == "mcpServer/elicitation/request":
