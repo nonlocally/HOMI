@@ -67,9 +67,24 @@ Use `--provider claude` for Claude Code. This mode runs `setup --no-service`,
 starts the client without an MCP executable override or `--plugin-dir`, and
 requires the same exact-session registration and correlated reply evidence.
 It uninstalls its integration on exit. Use a dedicated authenticated client home
-because its registry and plugin cache are exercised. For Codex, the verified
-thread ID is supplied in the registration prompt and checked against the existing
-local session; the harness does not override the installed MCP environment.
+because its registry and plugin cache are exercised. For Codex, installed mode uses the real `codex app-server` and its normal plugin
+discovery. The verified `thread/start` ID is supplied in the registration prompt;
+subsequent phases use `thread/resume` for that exact ID. The harness does not
+override the installed MCP executable or environment. This qualifies the Codex
+app-server client surface; it does not claim that noninteractive `codex exec` can
+answer approval prompts.
+
+Codex 0.156.1 intersects host plugin policies with the plugin's declared approval
+policy. An `approve` override cannot relax a required prompt, and `codex exec`
+rejects that prompt under its noninteractive policy. Installed qualification
+therefore responds through the supported app-server approval protocol. Each
+one-call approval must match one pending tool item from the installed
+`communicate@communicate` plugin, in the exact fixture thread and turn. Only
+`bus_status`, registration of this fixture session/name, and a byte-exact reply
+to the current challenge are accepted. Other requests are rejected, shell tools
+are disabled, the sandbox stays read-only, and no persistent grant is written.
+See the [app-server approval protocol](https://learn.chatgpt.com/docs/app-server#approvals)
+and [versioned policy implementation](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core-plugins/src/loader.rs).
 This check covers installed messaging. The durable operations, visual directory,
 human inbox and desktop acceptance checks below remain separate.
 
