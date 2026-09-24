@@ -4,6 +4,9 @@
 Run on a qualification host, passing an extracted artifact's archive and the
 rendered canonical formula. Only the candidate formula name, local archive URL,
 and keg-only status differ. Uses existing dependencies; never upgrades them.
+--disposable-ci instead requires a GitHub-hosted runner and absent HOMI commands,
+then tests the canonical linked formula with ordinary dependency resolution,
+brew test and brew reinstall. Never use that mode on a shared workstation.
 """
 import argparse
 import hashlib
@@ -50,11 +53,18 @@ def main():
     parser.add_argument("archive", type=Path)
     parser.add_argument("formula", type=Path)
     parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument("--disposable-ci", action="store_true",
+                        help="Allow dependency changes on a disposable GitHub-hosted runner only")
     args = parser.parse_args()
+    if args.disposable_ci and not (os.environ.get("GITHUB_ACTIONS") == "true" and
+                                  os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and
+                                  Path(os.environ.get("RUNNER_TEMP", "/nonexistent")).is_dir()):
+        parser.error("--disposable-ci requires a disposable GitHub-hosted runner; shared hosts are refused")
     archive = args.archive.resolve(strict=True)
     args.work.mkdir(parents=True, exist_ok=True)
     report = {"archive": str(archive), "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-              "mode": "renamed keg-only candidate; canonical command names inside keg", "checks": []}
+              "mode": ("canonical linked formula on disposable GitHub-hosted runner" if args.disposable_ci
+                       else "renamed keg-only candidate; canonical command names inside keg"), "checks": [], "ok": False}
     brew = shutil.which("brew")
     if not brew:
         parser.error("Homebrew is required on the qualification host")
@@ -66,16 +76,19 @@ def main():
     protected = [prefix / "bin/homi", prefix / "bin/communicate"]
     before = {str(p): fingerprint(p) for p in protected}
     report["protected_before"] = before
+    if args.disposable_ci and any(value["kind"] != "absent" for value in before.values()):
+        raise RuntimeError("disposable qualification requires absent homi/communicate commands; refusing replacement")
     # Refuse to install/upgrade dependencies: this is qualification on an
     # existing workstation. The formula still exercises their real opt paths.
     dependencies = {}
     for dependency in ("node", "python@3.14", "bash"):
-        versions = run([brew, "list", "--versions", dependency], env=brew_env, quiet=True).strip()
-        if not versions:
+        listed = subprocess.run([brew, "list", "--versions", dependency], env=brew_env, text=True, capture_output=True, timeout=60)
+        versions = listed.stdout.strip()
+        if not versions and not args.disposable_ci:
             raise RuntimeError(f"preinstall {dependency} before qualifying this host")
         dependencies[dependency] = versions
     report["dependencies_before"] = dependencies
-    formula_name = "homi-qualification-" + report["sha256"][:10]
+    formula_name = "homi" if args.disposable_ci else "homi-qualification-" + report["sha256"][:10]
     classname = "".join(part.capitalize() for part in formula_name.split("-"))
     formula = args.formula.read_text()
     if "class Homi < Formula" not in formula or '  license "MIT"' not in formula:
@@ -83,7 +96,8 @@ def main():
     formula = formula.replace("class Homi < Formula", f"class {classname} < Formula", 1)
     formula = re.sub(r'^  url ".*"$', '  url "' + archive.as_uri() + '"', formula, count=1, flags=re.M)
     formula = re.sub(r'^  sha256 ".*"$', '  sha256 "' + report["sha256"] + '"', formula, count=1, flags=re.M)
-    formula = formula.replace('  license "MIT"', '  license "MIT"\n  keg_only "temporary isolated HOMI qualification"', 1)
+    if not args.disposable_ci:
+        formula = formula.replace('  license "MIT"', '  license "MIT"\n  keg_only "temporary isolated HOMI qualification"', 1)
     formula_path = args.work / f"{formula_name}.rb"
     formula_path.write_text(formula)
     if (prefix / "opt" / formula_name).exists() or (prefix / "Cellar" / formula_name).exists():
@@ -112,10 +126,15 @@ def main():
         tap_root = Path(run([brew, "--repository", tap], env=brew_env, quiet=True).strip())
         (tap_root / "Formula").mkdir(exist_ok=True)
         shutil.copyfile(formula_path, tap_root / "Formula" / formula_path.name)
-        run([brew, "install", "--formula", "--ignore-dependencies", qualified_name], env=brew_env)
+        install_args = [brew, "install", "--formula", *([] if args.disposable_ci else ["--ignore-dependencies"]), qualified_name]
+        run(install_args, env=brew_env, timeout=1800 if args.disposable_ci else 180)
         installed = True
         keg = prefix / "opt" / formula_name
         entry = keg / "bin/homi"
+        if args.disposable_ci:
+            entry = prefix / "bin/homi"
+            assert entry.is_symlink() and entry.resolve() == (keg / "bin/homi").resolve(), "canonical homi command was not linked"
+            assert (prefix / "bin/communicate").is_symlink(), "compatibility command was not linked"
         report["installed_manifest"] = verify_runtime(keg / "libexec")
         tested = subprocess.run([brew, "test", qualified_name], env=brew_env, text=True, capture_output=True, timeout=180)
         print(tested.stdout + tested.stderr, end="", flush=True)
@@ -123,7 +142,7 @@ def main():
             # brew test insists on current metadata versions even when the
             # declared runtime dependencies are installed and work. Do not
             # upgrade an existing workstation to get past this separate gate.
-            if "is missing test dependencies:" not in tested.stdout + tested.stderr:
+            if args.disposable_ci or "is missing test dependencies:" not in tested.stdout + tested.stderr:
                 raise RuntimeError("Homebrew formula test failed")
             report["formula_test"] = "unqualified: installed dependency versions do not satisfy brew test's current metadata"
         else:
@@ -147,11 +166,11 @@ def main():
         # exposes no --ignore-dependencies flag, so forbid changes to every
         # currently installed formula as a fail-closed dependency guard.
         names = run([brew, "list", "--formula"], env=brew_env, quiet=True).splitlines()
-        reinstall_env = {**brew_env, "HOMEBREW_FORBIDDEN_FORMULAE": " ".join(name for name in names if name != formula_name)}
-        result = subprocess.run([brew, "reinstall", "--formula", qualified_name], env=reinstall_env, text=True, capture_output=True, timeout=180)
+        reinstall_env = brew_env if args.disposable_ci else {**brew_env, "HOMEBREW_FORBIDDEN_FORMULAE": " ".join(name for name in names if name != formula_name)}
+        result = subprocess.run([brew, "reinstall", "--formula", qualified_name], env=reinstall_env, text=True, capture_output=True, timeout=1800 if args.disposable_ci else 180)
         print(result.stdout + result.stderr, end="", flush=True)
         if result.returncode:
-            if "forbidden" not in (result.stdout + result.stderr).lower():
+            if args.disposable_ci or "forbidden" not in (result.stdout + result.stderr).lower():
                 raise RuntimeError("Homebrew reinstall failed")
             report["brew_reinstall"] = "unqualified: current metadata requires dependency changes; guarded reinstall refused"
             run([brew, "uninstall", "--formula", qualified_name], env=brew_env)
@@ -161,8 +180,11 @@ def main():
             report["reinstall_method"] = "explicit uninstall then install with unchanged dependencies"
         else:
             report["brew_reinstall"] = "pass"
-            report["reinstall_method"] = "brew reinstall with dependency-change guard"
+            report["reinstall_method"] = "native brew reinstall" if args.disposable_ci else "brew reinstall with dependency-change guard"
         report["reinstalled_manifest"] = verify_runtime(keg / "libexec")
+        if args.disposable_ci:
+            run([brew, "test", qualified_name], env=brew_env)
+            report["reinstalled_formula_test"] = "pass"
         run([keg / "bin/communicate", "version"], env=minimal)
         run([stable, "start"], env=env)
         assert "brew-reinstall-sentinel" in run([stable, "inbox", "brew-fixture"], env=env)
@@ -180,6 +202,9 @@ def main():
         report["protected_after"] = after
         report["checks"].append("pre-existing brew executables unchanged")
         report["ok"] = True
+    except Exception as error:
+        report["error"] = str(error)
+        raise
     finally:
         cleanup_errors = []
         if stable.exists() and (temporary / "state/homi/homi.sock").exists():
@@ -202,11 +227,12 @@ def main():
             except RuntimeError:
                 cleanup_errors.append("candidate tap removal")
         report["protected_after"] = {str(p): fingerprint(p) for p in protected}
-        report["dependencies_after"] = {name: run([brew, "list", "--versions", name], env=brew_env, quiet=True).strip()
+        report["dependencies_after"] = {name: subprocess.run([brew, "list", "--versions", name], env=brew_env,
+                                                             text=True, capture_output=True, timeout=60).stdout.strip()
                                         for name in dependencies}
         if report["protected_after"] != before:
             cleanup_errors.append("pre-existing executable changed")
-        if report["dependencies_after"] != dependencies:
+        if not args.disposable_ci and report["dependencies_after"] != dependencies:
             cleanup_errors.append("dependency versions changed")
         report["cleanup_errors"] = cleanup_errors
         if cleanup_errors:
