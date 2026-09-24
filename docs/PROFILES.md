@@ -56,7 +56,7 @@ commands are staged but not automatically executed on restore. Existing sessions
 are skipped. Scheduled external-drive archives are a separate personal migration
 component; installing this profile does not claim to migrate a LaunchAgent.
 
-## User configuration and optional account compatibility
+## User configuration and optional accounts
 
 Generated files live in `~/.config/homi/profiles`. Keep private choices in:
 
@@ -77,13 +77,24 @@ the host.
 Anu account helper. `HOMI_BOX_LAUNCHER` can name an executable that accepts a
 command and arguments. These are executable paths, not evaluated command strings.
 
-For an explicitly migrated personal observer, set both
-`HOMI_PROFILE_WATCH=1` and `HOMI_PANE_WATCHER` to its executable. The existing
-watcher's per-server singleton behavior remains responsible for notification,
-account rotation, and rebalance. Generic profiles start no watcher. Private
-tmux options such as the existing rotation flags belong in `local.tmux.conf`.
-An active account/observer migration must preserve its secrets adapter, provider
-homes, session metadata, and state before old paths are retired.
+`homi profile install --accounts` selects the packaged account launcher,
+observer, and minimal secrets client. Configure the existing usage service,
+credential store, and any existing account/cache paths explicitly in `local.sh`.
+The module retains working rotation/rebalance and provider resume behavior;
+it does not host the usage or secrets service. See the
+[account module configuration](../profiles/runtime/accounts/README.md).
+
+For the observer, also set `HOMI_PROFILE_WATCH=1`. The account module supplies
+`HOMI_PANE_WATCHER`; a private override may name another executable. Generic
+profiles start no watcher. Private tmux options such as `@anu_autorotate` and
+`@anu_rebalance` belong in `local.tmux.conf`. Preserve account state, provider
+homes, and session metadata before retiring old paths; do not run both old and
+new observers on the same server.
+
+`homi profile install --box` selects the optional local container adapter.
+It never starts or installs a container runtime during profile installation.
+See [contained execution](CONTAINED-EXECUTION.md) for explicit image builds,
+mounts, credentials, and runtime requirements.
 
 ```sh
 homi-mesh host add lab scientist@lab.example 2222
@@ -153,6 +164,13 @@ Actual Ghostty rendering, real provider resume/account handoff, Linux service
 behavior, VNC, and cross-device access remain separate environment-dependent
 acceptance checks. Do not report them as passed merely because source/import
 or isolated tests succeeded.
+
+`bash scripts/test-account-module.sh` runs the retained account/Codex/observer
+fixtures with disposable state and blocked real integrations.
+`python3 scripts/test-account-boundaries.py` checks installed account paths,
+Claude hook merging, Codex hook execution paths, explicit containment, and the
+minimal secrets client against fake providers/network/stores. Real quota-driven
+handoff and private service access still need separate acceptance checks.
 
 Where Ghostty is installed, qualify its actual parser against the release with
 `python3 scripts/qualify-ghostty.py /path/to/homi-0.3.0`. This installs the artifact's

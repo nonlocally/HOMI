@@ -23,3 +23,14 @@ tightened during the port: a local copy is deleted only after a mounted archive
 holds byte-identical verified files, and a corrupt archived copy is never
 restored. Personal volume names and paths are not imported; they belong in
 private configuration.
+
+Optional account code additionally comes from `config/bash/bin/anu-account`,
+selected observer/send/state/notification sections of `plugins/anu/bin/pane`,
+and the credential read/cache and get/set/mkdir/env client closure from
+`config/bash/bin/anu-secrets`, at the same donor commit. Selected account,
+Codex-account, and observer fixtures come from `tests/bash` and `tests/lib`;
+fixture accounts/hosts are fictional. Hosting, enrollment/admin operations,
+and the wider pane orchestration/presentation commands were excluded. Legacy
+state keys and credential-store names remain for compatibility. Host Claude
+launch hooks are now supplied per launch; installed paths are quoted, service
+defaults removed, and the account module must be selected explicitly.

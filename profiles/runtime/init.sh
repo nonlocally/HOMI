@@ -8,6 +8,19 @@ fi
 export HOMI_PROFILE_CONFIG="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/homi/profiles}"
 export HOMI_PROFILE_STATE="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+# Account behavior is selected explicitly; native authentication is still the
+# default without this module. A watcher requires HOMI_PROFILE_WATCH=1 as well.
+case " ${HOMI_PROFILE_MODULES:-} " in
+  *" accounts "*)
+    export HOMI_ACCOUNT_LAUNCHER="${HOMI_ACCOUNT_LAUNCHER:-$HOME/.local/bin/homi-account}"
+    export HOMI_PANE_WATCHER="${HOMI_PANE_WATCHER:-$HOME/.local/bin/homi-account-pane}"
+    export ANU_ACCOUNT_BIN="${ANU_ACCOUNT_BIN:-$HOME/.local/bin/homi-account}"
+    export ANU_PANE_BIN="${ANU_PANE_BIN:-$HOME/.local/bin/homi-account-pane}"
+    ;;
+esac
+case " ${HOMI_PROFILE_MODULES:-} " in
+  *" box "*) . "$HOMI_PROFILE_RUNTIME/fns/box" ;;
+esac
 # Private configuration, never replaced by profile installation or upgrade.
 [ ! -f "$HOMI_PROFILE_CONFIG/local.sh" ] || . "$HOMI_PROFILE_CONFIG/local.sh"
 case " ${HOMI_PROFILE_MODULES:-} " in

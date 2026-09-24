@@ -134,12 +134,20 @@ class Profile:
                    f'. {quote(active)}\n')
         for name, command in [("homi-workstation", '"$HOMI_PROFILE_RUNTIME/command.sh" "$@"'),
                               ("homi-agent", '"$HOMI_PROFILE_RUNTIME/agent.sh" "$@"'),
-                              ("homi-mesh", '"$HOMI_PROFILE_RUNTIME/command.sh" shell mesh "$@"')]:
+                              ("homi-mesh", '"$HOMI_PROFILE_RUNTIME/command.sh" shell mesh "$@"'),
+                              ("homi-account", '"$HOMI_PROFILE_RUNTIME/accounts/account" "$@"'),
+                              ("homi-account-pane", '"$HOMI_PROFILE_RUNTIME/accounts/pane" "$@"'),
+                              ("homi-account-secrets", '"$HOMI_PROFILE_RUNTIME/accounts/secrets-client" "$@"'),
+                              ("homi-box", 'python3 "$HOMI_PROFILE_RUNTIME/box/box.py" "$@"')]:
             if name == "homi-agent" and "terminal" not in modules:
                 continue
             if name == "homi-mesh" and "mesh" not in modules:
                 continue
-            out.append((self.home / ".local/bin" / name, wrapper + '. ' + command + '\n', "file", 0o755))
+            if name == "homi-box" and "box" not in modules:
+                continue
+            if name.startswith("homi-account") and "accounts" not in modules:
+                continue
+            out.append((self.home / ".local/bin" / name, wrapper + ('exec ' if name == 'homi-box' else '. ') + command + '\n', "file", 0o755))
         shell_block = f'{BEGIN}\n[[ $- != *i* ]] || . {quote(active)}\n{END}\n'
         out.extend((self.home / p, shell_block, "block", 0o600) for p in [".bashrc", ".bash_profile"])
         if "terminal" in modules:
@@ -353,12 +361,14 @@ def main(argv=None):
     ap.add_argument("command", choices=["preview", "install", "status", "uninstall", "migrate-preview"], nargs="?", default="preview")
     ap.add_argument("--terminal", action="store_true")
     ap.add_argument("--mesh", action="store_true")
+    ap.add_argument("--box", action="store_true", help="optional local container adapter; no runtime is started")
+    ap.add_argument("--accounts", action="store_true", help="optional configured account launch and observer tools; no watcher or service is started")
     ap.add_argument("--home", default=str(Path.home()), help="installation home; use an isolated home for qualification")
     ap.add_argument("--json", action="store_true", help="output is always JSON")
     args = ap.parse_args(argv)
     try:
         profile = Profile(args.home)
-        selected = [m for m in ["terminal", "mesh"] if getattr(args, m)]
+        selected = [m for m in ["terminal", "mesh", "accounts", "box"] if getattr(args, m)]
         modules = sorted(set(profile.record.get("modules", [])) | set(selected or ["terminal"]))
         if args.command == "install":
             result = profile.install(modules)

@@ -1,0 +1,2013 @@
+#!/usr/bin/env bash
+# HOMI optional account pane observer, adapted from Anu 80d3c86.
+# Internal state/send and watcher/notification compatibility; no application UI or team orchestration.
+# Usage: homi-account-pane {state|send|read|wait|ls|id|status|focus|notify|call|needs|watchd|reply}
+
+
+# anu:bash-guard — needs bash 4+; re-exec under Homebrew's when PATH hands us macOS /bin/bash 3.2
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  for _anu_bash in ${ANU_BASH_CANDIDATES:-/opt/homebrew/bin/bash /usr/local/bin/bash ${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/bash} $(command -v bash)}; do
+    [ -x "$_anu_bash" ] && "$_anu_bash" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' >/dev/null 2>&1 && exec "$_anu_bash" "$0" "$@"
+  done; echo "anu: needs bash 4+ — brew install bash" >&2; exit 1
+fi
+
+set -uo pipefail
+
+_self()  { printf '%s' "${TMUX_PANE:-}"; }
+_die()   { printf 'pane: %s\n' "$*" >&2; exit 1; }
+_have()  { command -v "$1" >/dev/null 2>&1; }
+
+# terminal-notifier's -execute runs the click handler (`pane focus`) under a bare
+# /bin/sh with a stripped PATH — Homebrew's bin, where tmux lives, is missing, so a
+# real click would silently do nothing. If tmux isn't already reachable, append the
+# standard bin dirs. Conditional + append-only so it can NEVER shadow a test's
+# injected stub PATH (the stub dir stays first; its stub tmux is found, so we skip).
+_have tmux || export PATH="${PATH:+$PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Same bare-launch problem, second axis: a click handler also inherits NO locale.
+# In the C locale, BSD cut/grep mishandle the UTF-8 in pane titles (spinner glyphs,
+# em-dashes), so `_pane_exists` (tmux | cut -f1 | grep) matches nothing and a clicked
+# `pane focus` silently bails — the human's notification "does nothing." Pin a UTF-8
+# locale only when one isn't already active, so the user's own LANG is never overridden.
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *UTF-8*|*utf-8*|*utf8*|*UTF8*) : ;;
+  *) export LC_ALL=en_US.UTF-8 ;;
+esac
+
+# A role/label: a simple token, not a reserved target keyword, and not a CLI alias
+# (CLIs resolve before roles, so a role named after one would be unaddressable).
+_valid_role() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*) _die "role must be a simple token [A-Za-z0-9_-] (got '$1')" ;;
+    next|all|agent-*)    _die "role '$1' is reserved (a target keyword)" ;;
+    cx|cxx|cxc|cdx|cdxx|cdxxs|c|pi|claude|codex|opencode|node) _die "role '$1' collides with a CLI name (CLIs resolve first)" ;;
+  esac
+}
+
+# Need a reachable tmux server for the pane-DRIVING verbs. Inside a pane, $TMUX is
+# set (so we can also resolve "self"/"next"). Outside one — e.g. an MCP server a
+# client spawned WITHOUT $TMUX — the default socket still reaches every pane, so
+# proceed for explicit %id targets. EXEMPT `reply`: it is a pure file write, and a
+# contained box has no tmux at all, so a fanned worker there must still be able to
+# record its result for the host's `gather`.
+case "${1:-}" in
+  ''|-h|--help|help|reply) : ;;
+  focus|watchd) : ;;  # self-guarding: focus no-ops if unreachable; watchd runs its own loop
+  *)
+    if [ -z "${TMUX:-}" ] && ! tmux list-panes -a >/dev/null 2>&1; then
+      _die "no tmux server reachable (and not inside a tmux pane)"
+    fi
+    ;;
+esac
+
+# Runtime state — the reply channel that turns `gather` from screen-scrape into
+# confirmed results. A reply is a plain file under here, so a worker can record one
+# even without tmux, as long as this dir is reachable.
+ANU_PANE_DIR="${ANU_PANE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/pane}"
+
+# Notification state (cooldown stamps + the watchd per-pane state machine files).
+ANU_NOTIFY_DIR="${ANU_NOTIFY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/notify}"
+# Every creation of it goes through here, so no call site can forget the mode:
+# the rotation logs under this dir hold captured pane SCREEN TEXT, which is
+# whatever the agent and the human were looking at. Owner-only.
+_notify_dir() { mkdir -p "$ANU_NOTIFY_DIR" 2>/dev/null; chmod 700 "$ANU_NOTIFY_DIR" 2>/dev/null || true; }
+# Absolute path baked into the click handler. terminal-notifier runs -execute under
+# a bare /bin/sh with NO PATH, so the click command MUST be absolute. Defaults to
+# the installed copy; overridable for tests.
+_PANE_BIN="${ANU_PANE_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pane}"
+# One place to read "now", so tests can pin time (debounce/cooldown are time-based).
+_now() { printf '%s' "${ANU_NOW_OVERRIDE:-$(date +%s)}"; }
+
+# Which tmux server this process talks to. A bare `tmux` finds its server
+# through $TMUX's first comma field and otherwise uses the default socket, so
+# that is the one lever that reaches every call site at once:
+#   _use_socket <path>  point every bare `tmux` below at that server (what
+#                       `watchd --socket` and `focus --socket` do). A $TMUX that
+#                       already names it is kept as is — a run-shell job carries
+#                       the real server pid there. TMUX_PANE is dropped: it names
+#                       a pane on whatever server the CALLER was in.
+#   _sock_key           the server's socket basename, as a file-name token
+#                       ("default" with no $TMUX) — what keys the per-pane files
+#                       below, so two servers' %3 never share one.
+_use_socket() {
+  [ -n "${1:-}" ] || return 0
+  case "${TMUX:-}" in "$1"|"$1",*) : ;; *) export TMUX="$1,0,0" ;; esac
+  unset TMUX_PANE
+}
+_sock_key() {
+  local p="${TMUX:-}"; p="${p%%,*}"; p="${p##*/}"
+  [ -n "$p" ] || p=default
+  case "$p" in *[!A-Za-z0-9._-]*) p="$(printf '%s' "$p" | tr -c 'A-Za-z0-9._-' _)" ;; esac
+  printf '%s' "$p"
+}
+
+# All panes as "id<TAB>cli<TAB>win<TAB>active<TAB>role<TAB>title<TAB>box". role is
+# the per-pane @anu_role option (set by `pane name` / `pane spawn --as`), so an
+# agent can be addressed by what it IS, not just its %id. box is @anu_box (1 on a
+# pane `anu account launch --box` started inside a container) — carried here, LAST,
+# so the enumerator can tell an agent's box from any other container pane without a
+# second tmux call per pane. Readers take it as $NF, so a tab inside a pane title
+# shifts nothing; fields 1-6 keep their positions, so every existing reader works.
+_all_panes() {
+  tmux list-panes -a -F '#{pane_id}	#{pane_current_command}	#{window_index}:#{window_name}	#{pane_active}	#{@anu_role}	#{pane_title}	#{@anu_box}'
+}
+
+_pane_exists() { _all_panes | cut -f1 | grep -qx "$1"; }
+_pane_cli()    { _all_panes | awk -F'\t' -v p="$1" '$1==p{print $2; exit}'; }
+# A human-readable CLI name for notification titles: Claude Code reports its
+# pane_current_command as a version string (e.g. 2.1.195), not "claude" — map that
+# (and the node shim) back to "claude" so titles read "claude @ window".
+_pretty_cli() {
+  case "$1" in
+    claude|codex|opencode|pi) printf '%s' "$1" ;;
+    node) printf 'claude' ;;
+    *) printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9.]+$' && printf 'claude' || printf '%s' "$1" ;;
+  esac
+}
+
+# The command in ONE pane, targeted (cheaper than scanning every pane); same value as
+# _pane_cli. Used by the hot busy/booting checks so a 1Hz poll stays light.
+_pane_cmd1()   { tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null; }
+
+# Claude Code's pane_current_command shows as a version string (e.g. 2.1.185),
+# not "claude" — so match the CLI name with a few known aliases + that heuristic.
+_cli_matches() { # $1=wanted  $2=actual_command  -> 0 if match
+  local want="$1" cmd="$2"
+  case "$want" in
+    claude|cx|cxx|cxc) [ "$cmd" = "claude" ] || printf '%s' "$cmd" | grep -Eq '^[0-9]+\.[0-9.]+$' ;;
+    codex|cdx|cdxx|cdxxs) [ "$cmd" = "codex" ] ;;
+    opencode|c) [ "$cmd" = "opencode" ] ;;
+    pi) [ "$cmd" = "pi" ] ;;
+    *) [ "$cmd" = "$want" ] ;;
+  esac
+}
+
+# Resolve a legacy agent-N alias from its existing tmux window option only.
+_resolve_agent() {
+  local agent="$1" map pair pid
+  map="$(tmux show-option -wqv @swarm_panes 2>/dev/null)"
+  if [ -n "$map" ]; then
+    # map is "%82:agent-1,%83:agent-2"
+    pid="$(printf '%s' "$map" | tr ',' '\n' | awk -F: -v a="$agent" '$2==a{print $1; exit}')"
+    [ -n "$pid" ] && { printf '%s' "$pid"; return 0; }
+  fi
+  return 1
+}
+
+# Resolve any <target> to a pane id, or die with a helpful list.
+_resolve() {
+  local t="$1" pid self matches
+  self="$(_self)"
+  case "$t" in
+    %[0-9]*)
+      _pane_exists "$t" || _die "no such pane: $t (try \`pane ls\`)"
+      printf '%s' "$t"; return 0 ;;
+    agent-[0-9]*)
+      pid="$(_resolve_agent "$t")" || _die "swarm agent not found: $t (is a swarm running? \`swarm status\`)"
+      printf '%s' "$pid"; return 0 ;;
+    next)
+      # the other pane in MY window — the one containing $TMUX_PANE, NOT the
+      # session's active window (so it's correct even when the human is focused
+      # on a different window). Excludes me.
+      matches="$(tmux list-panes -t "$self" -F '#{pane_id}' 2>/dev/null | grep -vx "$self")"
+      [ "$(printf '%s\n' "$matches" | grep -c .)" -eq 1 ] \
+        || _die "\`next\` needs exactly 2 panes in your window; found: $(printf '%s ' $matches)(use a %id from \`pane ls\`)"
+      printf '%s' "$matches"; return 0 ;;
+    *)
+      # A bare word: try CLI name FIRST (so a label can't shadow "codex"/"claude"),
+      # then a role/label set via `pane name` / `pane spawn --as`. Ambiguity is an error.
+      matches="$(_all_panes | awk -F'\t' -v me="$self" '$1!=me{print $1"\t"$2}')"
+      local out=""
+      while IFS=$'\t' read -r id cmd; do
+        [ -n "$id" ] || continue
+        _cli_matches "$t" "$cmd" && out="$out$id "
+      done <<EOF
+$matches
+EOF
+      out="${out% }"
+      if [ -n "$out" ]; then
+        case "$out" in *" "*) _die "multiple panes running '$t': $out — pick one by %id" ;; esac
+        printf '%s' "$out"; return 0
+      fi
+      # by ROLE/label (exact match), excluding me.
+      local rids
+      rids="$(_all_panes | awk -F'\t' -v me="$self" -v r="$t" '$1!=me && $5==r {printf "%s ", $1}')"
+      rids="${rids% }"
+      [ -n "$rids" ] || _die "no pane with CLI or role '$t' (try \`pane ls\`, a %id, or 'next')"
+      case "$rids" in *" "*) _die "multiple panes with role '$t': $rids — address one by %id (a role names a whole team)" ;; esac
+      printf '%s' "$rids"; return 0 ;;
+  esac
+}
+
+_capture() { tmux capture-pane -t "$1" -p 2>/dev/null; }
+
+# Does the pane's composer still show a staged-but-unsubmitted paste? Scope to the
+# bottom lines (composer + footer) and match the LITERAL bracketed marker, so a
+# message that merely mentions "Pasted Content" in its prose can't false-positive
+# once it has scrolled up into history.
+_has_paste_marker() { _capture "$1" | tail -n 10 | grep -Fq '[Pasted Content'; }
+# --- the live-state signals -------------------------------------------------------
+# The pane TITLE carries the CLI's own spinner: every agent CLI writes an animated
+# spinner frame into its title each render tick WHILE generating. It is the ONE
+# working-signal present continuously through a whole turn — including answer streaming,
+# where the bottom "esc to interrupt" hint is OVERWRITTEN by the streamed text (so a
+# bottom-only grep reads false 'idle' mid-stream). Two providers differ at idle, which
+# the classifier accounts for:
+#   codex  — CLEARS the title back to the plain cwd at idle, so a leading glyph == busy.
+#   claude — FREEZES the last spinner frame at idle, so presence isn't enough; we detect
+#            the frame still ANIMATING (the leading glyph token advancing).
+_title()     { tmux display-message -p -t "$1" '#{pane_title}' 2>/dev/null; }
+# Leading whitespace-delimited token of the title — where the spinner glyph sits while a
+# CLI generates ("⠋ anu" -> "⠋"). The rest (cwd / task text / any appended elapsed-cost
+# field) is ignored, so a title rename can't masquerade as spinner motion.
+_title_tok() { _title "$1" | awk '{print $1; exit}'; }
+# Title leads with a non-ASCII byte (a glyph), not a plain word? Cheap gate before the
+# pricier animation sample. LC_ALL=C => byte match; any UTF-8 lead byte is > 0x7f.
+_has_glyph() { _title "$1" | LC_ALL=C grep -q '^[^ -~]'; }
+# One round-trip for the three pane facts the classifier needs: dead<TAB>in_mode<TAB>cmd.
+_pmeta()     { tmux display-message -p -t "$1" '#{pane_dead}	#{pane_in_mode}	#{pane_current_command}' 2>/dev/null; }
+
+# Is the title spinner ANIMATING? (claude/others FREEZE the last frame at idle, so mere
+# presence is ambiguous — we watch the glyph token advance.) Irregular, jittered sample
+# spacing so a fixed-period spinner can't alias onto a single frame; returns on the FIRST
+# observed change. ~0.6s worst case (a frozen/idle title); a live spinner usually trips
+# on the first sample. Single-pane — team paths use _animated_ids to share one window.
+_title_animating() {
+  local pid="$1" a b d
+  a="$(_title_tok "$pid")"; [ -n "$a" ] || return 1
+  for d in 0.11 0.17 0.23 0.29; do
+    sleep "$d" 2>/dev/null || true
+    b="$(_title_tok "$pid")"
+    [ "$a" != "$b" ] && return 0
+  done
+  return 1
+}
+
+# The SAME animation check, batched across EVERY pane in ONE shared sampling window, so a
+# team table / gather never sleeps per pane (which would make `pane status`/`watch` take
+# seconds and drift `gather`'s timeout). Prints the pane ids whose leading title token
+# moved. One `list-panes` per jittered snapshot — cost is O(snapshots), not O(panes).
+_animated_ids() {
+  local d
+  { tmux list-panes -a -F '#{pane_id} #{pane_title}' 2>/dev/null
+    for d in 0.11 0.17 0.23; do sleep "$d" 2>/dev/null || true
+      tmux list-panes -a -F '#{pane_id} #{pane_title}' 2>/dev/null
+    done
+  } | awk '{ id=$1; tok=$2; if (id in seen && seen[id]!=tok) chg[id]=1; seen[id]=tok }
+           END { for (i in chg) print i }'
+}
+
+# Best-effort: is the pane still coming up (auth / model-load / model-picker) — an agent
+# process that can't reliably take a turn yet? Signals: a pane we SPAWNED whose agent CLI
+# hasn't replaced the shell yet (@anu_expected_cli is stamped at spawn), an agent CLI up
+# but with NO composer prompt, or a high-confidence startup marker. Scoped + agent-gated
+# so a normal answer (or a random bash pane) can't read as 'booting'.
+_is_booting() {
+  local pid="$1" cmd scr exp
+  cmd="$(_pane_cmd1 "$pid")"
+  exp="$(tmux show-options -pqv -t "$pid" @anu_expected_cli 2>/dev/null)"
+  case "$cmd" in
+    codex|claude|opencode|pi|node|[0-9]*) ;;
+    # a boxed claude pane's pane_current_command is the container runtime, not
+    # claude — treat it like claude only when @anu_box=1 marks it one.
+    container) [ "$(tmux show-options -pqv -t "$pid" @anu_box 2>/dev/null)" = 1 ] || { [ -n "$exp" ] && return 0 || return 1; } ;;
+    *) [ -n "$exp" ] && return 0 || return 1 ;;   # spawned-as-agent but CLI not up yet
+  esac
+  scr="$(_capture "$pid")"
+  printf '%s\n' "$scr" | grep -qE '›|❯|⏵|❮' || return 0          # agent up, no composer yet
+  printf '%s\n' "$scr" | tail -n 16 | grep -Eqi 'model:[[:space:]]*load|Welcome to Claude Code|Logging in|/login|Press Enter to (continue|sign in|log in)'
+}
+
+# THE busy heuristic — a thin wrapper so there is ONE source of truth (the classifier)
+# and no second heuristic to drift. Single-pane (samples the title if needed); team paths
+# call _classify with a precomputed animation flag instead.
+_is_busy() { [ "$(_classify "$1")" = busy ]; }
+
+# A CHEAP, no-sleep busy hint for NON-critical paths (send's diagnostic message only).
+# Catches the bottom hint and codex's title glyph instantly; may under-report a mid-think
+# claude — which is fine when the result merely picks which log line to print. Every
+# control decision (wait/ask/gather/status/respond/stop) uses the authoritative _is_busy.
+_busy_hint() {
+  _capture "$1" | tail -n 6 | grep -Eqi 'esc to (interrupt|stop)' && return 0
+  _has_glyph "$1" && _cli_matches codex "$(_pane_cmd1 "$1")"
+}
+
+# A pane's output with the bottom TUI chrome stripped — the model status line, the
+# codex "Worked for" rule, the composer prompt, the bypass footer — so a caller gets
+# the ANSWER, not the input box. Every pattern is ANCHORED to a high-confidence
+# chrome shape (a model-name prefix, a leading ›/⏵⏵) so it can't eat real answer
+# lines (a Markdown table, a line that merely contains "used"/"bypass"). Blanks
+# dropped; the caller tails as many lines as it wants. (codex review of #53.)
+_reply_text() {
+  _capture "$1" \
+    | grep -vE '^[[:space:]]*(gpt|claude|opus|sonnet|haiku|gemini|o[0-9])[A-Za-z0-9.+ _-]*·.*(used|left)[[:space:]]*$' \
+    | grep -vE '^[[:space:]]*─+[[:space:]]*Worked for [0-9].*$' \
+    | grep -vE '^[[:space:]]*›[[:space:]]' \
+    | grep -vE '^[[:space:]]*⏵⏵' \
+    | grep -v '^[[:space:]]*$'
+}
+
+# The provider's wall text, as Claude Code prints it (verified against the
+# 2.1.268 binary). Returns the wall kind or nothing.
+# Where on the screen the wall text may sit. It is Claude's LAST output, but in
+# the fullscreen TUI the transcript is top-anchored while the composer sits at
+# the bottom of the pane, so a short conversation in a tall pane leaves dozens
+# of blank rows between the wall line and the composer — a bottom-16-rows
+# window never sees it (found live in B7: the Fable wall on row 8 of 59 read
+# as idle). Scope the check to the last turn instead: from the last user-turn
+# echo (a `❯ text` line) up to the composer (the bottom-most `❯`/`›` line).
+# With no echo on screen (a long answer scrolled it off) fall back to the 16
+# rows right above the composer. An earlier, resolved wall higher up is thus
+# never re-read once a newer turn follows it. Reads the capture on stdin.
+_wall_scope() {
+  awk '
+    { line[NR] = $0 }
+    END {
+      n = NR
+      while (n > 0 && line[n] ~ /^[[:space:]]*$/) n--
+      comp = 0
+      for (i = n; i >= 1; i--) if (line[i] ~ /^[[:space:]]*(❯|›)/) { comp = i; break }
+      end = (comp > 0) ? comp - 1 : n
+      start = 0
+      for (i = end; i >= 1; i--) if (line[i] ~ /^[[:space:]]*(❯|›)[[:space:]]+[^[:space:]]/) { start = i; break }
+      if (start == 0) { start = end - 15; if (start < 1) start = 1 }
+      for (i = start; i <= end; i++) print line[i]
+    }'
+}
+
+# The wall is a LINE the TUI prints — at the start of a line, optionally after
+# the tool-result glyph (⎿) — never a phrase inside prose or inside a user-turn
+# echo (`❯ …`). A session that merely TALKS about walls ("its wall text is
+# 'You've hit your usage limit'…") must not read as walled: that exact
+# false positive rotated a live pane twice (2026-09-15).
+_wall_kind() {
+  local b="$1" lead='^[[:space:]]*(⎿[[:space:]]*)?'
+  if printf '%s\n' "$b" | grep -Eqi "${lead}(you'?ve reached your fable limit|fable limit reached)"; then echo fable
+  elif printf '%s\n' "$b" | grep -Eqi "${lead}(you'?(ve|\s+have) reached your weekly usage limit|weekly limit reached)"; then echo weekly
+  elif printf '%s\n' "$b" | grep -Eqi "${lead}(you'?ve hit your (usage )?limit|new messages wait for your usage limit to reset|claude usage limit reached|usage limit reached)"; then echo session
+  fi
+}
+
+# THE state classifier — the ONE place that reads a pane's live state, so status / wait /
+# ask / gather / respond / stop all agree. Evaluated in a fixed PRECEDENCE (strongest
+# evidence first) and echoes one word:
+#   dead     — the pane's process exited (remain-on-exit) — neither working nor idle.
+#   limited  — hit the provider's usage wall (session/weekly/fable-credit text — see
+#              _wall_kind). Checked BEFORE approval so a Fable "Continue on Opus?" prompt
+#              (a numbered choice with "esc to cancel") reads limited, not approval.
+#   approval — blocked on a permission/confirm dialog. TWO signals (a known prompt phrase
+#              AND a confirm/choice affordance), agent-gated, so normal output can't
+#              false-positive. Checked BEFORE title-busy so a glyph'd dialog still reads
+#              approval (else respond/gather would treat it as working). Fail closed.
+#   busy     — a turn is in flight: the bottom "esc to interrupt" hint, OR the title
+#              spinner (present for codex / animating for claude) — the latter survives
+#              answer-streaming, where the bottom hint vanishes (the bug this fixes).
+#   booting  — still coming up (auth / model-load) — see _is_booting.
+#   idle     — finished a turn / at a prompt.
+# In tmux copy-mode the captured screen is a STALE scroll view, so the bottom-based checks
+# are skipped and only the title (pane-level, always live) is trusted.
+# $2 (optional): a precomputed animation result ("1"/"0") so team paths batch-sample once.
+_classify() {
+  local pid="$1" anim="${2:-}" dead inmode cmd b
+  IFS="$(printf '\t')" read -r dead inmode cmd <<EOF
+$(_pmeta "$pid")
+EOF
+  [ "$dead" = 1 ] && { echo dead; return 0; }
+  # A CODEX wall is not on the screen and never was. Codex fires no hook for a
+  # usage-limit turn; it writes a `task_complete` record with
+  # `codex_error_info: usage_limit_exceeded` into the session's rollout, and
+  # watchd's own pre-step tails that file and stamps @anu_wall_pending. So the
+  # answer here is a stamp, not a capture — which also means it is true in
+  # copy-mode, where the screen is a stale scroll view, and it survives any
+  # amount of new output.
+  #
+  # ONLY A LAUNCH CLEARS IT, and that is a deliberate trade with a visible
+  # cost: if the account's own window resets while the pane still holds the
+  # stamp, `pane state` keeps reading `limited` for the rest of that launch
+  # and the arm may rotate a pane that had recovered on its own. The
+  # alternative is worse — nothing anu can read says a Codex limit has
+  # LIFTED (there is no hook, no record, and the screen is quotable), so
+  # "clear it when the pane looks fine again" would be clearing first-party
+  # evidence on a guess. A needless rotation costs one relaunch; a dropped
+  # wall costs the session. `anu account launch` (and so every rotation and
+  # switch) is the one event that genuinely ends the old conversation's claim.
+  local pend; pend="$(tmux show-options -pqv -t "$pid" @anu_wall_pending 2>/dev/null || true)"
+  if [ -n "$pend" ] \
+  && [ "$(tmux show-options -pqv -t "$pid" @anu_provider 2>/dev/null)" = codex ]; then
+    echo limited; return 0
+  fi
+  if [ "$inmode" != 1 ]; then
+    local scr w; scr="$(_capture "$pid")"
+    b="$(printf '%s\n' "$scr" | tail -n 16)"
+    w="$(printf '%s\n' "$scr" | _wall_scope)"
+    case "$cmd" in
+      claude|node|[0-9]*)
+        if [ -n "$(_wall_kind "$w")" ]; then echo limited; return 0; fi ;;
+      # a `box claude` pane's pane_current_command is the container runtime
+      # ("container"), not claude, so the wall text would otherwise never be
+      # read — gate on @anu_box=1 (stamped by `anu account launch --box`) so
+      # an unrelated container pane can't false-positive on stray wall text.
+      container)
+        if [ "$(tmux show-options -pqv -t "$pid" @anu_box 2>/dev/null)" = 1 ] \
+        && [ -n "$(_wall_kind "$w")" ]; then echo limited; return 0; fi ;;
+    esac
+    # Which commands may be read as an agent at all. Same gate as the wall
+    # arm above for `container`: a `box claude` pane reports the CONTAINER
+    # RUNTIME as its command, never "claude", so a permission prompt inside a
+    # box would otherwise never read as `approval` — it would read `idle`, and
+    # respond/gather/watchd would all treat a blocked agent as a finished one.
+    # @anu_box=1 (stamped by `anu account launch --box`) keeps an unrelated
+    # container pane from false-positiving on stray dialog-shaped text.
+    local agentish=0
+    case "$cmd" in
+      codex|claude|node|[0-9]*) agentish=1 ;;
+      container) [ "$(tmux show-options -pqv -t "$pid" @anu_box 2>/dev/null)" = 1 ] && agentish=1 ;;
+    esac
+    if [ "$agentish" = 1 ] \
+    && printf '%s\n' "$b" | grep -Eqi 'press enter.*(confirm|proceed)|do you want to (proceed|allow|run|create|edit|make)|needs your permission|allow .* to (run|execute|edit|access)|apply .*patch|run (this )?command' \
+    && printf '%s\n' "$b" | grep -Eqi 'esc to cancel|enter to (confirm|continue)|❯[[:space:]]*[0-9]+\.|^[[:space:]]*[0-9]+\.[[:space:]]'; then
+      echo approval; return 0
+    fi
+    printf '%s\n' "$b" | tail -n 6 | grep -Eqi 'esc to (interrupt|stop)' && { echo busy; return 0; }
+  fi
+  if _has_glyph "$pid"; then
+    _cli_matches codex "$cmd" && { echo busy; return 0; }    # codex clears glyph at idle => busy
+    if [ -n "$anim" ]; then
+      [ "$anim" = 1 ] && { echo busy; return 0; }
+    elif _title_animating "$pid"; then
+      echo busy; return 0
+    fi
+  fi
+  _is_booting "$pid" && { echo booting; return 0; }
+  echo idle
+}
+
+# Visible numbered choices of an approval dialog as "key<TAB>label" lines (bottom only).
+_approval_choices() {
+  _capture "$1" | tail -n 16 | grep -oE '[0-9]+\.[[:space:]].*' | sed -E 's/^([0-9]+)\.[[:space:]]*/\1\t/'
+}
+
+cmd_send() {
+  [ $# -ge 2 ] || _die "usage: pane send <target> <message...>  |  <target> -  (stdin)  |  <target> -f <file>"
+  local target="$1"; shift
+  # Take the message inline, from stdin (-), or from a file (-f). The latter two let
+  # callers pass text with apostrophes/quotes/$/backticks/newlines WITHOUT fighting
+  # shell quoting — the #1 way a hand-built `pane send "..."` blows up. An agent can
+  # just Write the message to a file (no quoting at all) and `pane send <t> -f <f>`.
+  local raw
+  case "${1:-}" in
+    -)         raw="$(cat)" ;;
+    -f|--file) { [ -n "${2:-}" ] && [ -r "$2" ]; } || _die "send -f needs a readable file"; raw="$(cat -- "$2")" ;;
+    *)         raw="$*" ;;
+  esac
+  local pid self
+  pid="$(_resolve "$target")" || exit 1
+  self="$(_self)"
+  [ "$pid" = "$self" ] && _die "refusing to send to your own pane ($pid)"
+
+  # Serialize concurrent senders to the SAME pane so two callers can't interleave
+  # text and Enter. mkdir is atomic (flock is absent on macOS); wait ~5s then
+  # proceed rather than deadlock on a stale lock.
+  local lock="${TMPDIR:-/tmp}/pane.$(printf '%s' "$pid" | tr -c 'A-Za-z0-9' _).lock"
+  local w=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    sleep 0.2 2>/dev/null || true; w=$((w+1)); [ "$w" -ge 25 ] && break
+  done
+  trap "rmdir '$lock' 2>/dev/null || true" EXIT
+
+  # Note whether the pane was ALREADY busy before we touched it, so we can tell a
+  # message queued behind an in-flight turn apart from one we failed to submit.
+  local was_busy=0; _busy_hint "$pid" && was_busy=1   # cheap hint — only picks a log line
+  local cli; cli="$(_pane_cli "$pid")"
+
+  # Warn if the target isn't sitting in a known agent CLI — it may be at bash, vim,
+  # less, an approval dialog, or a startup/auth screen that will eat the send. Send
+  # anyway, but tell the caller what they're typing into.
+  case "$cli" in
+    codex|claude|opencode|pi|node) ;;
+    [0-9]*) ;;                                  # Claude Code shows as a version string
+    *) printf 'pane: note — %s is running "%s", not a known agent prompt; sending anyway.\n' "$pid" "$cli" >&2 ;;
+  esac
+
+  # 1. flatten newlines/tabs to spaces, then strip remaining control bytes (ESC,
+  #    BEL, …) so the payload is plain text and cannot drive the target terminal.
+  local msg; msg="$(printf '%s' "$raw" | tr '\n\r\t' '   ' | tr -d '\000-\037\177')"
+  [ "${#msg}" -gt 16000 ] && printf 'pane: note — message is %d chars; very long sends can lag or truncate. Consider writing it to a file and sending a short "read <path>" instruction.\n' "${#msg}" >&2
+
+  # 2. if the pane is in copy-mode / a tmux view, keys would drive that UI — exit it.
+  [ "$(tmux display-message -p -t "$pid" '#{pane_in_mode}' 2>/dev/null)" = "1" ] \
+    && tmux send-keys -t "$pid" -X cancel 2>/dev/null || true
+
+  # 3. stage the text literally (-l: no key-name interpretation, so a word like
+  #    "Enter" or "C-c" inside the message is sent as text, not a keystroke).
+  tmux send-keys -t "$pid" -l -- "$msg" 2>/dev/null \
+    || tmux send-keys -t "$pid" -l "$msg"      # older tmux without `--`
+  sleep 0.3 2>/dev/null || true                # let the TUI ingest the paste
+
+  # 4. submit with a SEPARATE Enter; retry only while a paste is still staged
+  #    (Codex/Claude stage a burst and need a distinct Enter — a welded C-m gets
+  #    absorbed into the paste and never submits). Retrying the Enter is safe;
+  #    re-sending the TEXT could duplicate a submitted prompt, so we never do.
+  local tries=0 max=4
+  while :; do
+    tmux send-keys -t "$pid" Enter
+    sleep 0.4 2>/dev/null || true
+    _has_paste_marker "$pid" || break          # composer cleared -> it went through
+    tries=$((tries+1)); [ "$tries" -ge "$max" ] && break
+  done
+
+  # 5. report honestly
+  if _has_paste_marker "$pid"; then
+    if [ "$was_busy" = 1 ]; then
+      printf 'pane: %s (%s) was busy; message queued in its composer — it should submit when the current turn ends. Re-check: pane read %s\n' "$pid" "$cli" "$pid" >&2
+    else
+      printf 'pane: WARNING — %s (%s) still shows staged input after %d Enters. Screen:\n' "$pid" "$cli" "$max" >&2
+      _capture "$pid" | grep -v '^[[:space:]]*$' | tail -n 8 >&2
+    fi
+    exit 2
+  fi
+  printf 'pane: delivered to %s (%s)%s\n' "$pid" "$cli" "$(_busy_hint "$pid" && printf ' — now working' || true)"
+}
+
+
+cmd_read() {
+  [ $# -ge 1 ] || _die "usage: pane read <target> [lines]"
+  local pid; pid="$(_resolve "$1")" || exit 1
+  local n="${2:-40}"
+  _capture "$pid" | tail -n "$n"
+}
+
+cmd_wait() {
+  [ $# -ge 1 ] || _die "usage: pane wait <target> [secs] | <target> --for <regex> | <target> --gone <regex>"
+  local target="" cap="" mode=turn pat="" bottom=16
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --for)    mode=for;  pat="${2:-}"; shift 2 2>/dev/null || shift ;;
+      --gone)   mode=gone; pat="${2:-}"; shift 2 2>/dev/null || shift ;;
+      --bottom) bottom="${2:-16}"; shift 2 2>/dev/null || shift ;;
+      *) if [ -z "$target" ]; then target="$1"; elif [ -z "$cap" ]; then cap="$1"; fi; shift ;;
+    esac
+  done
+  [ -n "$target" ] || _die "wait needs a target"
+  [ "$mode" = turn ] || [ -n "$pat" ] || _die "--$mode needs a <regex>"
+  local pid; pid="$(_resolve "$target")" || exit 1
+  cap="${cap:-${PANE_WAIT_TIMEOUT:-240}}"
+  case "$cap"    in ''|*[!0-9]*) _die "wait: secs must be a number (got '$cap')" ;; esac
+  case "$bottom" in ''|*[!0-9]*) _die "wait: --bottom must be a number (got '$bottom')" ;; esac
+  if [ "$mode" != turn ]; then
+    # Wait until the bottom screen matches (--for) / stops matching (--gone) a regex.
+    # The clean replacement for `until pane read | grep PATTERN; sleep`.
+    printf '' | grep -E -- "$pat" >/dev/null 2>&1; [ "$?" -ge 2 ] && _die "wait: invalid regex '$pat'"
+    local t=0 hit
+    while [ "$t" -lt "$cap" ]; do
+      sleep 1 2>/dev/null || true; t=$((t+1))
+      if _capture "$pid" | tail -n "$bottom" | grep -Eq -- "$pat"; then hit=1; else hit=0; fi
+      { [ "$mode" = for ]  && [ "$hit" = 1 ]; } && break
+      { [ "$mode" = gone ] && [ "$hit" = 0 ]; } && break
+    done
+    _reply_text "$pid" | tail -n 40
+    if [ "$t" -ge "$cap" ]; then
+      printf 'pane: %s — "%s" still %s after %ss (timeout)\n' "$pid" "$pat" "$([ "$mode" = for ] && echo absent || echo present)" "$cap" >&2
+      return 1                                    # nonzero so a script can't mistake timeout for "condition met"
+    fi
+    return 0
+  fi
+  # default: wait through the WHOLE turn — no clock pressure while actively generating
+  # (codex xhigh runs minutes), settle once it stops AND the screen holds steady. THE
+  # tool for "wait until that agent is done" — never hand-roll an until/grep/sleep loop.
+  # An already-idle pane returns in ~2s. Default cap 240s; override with [secs].
+  local t=0 prev cur settle=0 quiet=0
+  prev="$(_capture "$pid")"
+  while [ "$t" -lt "$cap" ]; do
+    sleep 1 2>/dev/null || true; t=$((t+1))
+    cur="$(_capture "$pid")"
+    if [ "$cur" = "$prev" ]; then quiet=$((quiet+1)); else quiet=0; fi
+    prev="$cur"
+    _is_busy "$pid" && { settle=0; continue; }     # generating -> wait freely
+    [ "$quiet" -ge 1 ] && settle=$((settle+1)) || settle=0
+    [ "$settle" -ge 2 ] && break                    # idle + steady -> finished
+  done
+  [ "$t" -ge "$cap" ] && printf 'pane: %s still working after %ss — returning current screen; re-check: pane wait %s\n' "$pid" "$cap" "$pid" >&2
+  _reply_text "$pid" | tail -n 40
+}
+
+cmd_state() {
+  [ $# -ge 1 ] || _die "usage: pane state <target> [--json]"
+  local json=0 target=""
+  for a in "$@"; do case "$a" in --json) json=1 ;; *) [ -z "$target" ] && target="$a" ;; esac; done
+  local pid; pid="$(_resolve "$target")" || exit 1
+  local st; st="$(_classify "$pid")"
+  if [ "$json" = 0 ]; then echo "$st"; return 0; fi
+  local cli; cli="$(_pane_cli "$pid")"
+  printf '{"pane":"%s","state":"%s","cli":"%s"' "$pid" "$st" "$cli"
+  if [ "$st" = approval ]; then
+    printf ',"choices":['
+    local first=1 key label
+    while IFS="$(printf '\t')" read -r key label; do
+      [ -n "$key" ] || continue
+      label="$(printf '%s' "$label" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+      [ "$first" = 1 ] || printf ','; first=0
+      printf '{"key":"%s","label":"%s"}' "$key" "$label"
+    done <<EOF
+$(_approval_choices "$pid")
+EOF
+    printf ']'
+  fi
+  if [ "$st" = limited ]; then
+    # A codex wall comes from the rollout record, which says a usage limit was
+    # hit and NOT which window — so it is reported as `session`, the same
+    # label the model-switcher uses, rather than inventing `weekly` from
+    # nothing. The chooser polls real usage before it picks anyway, so the
+    # label is provenance, not input.
+    local wk=""
+    [ "$(tmux show-options -pqv -t "$pid" @anu_provider 2>/dev/null)" = codex ] && wk=session
+    [ -n "$wk" ] || wk="$(_wall_kind "$(_capture "$pid" | _wall_scope)")"
+    printf ',"wall":"%s"' "$wk"
+  fi
+  printf '}\n'
+}
+
+
+cmd_ls() {
+  local self; self="$(_self)"
+  printf 'PANE\tCLI\tROLE\tWINDOW\tTITLE\n'
+  _all_panes | awk -F'\t' -v me="$self" '{
+    tag = ($1==me ? " (you)" : "");
+    printf "%s%s\t%s\t%s\t%s\t%s\n", $1, tag, $2, ($5==""?"-":$5), $3, $6
+  }'
+}
+
+cmd_id() {
+  [ $# -ge 1 ] || _die "usage: pane id <cli>"
+  local self; self="$(_self)"
+  _all_panes | awk -F'\t' -v me="$self" '$1!=me{print $1"\t"$2}' | while IFS=$'\t' read -r id cmd; do
+    _cli_matches "$1" "$cmd" && printf '%s\n' "$id"
+  done
+}
+
+
+_set_ids() {
+  local self; self="$(_self)"
+  local kind="${1%%:*}" val="${1#*:}"
+  # box is emitted as a normalized 0/1 and role LAST on purpose: a tab is IFS
+  # whitespace, so `read` collapses two adjacent tabs into one delimiter — an
+  # empty field in the MIDDLE would shift everything after it. Only the last
+  # variable may be empty.
+  _all_panes | awk -F'\t' -v me="$self" '$1!=me{print $1"\t"$2"\t"($NF=="1"?1:0)"\t"$5}' | while IFS=$'\t' read -r id cli box role; do
+    case "$kind" in
+      all)  case "$cli" in
+              codex|claude|opencode|pi|node) printf '%s\n' "$id" ;;
+              [0-9]*) printf '%s\n' "$id" ;;
+              # a `box claude` pane reports the CONTAINER RUNTIME as its command,
+              # never "claude", so it would otherwise never be enumerated at all.
+              # Gate on @anu_box=1 (stamped by `anu account launch --box`) — the
+              # same gate _classify uses before trusting wall text on a container
+              # pane — so an unrelated container pane is still not an agent pane.
+              container) if [ "$box" = 1 ]; then printf '%s\n' "$id"; fi ;;
+            esac ;;
+      cli)  _cli_matches "$val" "$cli" && printf '%s\n' "$id" ;;
+      role) [ "$role" = "$val" ] && printf '%s\n' "$id" ;;
+    esac
+  done
+}
+
+# Echo the message from inline args | -f <file> | - (stdin) — same convention as send.
+_read_msg() {
+  case "${1:-}" in
+    -)         cat ;;
+    -f|--file) { [ -n "${2:-}" ] && [ -r "$2" ]; } || _die "need a readable file after -f"; cat -- "$2" ;;
+    *)         printf '%s' "$*" ;;
+  esac
+}
+
+# The donor's bounded file reply channel also works inside a container with no
+# tmux. Keep the caller's correlation ID and bytes, including trailing newlines.
+cmd_reply() {
+  local dir="$ANU_PANE_DIR/replies"
+  if [ "${1:-}" = gc ]; then
+    shift; local days=1
+    [ "${1:-}" = --older ] && { days="${2:-1}"; case "$days" in *[!0-9]*|'') days=1 ;; esac; }
+    (umask 077; mkdir -p "$dir") || _die "could not create reply directory"
+    local n; n="$(find "$dir" -type f -mtime "+$days" -delete -print 2>/dev/null | grep -c . || true)"
+    printf 'pane: pruned %s reply file(s) older than %s day(s)\n' "${n:-0}" "$days"
+    return 0
+  fi
+  [ "$#" -ge 2 ] || _die "usage: pane reply <id> <text...|-f file|->"
+  local id="$1"; shift
+  case "$id" in ''|.*|*[!A-Za-z0-9._-]*) _die "bad reply id (use a token, with no leading dot or slash)" ;; esac
+  (umask 077; mkdir -p "$dir") || _die "could not create reply directory"
+  chmod 700 "$dir" || _die "could not protect reply directory"
+  local temp; temp="$(mktemp "$dir/.$id.part.XXXXXX")" || _die "could not stage reply"
+  if _read_msg "$@" > "$temp" && chmod 600 "$temp" && mv -f "$temp" "$dir/$id"; then
+    printf 'pane: reply recorded (%s)\n' "$id"
+  else
+    rm -f "$temp"
+    _die "could not write reply $id"
+  fi
+}
+
+
+_state_word() {  # $1=pid [$2=anim] -> working | approval | booting | idle | limited | dead
+  local s; s="$(_classify "$1" "${2:-}")"
+  [ "$s" = busy ] && echo working || echo "$s"
+}
+
+# `pane status <target>` — THE crisp, NON-BLOCKING "is it working or done?" check. Prints
+# one machine-readable word (working | approval | booting | idle | limited), no waiting. This is
+# what an agent peeks at to decide "did my sibling finish?" — never scrape `pane read`.
+_status_one() {
+  local json=0 target=""
+  for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$target" ] && target="$a" ;; esac; done
+  [ -n "$target" ] || _die "usage: pane status <target> [--json]"
+  local pid; pid="$(_resolve "$target")" || exit 1
+  local out; out="$(_state_word "$pid")"
+  [ "$json" = 0 ] && { echo "$out"; return 0; }
+  printf '{"pane":"%s","state":"%s","cli":"%s"}\n' "$pid" "$out" "$(_pane_cmd1 "$pid")"
+}
+
+cmd_status() {
+  # `pane status <target>` -> that one pane's non-blocking state. `pane status` (no
+  # target) -> the whole team table. Same words (working/idle/booting/approval/limited), two scopes.
+  case "${1:-}" in
+    ''|-*) ;;                              # no target (or only flags) -> team table
+    *) _status_one "$@"; return $? ;;
+  esac
+  local self; self="$(_self)"
+  # Sample the spinner animation for ALL panes in ONE shared window (not per pane), so a
+  # big team table stays sub-second instead of 0.5s x (idle claude panes).
+  local anim; anim=" $(_animated_ids | tr '\n' ' ') "
+  printf 'PANE\tROLE\tCLI\tSTATE\tTASK\n'
+  # placeholder empty role/title in awk so `read` (IFS=tab is whitespace, collapses
+  # empty middle fields) keeps the columns aligned.
+  _all_panes | awk -F'\t' -v me="$self" '$1!=me{print $1"\t"$2"\t"($5==""?"-":$5)"\t"($6==""?"-":$6)}' | while IFS=$'\t' read -r id cli role title; do
+    case "$cli" in
+      codex|claude|opencode|pi|node|[0-9]*) ;;   # an agent pane -> part of the team
+      *) continue ;;
+    esac
+    local a=0; case "$anim" in *" $id "*) a=1 ;; esac
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$role" "$cli" "$(_state_word "$id" "$a")" "$title"
+  done
+}
+
+
+# (`call`), one system watcher (`watchd`). The human gets a macOS notification
+# tied to the originating pane; clicking it focuses that exact pane. Agents call
+# the human when blocked; the watcher (not the agent) detects "done".
+
+# Map a tmux client_termname to a macOS app bundle id, for click-to-activate.
+# Inside tmux, $TERM_PROGRAM is "tmux" (useless); client_termname is the truth.
+_term_app() {
+  case "$1" in
+    *ghostty*) echo "com.mitchellh.ghostty" ;;
+    *iterm*)   echo "com.googlecode.iterm2" ;;
+    *wezterm*) echo "com.github.wez.wezterm" ;;
+    *kitty*)   echo "net.kovidgoyal.kitty" ;;
+    *alacritty*) echo "org.alacritty" ;;
+    *Apple_Terminal*) echo "com.apple.Terminal" ;;
+    *) echo "com.mitchellh.ghostty" ;;
+  esac
+}
+
+# rc 0 if $1 (a pane id) is the active pane of ANY attached client (or the test
+# override). Used to suppress notifications the human is already looking at.
+_is_focused() {
+  local pid="$1" c act
+  if [ -n "${ANU_ACTIVE_PANE_OVERRIDE:-}" ]; then
+    [ "$ANU_ACTIVE_PANE_OVERRIDE" = "$pid" ] && return 0 || return 1
+  fi
+  for c in $(tmux list-clients -F '#{client_name}' 2>/dev/null); do
+    act="$(tmux display-message -p -c "$c" '#{pane_id}' 2>/dev/null)"
+    [ "$act" = "$pid" ] && return 0
+  done
+  return 1
+}
+
+_cooldown_file()  { printf '%s/cd_%s_%s_%s' "$ANU_NOTIFY_DIR" "$(_sock_key)" "${1#%}" "$2"; }
+# rc 0 if a notification of this kind for this pane is allowed now (>= secs since last).
+_cooldown_check() {
+  local f now last; f="$(_cooldown_file "$1" "$2")"
+  [ -r "$f" ] || return 0          # never notified for this pane+kind -> allowed
+  now="$(_now)"; last="$(cat "$f" 2>/dev/null || echo 0)"
+  [ $((now - last)) -ge "$3" ]
+}
+# Stamp the cooldown AFTER a successful emit (so a failed emit doesn't mute the next).
+_cooldown_stamp() { local f; f="$(_cooldown_file "$1" "$2")"; _notify_dir; printf '%s' "$(_now)" > "$f"; }
+
+# ---- needs ledger: the durable "who needs you" state behind `pane needs` -------
+# A cooldown stamp records "last notified"; it is NOT "still waiting". The lane needs
+# a record that persists until the human ARRIVES, so this is its own ledger: one file
+# per pane, `need_<socket>_<pid>` = "<kind> <since> <reason>". Written by the watcher (input on
+# approval, done on busy->idle) and by `pane call` (call, with reason); cleared by
+# `pane focus` (human arrived) and by a new busy epoch (the agent resumed).
+_json_str() { # escape $1 as a JSON string body (no surrounding quotes)
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\t'/ }"; s="${s//$'\n'/ }"; s="${s//$'\r'/ }"
+  printf '%s' "$s"
+}
+_need_file() { printf '%s/need_%s_%s' "$ANU_NOTIFY_DIR" "$(_sock_key)" "${1#%}"; }
+_need_rank() { case "$1" in call) echo 3 ;; input) echo 2 ;; done) echo 1 ;; *) echo 0 ;; esac; }
+# Record that <pid> needs the human. An unacknowledged higher-precedence need is never
+# downgraded (a `call` is not lost when the agent then finishes); `since` is preserved
+# while the kind is unchanged, so "waiting Nm" age cues stay stable across ticks.
+_need_set() { # $1 pid  $2 kind(call|input|done)  $3.. reason
+  local pid="$1" kind="$2"; shift 2; local reason="$*"
+  local f ck cs cr since; f="$(_need_file "$pid")"
+  _notify_dir
+  [ -r "$f" ] && read -r ck cs cr < "$f" 2>/dev/null
+  [ -n "${ck:-}" ] && [ "$(_need_rank "$ck")" -gt "$(_need_rank "$kind")" ] && return 0
+  if [ "${ck:-}" = "$kind" ] && [ -n "${cs:-}" ]; then since="$cs"; else since="$(_now)"; fi
+  printf '%s %s %s\n' "$kind" "$since" "$reason" > "$f"
+}
+_need_clear() { rm -f "$(_need_file "$1")" 2>/dev/null || true; }
+
+# Actually raise the OS notification. terminal-notifier gives click-to-run; if it's
+# absent, fall back to osascript (no click). Both receive text as ARGV — never
+# interpolated into a script string — so quotes/$/backticks/newlines can't break or
+# inject. Quote every token of the click command, including installed paths.
+_notify_emit() { # $1 pid  $2 kind  $3 title  $4 msg  $5 client  $6 app  $7 session  $8 socket
+  local pid="$1" kind="$2" title="$3" msg="$4" client="$5" app="$6" sess="$7" sock="${8:-}"
+  if _have terminal-notifier; then
+    local execcmd quoted
+    printf -v execcmd '%q focus %q' "$_PANE_BIN" "$pid"
+    # the pane's own server: a click runs with no $TMUX at all, and a bare
+    # `pane focus %3` would otherwise drive the DEFAULT server's %3.
+    case "$sock" in /*) printf -v quoted '%q' "$sock"; execcmd="$execcmd --socket $quoted" ;; esac
+    if [ -n "$client" ]; then printf -v quoted '%q' "$client"; execcmd="$execcmd --client $quoted"; fi
+    if [ -n "$app" ]; then printf -v quoted '%q' "$app"; execcmd="$execcmd --app $quoted"; fi
+    if [ -n "$sess" ]; then printf -v quoted '%q' "$sess"; execcmd="$execcmd --session $quoted"; fi
+    terminal-notifier -title "$title" -message "$msg" \
+      -group "anu:$pid:$kind" -execute "$execcmd" >/dev/null 2>&1
+  elif _have osascript; then
+    osascript - "$msg" "$title" >/dev/null 2>&1 <<'APPLESCRIPT'
+on run argv
+  display notification (item 1 of argv) with title (item 2 of argv)
+end run
+APPLESCRIPT
+  fi
+}
+
+# The click target: bring the human to <target>'s exact pane, then foreground the
+# terminal app. pane id is the authority for which pane; the snapshotted client is
+# the authority for which human view to drive (linked sessions share pane ids).
+# No-ops quietly if the pane is gone — never steal focus to nowhere.
+cmd_focus() {
+  local target="" client="" app="" sess="" sock=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --socket)  sock="${2:-}"; shift 2 ;;
+      --client)  client="${2:-}"; shift 2 ;;
+      --app)     app="${2:-}"; shift 2 ;;
+      --session) sess="${2:-}"; shift 2 ;;
+      *) [ -z "$target" ] && target="$1"; shift ;;
+    esac
+  done
+  [ -n "$target" ] || _die "usage: pane focus <target> [--socket path] [--client tty] [--app bundleid]"
+  _use_socket "$sock"
+  local pid; pid="$(_resolve "$target" 2>/dev/null)" || exit 0   # gone/unresolvable -> quiet
+  [ -n "$pid" ] || exit 0
+  _need_clear "$pid"   # the human is arriving here -> acknowledge; the lane row self-dismisses
+  [ -n "$sess" ] || sess="$(tmux display-message -p -t "$pid" '#{session_name}' 2>/dev/null)"
+  [ -n "$sess" ] || exit 0                                        # vanished between resolve and now
+  local win; win="$(tmux display-message -p -t "$pid" '#{window_index}' 2>/dev/null)"
+  # if the snapshotted client detached/reattached since emit, drop it so we pick a
+  # current one (pane id stays the authority; this just chooses which view to drive).
+  if [ -n "$client" ] && ! tmux list-clients -F '#{client_name}' 2>/dev/null | grep -qx "$client"; then
+    client=""
+  fi
+  if [ -z "$client" ]; then
+    client="$(tmux list-clients -t "$sess" -F '#{client_name}' 2>/dev/null | head -1)"
+    [ -n "$client" ] || client="$(tmux list-clients -F '#{client_name}' 2>/dev/null | head -1)"
+  fi
+  if [ -n "$client" ]; then
+    tmux switch-client -c "$client" -t "=$sess" 2>/dev/null || tmux switch-client -t "=$sess" 2>/dev/null
+  else
+    tmux switch-client -t "=$sess" 2>/dev/null
+  fi
+  tmux select-window -t "=$sess:$win" 2>/dev/null
+  tmux select-pane   -t "$pid" 2>/dev/null
+  [ -n "$app" ] || app="$(_term_app "$(tmux display-message -p -t "$pid" '#{client_termname}' 2>/dev/null)")"
+  osascript -e "tell application id \"$app\" to activate" >/dev/null 2>&1
+  return 0
+}
+
+# The single emit chokepoint. Every notification (agent call, Claude hook, watcher)
+# flows through here, so suppress-if-focused, per-pane+kind cooldown, grouping, and
+# the absolute-path click handler are enforced in ONE place.
+cmd_notify() {
+  local msg="" kind="info" target="" force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind)   kind="${2:-}"; shift 2 ;;
+      --target) target="${2:-}"; shift 2 ;;
+      --force)  force=1; shift ;;
+      *) [ -z "$msg" ] && msg="$1"; shift ;;
+    esac
+  done
+  case "$kind" in call|input|done|info) ;; *) _die "notify: bad --kind '$kind' (call|input|done|info)" ;; esac
+  [ -n "$target" ] || target="$(_self)"
+  [ -n "$target" ] || _die "notify: no target pane"
+  # `return`, never `exit`: this is called as a FUNCTION from _rot_reap and
+  # _watch_tick, so an `exit` here would take the whole watchd daemon down
+  # over one pane that vanished mid-tick. The top-level `pane notify` dispatch
+  # exits 0 on this path anyway. (cmd_focus's own `exit 0` is fine — nothing
+  # calls it as a function.)
+  local pid; pid="$(_resolve "$target" 2>/dev/null)" || return 0   # dead/unresolvable -> quiet
+  [ -n "$pid" ] || return 0
+  # suppress if the human is already on this pane (call only escapes with --force)
+  if _is_focused "$pid"; then
+    { [ "$kind" = call ] && [ "$force" = 1 ]; } || return 0
+  fi
+  local secs=0
+  case "$kind" in done) secs=120 ;; input) secs=60 ;; info) secs=60 ;; call) secs=0 ;; esac
+  _notify_dir
+  # Serialize check+emit+stamp per pane+kind so the Claude hook and the watcher
+  # can't double-fire. mkdir is atomic; clear a stale lock (a process killed
+  # mid-emit) so we never wedge; if someone else actively holds it, skip rather
+  # than emit unlocked (terminal-notifier's -group would coalesce a dup anyway).
+  local lock="$ANU_NOTIFY_DIR/.lk_$(_sock_key)_${pid#%}_${kind}" w=0 got=0
+  [ -d "$lock" ] && [ -n "$(find "$lock" -prune -mmin +1 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null
+  while [ "$w" -lt 20 ]; do mkdir "$lock" 2>/dev/null && { got=1; break; }; sleep 0.1 2>/dev/null || true; w=$((w+1)); done
+  [ "$got" = 1 ] || return 0
+  if [ "$secs" -gt 0 ] && ! _cooldown_check "$pid" "$kind" "$secs"; then rmdir "$lock" 2>/dev/null || true; return 0; fi
+  # snapshot metadata at emit time (a detached click can't trust "current target")
+  local role cli win sess client tn app title sock
+  cli="$(_pretty_cli "$(_pane_cli "$pid")")"
+  sock="$(tmux display-message -p -t "$pid" '#{socket_path}' 2>/dev/null)"
+  [ -n "$sock" ] || { [ -n "${TMUX:-}" ] && sock="${TMUX%%,*}"; }
+  role="$(tmux show-options -pqv -t "$pid" @anu_role 2>/dev/null)"; [ -n "$role" ] || role="${cli:-pane}"
+  win="$(tmux display-message -p -t "$pid" '#{window_name}' 2>/dev/null)"
+  sess="$(tmux display-message -p -t "$pid" '#{session_name}' 2>/dev/null)"
+  client="$(tmux list-clients -t "$sess" -F '#{client_name}' 2>/dev/null | head -1)"
+  [ -n "$client" ] || client="$(tmux list-clients -F '#{client_name}' 2>/dev/null | head -1)"
+  tn="$(tmux display-message -p -t "$pid" '#{client_termname}' 2>/dev/null)"; app="$(_term_app "$tn")"
+  case "$kind" in
+    call)  title="needs you · $role" ;;
+    input) title="needs input · $role" ;;
+    done)  title="done · $role" ;;
+    *)     title="anu · $role" ;;
+  esac
+  [ -n "$win" ] && title="$title @ $win"
+  # stamp the cooldown only on a SUCCESSFUL emit, so a transient notifier failure
+  # can't mute the next real notification.
+  if _notify_emit "$pid" "$kind" "$title" "${msg:-$title}" "$client" "$app" "$sess" "$sock"; then
+    [ "$secs" -gt 0 ] && _cooldown_stamp "$pid" "$kind"
+  fi
+  rmdir "$lock" 2>/dev/null || true
+}
+
+# Agent -> human summon. Raises a pane-tracked notification for THIS pane; clicking
+# it focuses here. Non-blocking by design: emit, then the agent ends its turn with
+# the question visible. Stamps @anu_last_call_at so the watcher won't also fire a
+# "done" for the same busy epoch (no "needs you" immediately followed by "done").
+cmd_call() {
+  local force=""; [ "${1:-}" = "--force" ] && { force="--force"; shift; }
+  local reason="$*" self; self="$(_self)"
+  [ -n "$self" ] || _die "pane call must run inside a tmux pane"
+  tmux set-option -p -t "$self" @anu_last_call_at "$(_now)" 2>/dev/null
+  _need_set "$self" call "$reason"   # durable record for the viz NEEDS-YOU lane (with the reason)
+  cmd_notify "${reason:-needs you}" --kind call --target "$self" $force
+}
+
+# ---- watchd: the system done/input detector (agents never touch it) ----
+
+# Agent panes on the server, deduped (linked sessions repeat the same %id).
+_watch_panes() { _set_ids all | sort -u; }
+_socket_hash() { printf '%s' "${1:-default}" | tr -c 'A-Za-z0-9' _; }
+_watch_pane_file() { printf '%s/w_%s_%s' "$ANU_NOTIFY_DIR" "$1" "${2#%}"; }  # $1=sockhash $2=pid
+
+# ---- watchd: the unattended rotation arm (a walled pane -> `anu account rotate`) ----
+#
+# The human's rule is that a pane runs to the wall and then rotates in the SAME
+# pane. `_classify` already reads the wall as `limited`; this is the arm that
+# acts on it. Nothing below dispatches anything unless the tmux option
+# @anu_autorotate reads 1 — set by config/tmux/tmux.conf since the B7 live
+# matrix passed (`tmux set -g @anu_autorotate 0` pauses it on a server).
+# `anu account rotate <pane>` and `anu account switch` stay the MANUAL verbs
+# and are not affected by the gate at all.
+#
+# All rotation bookkeeping lives in its OWN per-pane file, never in the 7-field
+# watchd state file that the done/input machine parses positionally. The
+# rotation file is line-oriented k=v (so `err=` can carry a whole log line):
+#   confirm=N        consecutive `limited` ticks since the last reset
+#   attempts=N       rotations dispatched for THIS wall that ended in failure
+#                    (rc other than 0/2); at 3 the arm gives up on the wall
+#   worker=PID       the in-flight background rotation (0 = none)
+#   started=EPOCH    when that worker was dispatched
+#   rc=N             the last rotation's exit code, kept for inspection ('x' = unknown)
+#   backoff_until=E  no dispatch before this epoch
+#   notified=0|1     this wall already produced its one OUTCOME notification
+#   nobin=0|1        this wall already logged a binary-resolution problem (kept
+#                    separate from `notified`, so a missing binary can never eat
+#                    the wall's first real outcome notification)
+#   err=TEXT         the tail of the last failing worker log
+_rot_file() { printf '%s/r_%s_%s'     "$ANU_NOTIFY_DIR" "$1" "${2#%}"; }   # $1=sockhash $2=pane
+_rot_log()  { printf '%s/r_%s_%s.log' "$ANU_NOTIFY_DIR" "$1" "${2#%}"; }
+_rot_rcf()  { printf '%s/r_%s_%s.rc'  "$ANU_NOTIFY_DIR" "$1" "${2#%}"; }
+_rot_num()  { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
+# How long ONE rotation may run ($1 = the pane, so the answer can depend on
+# it). 300s on the host. 420s for a boxed pane (@anu_box=1): `anu account
+# rotate` gives a boxed relaunch a far bigger wait budget of its own — 60s
+# hook + 90s running + 180s idle + ~15s to leave the old process = 345s — so
+# the host's cap would shoot a boxed rotation that was still perfectly on
+# track, and the reap would report it as a failure. ANU_ROTATE_WORKER_CAP
+# overrides both, so a test can exercise the watchdog without waiting five
+# minutes; a rotation that legitimately takes longer than its cap was not
+# going to finish.
+_rot_cap()  {
+  local c="${ANU_ROTATE_WORKER_CAP:-}"
+  if [ -z "$c" ]; then
+    c=300
+    [ -n "${1:-}" ] && [ "$(tmux show-options -pqv -t "$1" @anu_box 2>/dev/null)" = 1 ] && c=420
+  fi
+  case "$c" in ''|*[!0-9]*|0) c=300 ;; esac
+  printf '%s' "$c"
+}
+
+_rot_read() {   # $1 = state file -> the _r_* globals (defaults when absent/garbled)
+  _r_confirm=0; _r_attempts=0; _r_worker=0; _r_started=0; _r_rc=""; _r_backoff=0
+  _r_notified=0; _r_nobin=0; _r_nohook=0; _r_nogate=0; _r_err=""
+  [ -r "$1" ] || return 0
+  local line k v
+  while IFS= read -r line || [ -n "$line" ]; do
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      confirm)       _r_confirm="$(_rot_num "$v")" ;;
+      attempts)      _r_attempts="$(_rot_num "$v")" ;;
+      worker)        _r_worker="$(_rot_num "$v")" ;;
+      started)       _r_started="$(_rot_num "$v")" ;;
+      rc)            _r_rc="$v" ;;
+      backoff_until) _r_backoff="$(_rot_num "$v")" ;;
+      notified)      _r_notified="$(_rot_num "$v")" ;;
+      nobin)         _r_nobin="$(_rot_num "$v")" ;;
+      nohook)        _r_nohook="$(_rot_num "$v")" ;;
+      nogate)        _r_nogate="$(_rot_num "$v")" ;;
+      err)           _r_err="$v" ;;
+    esac
+  done < "$1"
+}
+_rot_write() {
+  printf 'confirm=%s\nattempts=%s\nworker=%s\nstarted=%s\nrc=%s\nbackoff_until=%s\nnotified=%s\nnobin=%s\nnohook=%s\nnogate=%s\nerr=%s\n' \
+    "$_r_confirm" "$_r_attempts" "$_r_worker" "$_r_started" "$_r_rc" "$_r_backoff" \
+    "$_r_notified" "$_r_nobin" "$_r_nohook" "$_r_nogate" "$_r_err" > "$1"
+}
+# The pane is not walled any more: the confirmation count, the failed-attempt
+# count, the one-notification-per-wall flag and the backoff all belong to THAT
+# wall, so they reset. Leaving `limited` is also the ONLY way back from the
+# attempt cap (short of a human running `anu account rotate --force`, which
+# does not go through this arm at all). `worker` and `rc` survive — a rotation
+# still in flight must never be re-dispatched, and the last exit code is worth
+# keeping for inspection.
+_rot_reset() {
+  local f; f="$(_rot_file "$1" "$2")"
+  [ -e "$f" ] || return 0
+  _rot_read "$f"
+  # A relaunch in flight makes the pane read idle/busy for many ticks (after
+  # the leave sequence it is a bare shell) — that is not "the wall ended".
+  # Keep the wall's bookkeeping (attempts, notified, backoff) until the
+  # worker has been reaped, so the attempt cap really counts every failure.
+  [ "$_r_worker" = 0 ] || return 0
+  [ "$_r_confirm" = 0 ] && [ "$_r_attempts" = 0 ] && [ "$_r_notified" = 0 ] \
+    && [ "$_r_backoff" = 0 ] && [ "$_r_nobin" = 0 ] && [ "$_r_nohook" = 0 ] \
+    && [ "$_r_nogate" = 0 ] && return 0
+  _r_confirm=0; _r_attempts=0; _r_notified=0; _r_backoff=0; _r_nobin=0; _r_nohook=0; _r_nogate=0
+  _rot_write "$f"
+}
+
+# Where `anu account` lives, for a daemon with a minimal environment. Every
+# candidate is -x checked, the explicit override included: a stale or
+# non-executable $ANU_ACCOUNT_BIN must not shadow a perfectly good install, it
+# should be reported once (via $_r_bin_warn, which the caller logs) and fallen
+# through.
+# Sets $_r_bin (and $_r_bin_warn) rather than printing: a command substitution
+# would run this in a subshell and swallow the warning.
+_rot_bin() {
+  _r_bin=""; _r_bin_warn=""
+  local p
+  if [ -n "${ANU_ACCOUNT_BIN:-}" ]; then
+    [ -x "$ANU_ACCOUNT_BIN" ] && { _r_bin="$ANU_ACCOUNT_BIN"; return 0; }
+    _r_bin_warn="ANU_ACCOUNT_BIN=$ANU_ACCOUNT_BIN is not executable — falling through"
+  fi
+  p="$(command -v homi-account 2>/dev/null || true)"
+  [ -n "$p" ] && [ -x "$p" ] && { _r_bin="$p"; return 0; }
+  p="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account"
+  [ -x "$p" ] && { _r_bin="$p"; return 0; }
+  return 1
+}
+
+# Dispatch ONE rotation as a detached, bounded background worker and return
+# immediately — the 2 s tick must never wait on a relaunch (which kills a pane,
+# retypes a launch line, and waits for Claude to come back up).
+#
+# Bounding it: no timeout(1) (macOS ships none), so the worker carries its own
+# watchdog. `set -m` inside the worker puts the rotate in its OWN process group,
+# so after $ANU_ROTATE_WORKER_CAP seconds (default 300) the watchdog can
+# kill -TERM that whole group — the rotate AND anything it spawned — without
+# ever signalling the watchd daemon that started it (a plain `kill -- -$pgid`
+# without job control would hit the daemon's own group, since a background
+# subshell otherwise inherits it). A KILL follows 5 s later for anything that
+# ignored the TERM. _rot_reap has a second, independent bound on top of this
+# one, for a worker that is gone in some way its own watchdog cannot cover.
+#
+# The socket matters: `anu-account` and the `pane state` it shells out to use a
+# BARE tmux, which finds its server through $TMUX and otherwise talks to the
+# default socket — while watchd runs per socket with $TMUX unset. So when the
+# daemon owns a named socket, the worker is handed TMUX="<socket>,0,0" (tmux
+# clients read the socket path from the first field), which both points the
+# rotation at the right server and makes cmd_rotate's pane lock name agree with
+# a human running the same verb from inside that server.
+_rot_dispatch() {   # $1=bin $2=pane $3=log $4=rcfile $5=socket ; prints the worker pid
+  : > "$3" 2>/dev/null
+  rm -f "$4" "$4.part" 2>/dev/null
+  local env_tmux=""; [ -n "${5:-}" ] && env_tmux="$5,0,0"
+  nohup bash -c '
+    [ -n "$5" ] && export TMUX="$5"
+    set -m
+    "$1" rotate "$2" >"$3" 2>&1 </dev/null &
+    child=$!
+    ( sleep "$6"
+      kill -0 "$child" 2>/dev/null && kill -TERM -- -"$child" 2>/dev/null
+      sleep 5
+      kill -0 "$child" 2>/dev/null && kill -KILL -- -"$child" 2>/dev/null ) &
+    guard=$!
+    wait "$child"; rc=$?
+    kill -TERM -- -"$guard" 2>/dev/null
+    printf "rc=%s\n" "$rc" > "$4.part" && mv -f "$4.part" "$4"
+  ' _ "$1" "$2" "$3" "$4" "$env_tmux" "$(_rot_cap "$2")" </dev/null >/dev/null 2>&1 &
+  printf '%s' "$!"
+}
+
+# Reap a finished — or hung — rotation worker for ONE pane. This runs on EVERY
+# tick for any pane that has a `worker` recorded, whatever its current state,
+# and NOT only from the `limited` arm: a rotation that SUCCEEDS takes the pane
+# out of `limited`, so a reap that only ran while walled would never deliver
+# "rotated to <next>" at all, and would surface it — stale, naming the account
+# before last — at the pane's next wall.
+#
+# $1=sockhash $2=pane $3=now. Returns 0 while a worker is still legitimately in
+# flight (the caller must not dispatch), 1 when there is nothing in flight.
+_rot_reap() {
+  local sh="$1" pid="$2" now="$3"
+  local f; f="$(_rot_file "$sh" "$pid")"
+  [ -e "$f" ] || return 1
+  _rot_read "$f"
+  [ "$_r_worker" != 0 ] || return 1
+  local log rcf; log="$(_rot_log "$sh" "$pid")"; rcf="$(_rot_rcf "$sh" "$pid")"
+  local rc=""
+  if kill -0 "$_r_worker" 2>/dev/null; then
+    # Alive — but `started` bounds this guard, because `kill -0` alone would let
+    # an orphan (or a RECYCLED pid that now belongs to something unrelated) own
+    # the pane forever. The worker's own watchdog should have ended it at the
+    # cap; past cap + 60 s of grace it is gone as far as watchd is concerned.
+    local cap; cap="$(_rot_cap "$pid")"
+    # started=0 means the file lost its dispatch stamp, so the guard cannot be
+    # bounded at all — abandon rather than hold the pane for ever.
+    if [ "$_r_started" -le 0 ] || [ $((now - _r_started)) -gt $((cap + 60)) ]; then
+      # Abandon, do NOT signal. The recorded pid is exactly the thing this
+      # branch has stopped trusting: past cap + 60 s (or with no dispatch
+      # stamp at all) it is as likely to be a RECYCLED pid belonging to some
+      # unrelated process as it is to be our rotation, and killing that would
+      # be shooting a stranger. A worker that really is still ours carries its
+      # own watchdog and its own process group for the killing. So this is
+      # "forget it", not "shoot it": release the in-flight guard, log it, and
+      # let the pane's next wall proceed.
+      printf '[%s] rotation worker %s still alive %ss after dispatch (cap %ss) — abandoned, not signalled\n' \
+        "$now" "$_r_worker" "$((now - _r_started))" "$cap" >> "$log" 2>/dev/null
+      rc=hung
+    else
+      return 0
+    fi
+  fi
+  _r_worker=0
+  if [ -z "$rc" ]; then
+    [ -r "$rcf" ] && rc="$(sed -n 's/^rc=//p' "$rcf" 2>/dev/null | head -1)"
+    case "$rc" in ''|*[!0-9]*) rc=x ;; esac    # worker killed / vanished: unknown
+  fi
+  rm -f "$rcf" "$rcf.part" 2>/dev/null
+  _r_rc="$rc"
+  case "$rc" in
+    # cmd_rotate's contract: 0 rotated, 2 nothing has room (pane left parked),
+    # anything else a failure (dashboard unreachable, refused, relaunch died).
+    0)
+      local line next="" msg=rotated
+      line="$(grep '→' "$log" 2>/dev/null | tail -n 1 || true)"
+      case "$line" in *"→ "*) next="${line#*→ }"; next="${next%% *}" ;; esac
+      [ -n "$next" ] && msg="rotated to $next"
+      cmd_notify "$msg" --kind info --target "$pid" >/dev/null 2>&1
+      _r_confirm=0; _r_attempts=0; _r_backoff=0; _r_notified=0; _r_nobin=0; _r_nohook=0; _r_nogate=0; _r_err="" ;;
+    2)
+      # Not a failed attempt: nothing had room, which the 600s backoff is
+      # already the right answer to. The attempt budget is for rotations that
+      # BROKE, so this clears it.
+      [ "$_r_notified" = 1 ] || cmd_notify "waiting for capacity" --kind info --target "$pid" >/dev/null 2>&1
+      _r_notified=1; _r_confirm=0; _r_attempts=0; _r_backoff=$((now + 600)) ;;
+    *)
+      _r_err="$(tail -n 1 "$log" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-200)"
+      local said; said="$(tail -n 1 "$log" 2>/dev/null | tr -d '\r')"
+      printf '[%s] rotate ended rc=%s\n' "$now" "$rc" >> "$log" 2>/dev/null
+      # The attempt cap. `attempts` was incremented at dispatch, so reaching 3
+      # here means this wall has now broken three rotations — a dashboard that
+      # keeps refusing, a relaunch that keeps dying, a pane that keeps being
+      # taken out from under us. Retrying a fourth time is not going to help
+      # and each try costs the human's session. Say so ONCE (the ordinary
+      # "rotation failed" notice is already spent, so this needs its own
+      # line), then stop dispatching for this wall — _rot_step's gate — until
+      # the pane leaves `limited` (or a human runs `anu account rotate
+      # --force`, which does not come through here at all).
+      if [ "$_r_attempts" -ge 3 ]; then
+        printf '[%s] gave up on this wall after %s attempts\n' "$now" "$_r_attempts" >> "$log" 2>/dev/null
+        cmd_notify "rotation gave up after 3 attempts — see $log" --kind info --target "$pid" >/dev/null 2>&1
+      else
+        # A rotation that parked the pane says why in its LAST line
+        # ("anu account: rotation failed — …; resume with: …"): that line is
+        # the notice. Anything else points at the log.
+        case "$said" in "anu account: rotation failed"*) said="${said#anu account: }" ;; *) said="rotation failed, see $log" ;; esac
+        [ "$_r_notified" = 1 ] || cmd_notify "$said" --kind info --target "$pid" >/dev/null 2>&1
+      fi
+      _r_notified=1; _r_confirm=0; _r_backoff=$((now + 120)) ;;
+  esac
+  _rot_write "$f"
+  return 1
+}
+
+# ---- watchd: the Codex wall scan (a pre-step, not a screen read) ------------
+#
+# Codex announces a usage wall to nobody. From its own source: the quota branch
+# ends the turn through an internal error path that fires NO lifecycle hook,
+# runs no `notify`, and persists no standalone error event — `Stop` runs only
+# when a turn COMPLETES. But the turn's ending IS written down, in the
+# session's rollout file (the `transcript_path` every hook payload carries):
+#
+#   {"timestamp":"…","type":"event_msg","payload":{"type":"task_complete",
+#    "turn_id":"…","last_agent_message":null,
+#    "error":{"message":"…","codex_error_info":"usage_limit_exceeded"}}}
+#
+# A successful turn writes the same record with no error. So this tails that
+# file. It is first-party, structured and unquotable, where a screen is none of
+# the three — a Codex pane asked to echo its own wall text during the spike
+# returned it verbatim, which is exactly the false positive that rotated a live
+# Claude pane twice on 2026-09-15. Nothing here reads the screen, and
+# `_wall_kind` is not consulted or changed.
+#
+# Cost: ONE stat for a pane whose rollout has not grown, which is every pane
+# that is thinking, idle, or between turns.
+_ROLLOUT_CHUNK_MAX=262144    # 256 KiB per pane per tick; the cursor still moves
+_codex_scan() {  # $1 = pane id, $2 = now. Never fails the tick.
+  local pid="$1" now="$2"
+  local opts line k v provider="" transcript="" from="" inode="" turn=""
+  opts="$(tmux show-options -pq -t "$pid" 2>/dev/null || true)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    k="${line%% *}"; v="${line#* }"
+    [ "$k" = "$line" ] && v=""
+    v="${v#\"}"; v="${v%\"}"
+    case "$k" in
+      @anu_provider)       provider="$v" ;;
+      @anu_transcript)     transcript="$v" ;;
+      @anu_rollout_offset) from="$v" ;;
+      @anu_rollout_inode)  inode="$v" ;;
+      @anu_turn)           turn="$v" ;;
+    esac
+  done <<EOF
+$opts
+EOF
+  [ "$provider" = codex ] || return 0
+  # A wall already pending is NOT a reason to stop reading. The cursor is what
+  # keeps the record already acted on from being seen twice — it advanced past
+  # those bytes when the stamp was written — while a turn that walls again
+  # after a failed handoff, or after the human resumed and hit the limit on a
+  # later turn, is new evidence this pane's rotation needs.
+  [ -n "$transcript" ] && [ -f "$transcript" ] || return 0
+  case "$from" in ''|*[!0-9]*) from=0 ;; esac
+
+  local size; size="$(_fsize "$transcript")" || return 0
+  [ "$size" = "$from" ] && return 0          # the quiet case: one stat, done
+
+  # A file that SHRANK below the cursor, or a different file at the same path,
+  # is not the file that cursor indexes — start over rather than read from a
+  # meaningless offset.
+  local now_inode; now_inode="$(_finode "$transcript")" || now_inode=""
+  if [ "$size" -lt "$from" ] || { [ -n "$inode" ] && [ -n "$now_inode" ] && [ "$inode" != "$now_inode" ]; }; then
+    from=0
+  fi
+  [ -n "$now_inode" ] && tmux set-option -p -t "$pid" @anu_rollout_inode "$now_inode" 2>/dev/null || true
+  [ "$size" -gt "$from" ] || return 0
+
+  local chunk="$ANU_NOTIFY_DIR/.codex_chunk_${pid#%}.$$"
+  tail -c "+$((from + 1))" "$transcript" 2>/dev/null | head -c "$_ROLLOUT_CHUNK_MAX" > "$chunk" 2>/dev/null || {
+    rm -f "$chunk" 2>/dev/null; return 0; }
+  local got; got="$(_fsize "$chunk")" || { rm -f "$chunk" 2>/dev/null; return 0; }
+  [ "$got" -gt 0 ] || { rm -f "$chunk" 2>/dev/null; return 0; }
+
+  # Only COMPLETE records count: Codex is appending to this file as we read it,
+  # so the tail is routinely half a line, and leaving that half for the next
+  # tick is the point. The cursor therefore stops at the last newline, never at
+  # the file's size.
+  local complete="$chunk" adv
+  if [ "$(tail -c 1 "$chunk" | wc -l | tr -d ' ')" = 1 ]; then
+    adv="$got"
+  else
+    sed '$d' "$chunk" > "$chunk.c" 2>/dev/null || : > "$chunk.c"
+    complete="$chunk.c"
+    adv="$(_fsize "$chunk.c")" || adv=0
+  fi
+  # A whole cap-sized read with not one newline in it is not a record being
+  # written, it is a line longer than the cap — and keeping the cursor would
+  # stall this pane for ever, re-reading the same 256 KiB and never seeing the
+  # turn end. Step over it; a `task_complete` record is a few hundred bytes.
+  if [ "$adv" = 0 ] && [ "$got" -ge "$_ROLLOUT_CHUNK_MAX" ]; then
+    tmux set-option -p -t "$pid" @anu_rollout_offset "$((from + got))" 2>/dev/null || true
+    rm -f "$chunk" "$chunk.c" 2>/dev/null
+    return 0
+  fi
+
+  # The record counts only for the turn this launch is INSIDE. `codex resume`
+  # re-renders the whole conversation, so a rollout a rotation reopens is full
+  # of old endings, and acting on one would rotate a pane for a wall it hit
+  # yesterday. With no turn stamped at all (never prompted) nothing can match,
+  # and the cursor simply moves on.
+  local hit=""
+  if [ -n "$turn" ] && [ "$adv" -gt 0 ]; then
+    hit="$(jq -Rr --arg turn "$turn" '
+      (fromjson? // empty) as $r
+      | select($r.payload.type == "task_complete")
+      | select($r.payload.turn_id == $turn)
+      | select($r.payload.error.codex_error_info == "usage_limit_exceeded")
+      | "wall"' "$complete" 2>/dev/null | head -1)"
+  fi
+  # The pending wall is persisted BEFORE the cursor moves past the bytes it
+  # came from. The other order loses a wall for good: a stamp that failed
+  # against a cursor already advanced means the next tick starts after the
+  # record and the wall is never seen again.
+  if [ "$hit" = wall ]; then
+    tmux set-option -p -t "$pid" @anu_wall_pending "$now:$turn" 2>/dev/null || true
+    tmux set-option -p -t "$pid" @anu_wall_event "codex:$now" 2>/dev/null || true
+  fi
+  [ "$adv" -gt 0 ] && tmux set-option -p -t "$pid" @anu_rollout_offset "$((from + adv))" 2>/dev/null || true
+  rm -f "$chunk" "$chunk.c" 2>/dev/null
+  return 0
+}
+# What `cdx`/`cdxx`/`cdxxs` resolve to for a spawned pane: the account launcher
+# when this device has a Codex account with an auth.json (existence only —
+# never opened), plain `codex` otherwise, so a fresh install sees no change.
+_codex_launch_prefix() {
+  local dir="${ANU_ACCOUNT_CODEX_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/accounts/codex}" f
+  for f in "$dir"/*/auth.json; do
+    [ -f "$f" ] || continue
+    printf '%q launch --provider codex --' "${ANU_ACCOUNT_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account}"
+    return 0
+  done
+  printf 'codex'
+}
+_fsize() {  # portable byte size; 1 when it cannot be read
+  local out
+  out="$(stat -f %z "$1" 2>/dev/null)"
+  case "$out" in ''|*[!0-9]*) out="$(stat -c %s "$1" 2>/dev/null)" ;; esac
+  case "$out" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$out"
+}
+_finode() {
+  local out
+  out="$(stat -f %i "$1" 2>/dev/null)"
+  case "$out" in ''|*[!0-9]*) out="$(stat -c %i "$1" 2>/dev/null)" ;; esac
+  case "$out" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$out"
+}
+
+# One walled pane's rotation state machine, driven from the `limited` arm of
+# _watch_tick AFTER _rot_reap has already run for this pane.
+# $1=sockhash $2=pane $3=@anu_autorotate (read once per tick) $4=now $5=socket
+# $6=@anu_codex_autorotate (read once per tick). Returns immediately in every
+# branch.
+_rot_step() {
+  local sh="$1" pid="$2" gate="$3" now="$4" sock="${5:-}" codex_gate="${6:-}"
+  local f log rcf
+  f="$(_rot_file "$sh" "$pid")"; log="$(_rot_log "$sh" "$pid")"; rcf="$(_rot_rcf "$sh" "$pid")"
+  _rot_read "$f"
+
+  # (1) A rotation still in flight OWNS this pane — _rot_reap ran first this
+  # tick and would have cleared `worker` had it finished or outlived its cap.
+  # cmd_rotate's mkdir lock is the hard guard underneath; this is the
+  # watchd-side one, so a rotate that exits 1 because "another rotation holds"
+  # is never re-dispatched every 2 s.
+  [ "$_r_worker" = 0 ] || return 0
+
+  # (2) The gate. Off by default; B7 flips it after the live matrix.
+  [ "$gate" = 1 ] || return 0
+
+  # (3) The pane's facts, in ONE show-options call rather than four. BOTH
+  # @anu_session AND @anu_account, or the pane is unmanaged — a pane with a
+  # session id but no account was not started by `anu account launch` (the
+  # SessionStart hook no longer stamps one without the other), so it must never
+  # be a rotation candidate. @anu_rotating is the softer 120 s cooldown that
+  # cmd_rotate itself also honors.
+  local opts line k v session="" account="" rotating="" wall_event="" wall_seen="" box="" provider="" wall_pending=""
+  opts="$(tmux show-options -pq -t "$pid" 2>/dev/null || true)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    k="${line%% *}"; v="${line#* }"
+    [ "$k" = "$line" ] && v=""
+    v="${v#\"}"; v="${v%\"}"
+    case "$k" in
+      @anu_session)    session="$v" ;;
+      @anu_account)    account="$v" ;;
+      @anu_rotating)   rotating="$v" ;;
+      @anu_wall_event) wall_event="$v" ;;
+      @anu_wall_seen)  wall_seen="$v" ;;
+      @anu_box)        box="$v" ;;
+      @anu_provider)   provider="$v" ;;
+      @anu_wall_pending) wall_pending="$v" ;;
+    esac
+  done <<EOF
+$opts
+EOF
+  [ -n "$session" ] && [ -n "$account" ] || return 0
+  # (3b) Codex rotation is opt-in, separately. The local matrix has never seen
+  # a real Codex usage-wall handoff — no ChatGPT account could be walled the
+  # night it ran — so DETECTING the wall (which the scan above already did, and
+  # which `pane state` reads as `limited`) is on for everyone while ACTING on
+  # it waits for the one case that has not passed. The manual verbs, `anu
+  # account rotate`/`switch`, never come through this arm and are unaffected.
+  if [ "$provider" = codex ] && [ "$codex_gate" != 1 ]; then
+    if [ "$_r_nogate" != 1 ]; then
+      printf '%s codex wall recorded, not rotating: @anu_codex_autorotate is not 1 (automatic Codex rotation is opt-in until a live wall handoff passes). Move it by hand with `anu account rotate %s`.\n' \
+        "$(date '+%H:%M:%S')" "$pid" >> "$log"
+      _r_nogate=1
+    fi
+    _rot_write "$f"; return 0
+  fi
+  # A codex wall event is namespaced (`codex:<epoch>`) because it is stamped by
+  # anu's own scan rather than by the provider's hook; the epoch underneath is
+  # read by exactly the same freshness rules below.
+  case "$wall_event" in *:*) wall_event="${wall_event##*:}" ;; esac
+  case "$rotating" in ''|*[!0-9]*) : ;; *) [ $((now - rotating)) -lt 120 ] && return 0 ;; esac
+
+  # (4) Confirmation. Two consecutive `limited` ticks, so a single misread
+  # screen can never cost a pane its session — UNLESS the StopFailure hook (B5)
+  # stamped a fresh @anu_wall_event, which is the provider itself saying
+  # "rate_limit"; that corroborates the screen read, so one tick is enough.
+  # "Fresh" is under 60s old AND newer than @anu_wall_seen, the stamp written
+  # at dispatch: one hook event corroborates ONE dispatch. Without the second
+  # half, the same 60s-old event would keep shortcutting the confirmation for
+  # every wall after it, and a single screen misread inside that window would
+  # again be enough to relaunch a pane.
+  # (4a) A host pane rotates only when Claude Code ITSELF reported the wall:
+  # the StopFailure hook (B5) stamps @anu_wall_event on a rate_limit failure
+  # within a second of the wall (B7). The screen alone is supporting evidence
+  # — it names the wall's kind and, for a BOXED pane, where no hook can run,
+  # it is all there is. A pane whose conversation merely quotes wall text
+  # rotated twice on screen text alone (2026-09-15); never again. "Reported"
+  # = an event under 10 min old and newer than @anu_wall_seen (one event
+  # corroborates one dispatch).
+  # (4b) Codex's evidence is not an event that gets SPENT. @anu_wall_pending is
+  # a record anu read out of the rollout file — a `task_complete` the provider
+  # wrote — and a dispatch does not make it less true: a rotation that failed
+  # leaves the pane exactly as walled as it found it. Only a launch clears it.
+  # Reading it as the corroboration is what gives a failed Codex handoff a
+  # retry at all; the backoff and the 3-attempt cap below are what bound the
+  # retrying, exactly as they do for Claude. (The spend rule stays for Claude,
+  # where the evidence IS a one-shot hook report and a stale one must never
+  # shortcut the confirmation twice.)
+  local hook_ok=0
+  if [ "$provider" = codex ]; then
+    [ -n "$wall_pending" ] && hook_ok=1
+  else
+    case "$wall_event" in ''|*[!0-9]*) : ;;
+      *) if [ $((now - wall_event)) -ge 0 ] && [ $((now - wall_event)) -lt 600 ]; then
+           case "$wall_seen" in
+             ''|*[!0-9]*) hook_ok=1 ;;
+             *) [ "$wall_event" -gt "$wall_seen" ] && hook_ok=1 ;;
+           esac
+         fi ;;
+    esac
+  fi
+  if [ "$box" != 1 ] && [ "$hook_ok" != 1 ]; then
+    if [ "$_r_nohook" != 1 ]; then
+      if [ "$provider" = codex ]; then
+        printf '%s limited but no fresh @anu_wall_event from the rollout scan — not rotating; the pending wall is older than 10 min or already spent\n' "$(date '+%H:%M:%S')" >> "$log"
+      else
+        printf '%s limited on screen but Claude Code reported no rate_limit (no fresh @anu_wall_event) — not rotating; is the StopFailure hook installed?\n' "$(date '+%H:%M:%S')" >> "$log"
+      fi
+      _r_nohook=1
+    fi
+    _r_confirm=$((_r_confirm + 1)); _rot_write "$f"; return 0
+  fi
+  _r_confirm=$((_r_confirm + 1))
+  local fresh=0
+  case "$wall_event" in ''|*[!0-9]*) : ;;
+    *) if [ $((now - wall_event)) -ge 0 ] && [ $((now - wall_event)) -lt 60 ]; then
+         case "$wall_seen" in
+           ''|*[!0-9]*) fresh=1 ;;
+           *) [ "$wall_event" -gt "$wall_seen" ] && fresh=1 ;;
+         esac
+       fi ;;
+  esac
+  if [ "$_r_confirm" -lt 2 ] && [ "$fresh" != 1 ]; then _rot_write "$f"; return 0; fi
+
+  # (5) Backoff — rc 2 (nothing has room) parks this pane for 10 min, any other
+  # failure for 2 min, so a broken dashboard can't be hammered every 2 s.
+  if [ "$now" -lt "$_r_backoff" ]; then _rot_write "$f"; return 0; fi
+
+  # (5b) The per-wall attempt cap. Three rotations dispatched for this wall
+  # have now failed (rc other than 0/2 — see _rot_reap, which notified once
+  # and logged it); a fourth is not going to help, and each one costs the
+  # human's session another relaunch. Nothing more is dispatched until the
+  # pane leaves `limited` (_rot_reset clears the count) or a human runs `anu
+  # account rotate --force` by hand, which never comes through this arm.
+  if [ "$_r_attempts" -ge 3 ]; then _rot_write "$f"; return 0; fi
+
+  # (6) The binary. Nothing to run -> say so once in the log, then stay quiet.
+  # `nobin`, not `notified`: a binary problem must never eat this wall's first
+  # real outcome notification once the binary becomes resolvable again.
+  local bin_rc=0 warned=0
+  _rot_bin || bin_rc=$?
+  if [ "$_r_nobin" != 1 ]; then
+    [ -n "$_r_bin_warn" ] && {
+      printf '[%s] %s\n' "$now" "$_r_bin_warn" >> "$log" 2>/dev/null; warned=1; }
+    if [ "$bin_rc" -ne 0 ] || [ -z "$_r_bin" ]; then
+      printf '[%s] no anu-account on PATH (set ANU_ACCOUNT_BIN) — not rotating %s\n' \
+        "$now" "$pid" >> "$log" 2>/dev/null; warned=1
+    fi
+    [ "$warned" = 1 ] && _r_nobin=1
+  fi
+  if [ "$bin_rc" -ne 0 ] || [ -z "$_r_bin" ]; then _rot_write "$f"; return 0; fi
+
+  # (7) Dispatch, stamp, return. The tick never waits on the worker. The
+  # attempt is counted HERE, not at the reap: a dispatch that never reports
+  # back at all still spent one of this wall's three.
+  _r_worker="$(_rot_dispatch "$_r_bin" "$pid" "$log" "$rcf" "$sock")"
+  _r_attempts=$((_r_attempts + 1))
+  _r_started="$now"
+  tmux set-option -p -t "$pid" @anu_wall_seen "$now" 2>/dev/null || true
+  _rot_write "$f"
+}
+
+# ---- watchd: the rebalance arm (an IDLE pane -> the ranked best account) ----
+#
+# The limited arm moves a pane that has run out. This one moves an IDLE pane
+# that is simply on the wrong account now — `anu account rebalance` holds the
+# rule and every guard (read its header), and this arm decides only WHEN to
+# ask it. The human asked for the most efficient check possible, so:
+#   * no new process and no new timer: it runs at the end of the tick, after
+#     the per-pane loop (and so after the limited arm), over the panes the
+#     classifier read idle on this tick AND the one before;
+#   * ONE worker per server at a time: never two moves at once, never two
+#     dashboard calls racing each other. While none runs, the arm looks at
+#     most every ANU_REBALANCE_INTERVAL seconds (30), and a tick that does not
+#     look costs one read of a small file — no process at all;
+#   * a look is one read of @anu_rebalance, one `list-panes` for every pane's
+#     stamps, and one read of the cached ranking per provider — no jq, no
+#     network. A pane already on the cached best, or already judged against
+#     that very ranking (@anu_rebalance_seen, which the worker stamps), costs
+#     a string compare. An unmanaged pane (no @anu_account) is skipped here,
+#     and never logged;
+#   * anything else is handed, as the limited arm hands on a wall, to a
+#     detached `anu account rebalance <pane> --tick` worker: it fetches the
+#     ranking only when the cached one is stale, decides, preflights, re-reads
+#     the pane, and moves it with `anu account switch <pane> --as <best>`
+#     under the pane lock. Its one line per decision goes to the pane's
+#     r_<sock>_<pane>.log, the log the rotation arm writes.
+# State, per server, in b_<sock>: worker/started/pane (the one in flight),
+# rc (its exit), next (no look before this), recent ("%N:until" — a pane just
+# decided is left alone for one interval, whatever the answer was), nobin.
+_reb_read() {   # $1 = state file -> the _b_* globals. Builtins only: every tick reads it.
+  _b_worker=0; _b_started=0; _b_pane=""; _b_next=0; _b_rc=""; _b_recent=""; _b_nobin=0
+  [ -r "$1" ] || return 0
+  local line k v
+  while IFS= read -r line || [ -n "$line" ]; do
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      worker|started|next|nobin) case "$v" in ''|*[!0-9]*) v=0 ;; esac ;;
+    esac
+    case "$k" in
+      worker)  _b_worker="$v" ;;
+      started) _b_started="$v" ;;
+      pane)    _b_pane="$v" ;;
+      next)    _b_next="$v" ;;
+      rc)      _b_rc="$v" ;;
+      recent)  _b_recent="$v" ;;
+      nobin)   _b_nobin="$v" ;;
+    esac
+  done < "$1"
+}
+_reb_write() {
+  printf 'worker=%s\nstarted=%s\npane=%s\nnext=%s\nrc=%s\nrecent=%s\nnobin=%s\n' \
+    "$_b_worker" "$_b_started" "$_b_pane" "$_b_next" "$_b_rc" "$_b_recent" "$_b_nobin" > "$1"
+}
+_reb_recent() {   # $1 = pane, $2 = now: true while $_b_recent leaves it alone
+  local e
+  for e in $_b_recent; do
+    [ "${e%%:*}" = "$1" ] || continue
+    [ "$2" -lt "${e##*:}" ] 2>/dev/null && return 0
+  done
+  return 1
+}
+# The limited arm's dispatch, in shape byte for byte (see _rot_dispatch): a
+# detached worker in its own process group with its own watchdog, handed the
+# daemon's socket. Two differences: the verb, and the log is APPENDED to — it
+# is the pane's rotation log, and a decision must not erase a wall's story.
+_reb_dispatch() {   # $1=bin $2=pane $3=log $4=rcfile $5=socket ; prints the worker pid
+  rm -f "$4" "$4.part" 2>/dev/null
+  local env_tmux=""; [ -n "${5:-}" ] && env_tmux="$5,0,0"
+  nohup bash -c '
+    [ -n "$5" ] && export TMUX="$5"
+    set -m
+    "$1" rebalance "$2" --tick >>"$3" 2>&1 </dev/null &
+    child=$!
+    ( sleep "$6"
+      kill -0 "$child" 2>/dev/null && kill -TERM -- -"$child" 2>/dev/null
+      sleep 5
+      kill -0 "$child" 2>/dev/null && kill -KILL -- -"$child" 2>/dev/null ) &
+    guard=$!
+    wait "$child"; rc=$?
+    kill -TERM -- -"$guard" 2>/dev/null
+    printf "rc=%s\n" "$rc" > "$4.part" && mv -f "$4.part" "$4"
+  ' _ "$1" "$2" "$3" "$4" "$env_tmux" "$(_rot_cap "")" </dev/null >/dev/null 2>&1 &
+  printf '%s' "$!"
+}
+# Reap the server's rebalance worker, finished or hung — every tick, before
+# the arm looks at anything: a worker that moved a pane left it idle, and the
+# news is collected whatever the pane is doing by now. Leaves the _b_* globals
+# set for _reb_arm. Returns 0 while the worker legitimately runs (the arm must
+# not look), 1 otherwise. $1 = state file, $2 = sockhash, $3 = now
+_reb_reap() {
+  local f="$1" sh="$2" now="$3"
+  _reb_read "$f"
+  [ "$_b_worker" != 0 ] || return 1
+  local rcf="$f.rc" log rc=""; log="$(_rot_log "$sh" "$_b_pane")"
+  if kill -0 "$_b_worker" 2>/dev/null; then
+    local cap; cap="$(_rot_cap "")"   # never a boxed pane: the arm skips those
+    if [ "$_b_started" -le 0 ] || [ $((now - _b_started)) -gt $((cap + 60)) ]; then
+      # Abandon, never signal: past cap + 60 s the recorded pid is as likely
+      # to be a stranger's as ours (see _rot_reap).
+      printf '[%s] rebalance worker %s still alive %ss after dispatch (cap %ss) — abandoned, not signalled\n' \
+        "$now" "$_b_worker" "$((now - _b_started))" "$cap" >> "$log" 2>/dev/null
+      rc=hung
+    else
+      return 0
+    fi
+  fi
+  if [ -z "$rc" ]; then
+    [ -r "$rcf" ] && rc="$(sed -n 's/^rc=//p' "$rcf" 2>/dev/null | head -1)"
+    case "$rc" in ''|*[!0-9]*) rc=x ;; esac
+  fi
+  rm -f "$rcf" "$rcf.part" 2>/dev/null
+  local interval="${ANU_REBALANCE_INTERVAL:-30}" e keep=""
+  case "$interval" in ''|*[!0-9]*) interval=30 ;; esac
+  for e in $_b_recent; do                        # drop the expired, and this pane's old entry
+    [ "${e%%:*}" = "$_b_pane" ] && continue
+    [ "${e##*:}" -gt "$now" ] 2>/dev/null && keep="$keep $e"
+  done
+  _b_recent="${keep# } $_b_pane:$((now + interval))"; _b_recent="${_b_recent# }"
+  _b_rc="$rc"; _b_next="$now"
+  case "$rc" in
+    # The verb's contract: 0 moved, 2 stayed, 3 the dashboard did not answer,
+    # anything else a move that failed (its one line is already in the log).
+    0) local line to=""
+       line="$(grep 'rebalance .*→' "$log" 2>/dev/null | tail -n 1 || true)"
+       case "$line" in *"→ "*) to="${line##*→ }"; to="${to%% *}" ;; esac
+       cmd_notify "rebalanced${to:+ to $to}" --kind info --target "$_b_pane" >/dev/null 2>&1 ;;
+    3) _b_next=$((now + 120)) ;;     # a dead dashboard is asked every 2 min, not every tick
+  esac
+  _b_worker=0
+  _reb_write "$f"
+  return 1
+}
+# $1=sockhash $2=socket $3=now $4=the panes read idle this tick and the last
+_reb_arm() {
+  local sh="$1" sock="$2" now="$3" idle="$4" f="$ANU_NOTIFY_DIR/b_$1"
+  _reb_reap "$f" "$sh" "$now" && return 0
+  [ -n "${idle// /}" ] || return 0
+  [ "$now" -ge "$_b_next" ] || return 0
+  local interval="${ANU_REBALANCE_INTERVAL:-30}"
+  case "$interval" in ''|*[!0-9]*) interval=30 ;; esac
+  # The gate: ON unless it reads 0 — `tmux set -g @anu_rebalance 0` pauses it.
+  if [ "$(tmux show-options -gqv @anu_rebalance 2>/dev/null || true)" = 0 ]; then
+    _b_next=$((now + interval)); _reb_write "$f"; return 0
+  fi
+  local pid account session provider need box reb_at rotating seen key val
+  local fetched expires best rest clients="" clients_read=0 ids=" " act cp in_use rf bin_rc
+  local -A rank=()
+  while IFS='|' read -r pid account session provider need box reb_at rotating seen; do
+    [ -n "$pid" ] || continue
+    case "$ids" in *" $pid "*) continue ;; esac     # linked sessions repeat a pane
+    ids="$ids$pid "
+    case " $idle " in *" $pid "*) : ;; *) continue ;; esac
+    # Every refusal below is one the verb would make anyway, repeated here
+    # only so the common answers cost a compare instead of a process.
+    [ -n "$account" ] && [ -n "$session" ] || continue
+    [ "$box" = 1 ] && continue
+    _reb_recent "$pid" "$now" && continue
+    case "$reb_at" in ''|*[!0-9]*) : ;;
+      *) [ $((now - reb_at)) -ge 0 ] && [ $((now - reb_at)) -lt 21600 ] && continue ;; esac
+    case "$rotating" in ''|*[!0-9]*) : ;;
+      *) [ $((now - rotating)) -ge 0 ] && [ $((now - rotating)) -lt 1800 ] && continue ;; esac
+    rf="$ANU_NOTIFY_DIR/r_${sh}_${pid#%}"            # a rotation in flight owns the pane
+    if [ -e "$rf" ]; then _rot_read "$rf"; [ "$_r_worker" = 0 ] || continue; fi
+    [ -n "$provider" ] || provider=claude
+    [ -n "$need" ] || need=any
+    [ "$provider" = codex ] && need=any
+    key="$provider"; [ "$need" = any ] || key="${provider}_$need"
+    [ -n "${rank[$key]+x}" ] || rank[$key]="$(tmux show-options -gqv "@anu_rebalance_rank_$key" 2>/dev/null || true)"
+    val="${rank[$key]}"; fetched=""; expires=""; best=""; rest=""
+    [ -n "$val" ] && read -r fetched expires best rest <<< "$val"
+    case "$fetched" in ''|*[!0-9]*) fetched=0 ;; esac
+    case "$expires" in ''|*[!0-9]*) expires=0 ;; esac
+    # A fresh ranking answers two cases on the spot; a stale or missing one
+    # is the worker's to refresh.
+    if [ -n "$rest" ] && [ "$now" -ge "$fetched" ] && [ "$now" -lt "$expires" ]; then
+      [ "$best" = "$account" ] && continue
+      [ "$seen" = "$fetched $account" ] && continue
+    fi
+    # The pane a human is typing in: an attached client's current pane, with
+    # a key in the last 5 min. Read once, and only once a pane gets this far.
+    if [ "$clients_read" = 0 ]; then
+      clients="$(tmux list-clients -F '#{client_activity}|#{pane_id}' 2>/dev/null || true)"; clients_read=1
+    fi
+    in_use=0
+    while IFS='|' read -r act cp; do
+      [ "$cp" = "$pid" ] || continue
+      case "$act" in ''|*[!0-9]*) continue ;; esac
+      [ $((now - act)) -lt 300 ] && in_use=1
+    done <<< "$clients"
+    [ "$in_use" = 1 ] && continue
+    bin_rc=0
+    _rot_bin || bin_rc=$?
+    if [ "$bin_rc" -ne 0 ] || [ -z "$_r_bin" ]; then
+      if [ "$_b_nobin" != 1 ]; then
+        printf '[%s] no anu-account on PATH (set ANU_ACCOUNT_BIN) — not rebalancing\n' "$now" >> "$(_rot_log "$sh" "$pid")" 2>/dev/null
+        _b_nobin=1
+      fi
+      break
+    fi
+    _b_nobin=0
+    _b_worker="$(_reb_dispatch "$_r_bin" "$pid" "$(_rot_log "$sh" "$pid")" "$f.rc" "$sock")"
+    _b_started="$now"; _b_pane="$pid"
+    _reb_write "$f"
+    return 0
+  done <<PANES
+$(tmux list-panes -a -F '#{pane_id}|#{@anu_account}|#{@anu_session}|#{@anu_provider}|#{@anu_need}|#{@anu_box}|#{@anu_rebalance_at}|#{@anu_rotating}|#{@anu_rebalance_seen}' 2>/dev/null || true)
+PANES
+  _b_next=$((now + interval)); _reb_write "$f"
+}
+
+# One poll: classify each agent pane and drive its state machine. "Done" fires once
+# per busy->idle epoch, debounced; "input" fires once on entering an approval. All
+# spam guards (focus/cooldown/grouping) live in cmd_notify; here we own the
+# transition + the per-epoch dedup + opt-out + call-suppression.
+_watch_tick() {
+  local sock="${1:-}" sh; sh="$(_socket_hash "$sock")"
+  _notify_dir
+  local now pid st f; now="$(_now)"
+  local last_state busy_started idle_since idle_confirm done_pending seen_busy _ls
+  # The unattended-rotation gate, read ONCE per tick (a tmux option, not a
+  # per-pane one) — off unless someone set it; see _rot_step and tmux.conf.
+  local autorotate; autorotate="$(tmux show-options -gqv @anu_autorotate 2>/dev/null || true)"
+  # The Codex arm's own gate, read once per tick for the same reason. It gates
+  # only the DISPATCH — the rollout scan below runs whatever it says, so a
+  # Codex wall is always detected, stamped and visible to `pane state`.
+  local codex_autorotate; codex_autorotate="$(tmux show-options -gqv @anu_codex_autorotate 2>/dev/null || true)"
+  # Panes read idle on this tick AND the last — the rebalance arm's only candidates.
+  local reb_idle=""
+  local panes; panes="$(_watch_panes)"
+  for pid in $panes; do
+    # The Codex wall scan is a PRE-step, before the classifier and regardless
+    # of what the screen says: the record it looks for is the only evidence a
+    # usage-limit turn leaves, and `_classify` reads `limited` off the stamp it
+    # writes. A pane that is not `@anu_provider codex` returns from it at once.
+    _codex_scan "$pid" "$now" || true
+    st="$(_classify "$pid")"
+    # Reap first, and for EVERY pane: a successful rotation is what takes the
+    # pane out of `limited`, so the news has to be collected here, not in the
+    # arm below (which by then no longer runs for this pane).
+    _rot_reap "$sh" "$pid" "$now" || true
+    f="$(_watch_pane_file "$sh" "$pid")"
+    if [ -r "$f" ]; then
+      read -r last_state busy_started idle_since idle_confirm done_pending seen_busy _ls < "$f"
+    else
+      last_state=none busy_started=0 idle_since=0 idle_confirm=0 done_pending=0 seen_busy=0
+    fi
+    case "$st" in
+      busy)
+        if [ "$last_state" != busy ]; then busy_started="$now"; idle_since=0; idle_confirm=0; done_pending=1; _need_clear "$pid"; fi
+        seen_busy=1; last_state=busy ;;
+      approval)
+        idle_confirm=0; done_pending=0   # a blocked turn is not "done"; epoch ineligible
+        if [ "$last_state" != approval ]; then
+          _need_set "$pid" input
+          cmd_notify "needs your input" --kind input --target "$pid" >/dev/null 2>&1
+        fi
+        last_state=approval ;;
+      limited)
+        # A provider usage wall: neither busy nor idle. The turn DIED at the
+        # wall, so — exactly like an approval — it is not "done" and its epoch
+        # is ineligible; the busy epoch itself (busy_started/seen_busy) is left
+        # alone, because a rotation resumes that same turn rather than starting
+        # a new one. Everything about the rotation lives in a separate file, so
+        # the 7 fields written below are untouched by the arm.
+        idle_confirm=0; done_pending=0
+        _rot_step "$sh" "$pid" "$autorotate" "$now" "$sock" "$codex_autorotate"
+        last_state=limited ;;
+      idle)
+        [ "$last_state" = idle ] && reb_idle="$reb_idle $pid"
+        if [ "$last_state" = busy ]; then idle_since="$now"; idle_confirm=1
+        elif [ "$done_pending" = 1 ]; then idle_confirm=$((idle_confirm + 1)); fi
+        if [ "$done_pending" = 1 ] && [ "$seen_busy" = 1 ] && [ "$idle_confirm" -ge 2 ] \
+           && [ $((idle_since - busy_started)) -ge 3 ]; then
+          local optout lastcall suppress_call=0
+          optout="$(tmux show-options -pqv -t "$pid" @anu_notify_done 2>/dev/null)"
+          lastcall="$(tmux show-options -pqv -t "$pid" @anu_last_call_at 2>/dev/null)"
+          [ -n "$lastcall" ] && [ "$lastcall" -ge "$busy_started" ] 2>/dev/null && suppress_call=1
+          if [ "$optout" != off ] && [ "$suppress_call" = 0 ]; then
+            _need_set "$pid" done
+            cmd_notify "Done" --kind done --target "$pid" >/dev/null 2>&1
+          fi
+          done_pending=0
+        fi
+        last_state=idle ;;
+    esac
+    # The wall is over (rotated, reset, or dismissed): drop this wall's
+    # confirmation count, its one-notification flag and its backoff.
+    [ "$st" = limited ] || _rot_reset "$sh" "$pid"
+    printf '%s %s %s %s %s %s %s\n' "$last_state" "$busy_started" "$idle_since" "$idle_confirm" "$done_pending" "$seen_busy" "$now" > "$f"
+  done
+  # …and every pane with a rotation still recorded in flight, WHATEVER it is
+  # running. A relaunch that died leaves its pane at a bare shell, which the
+  # walk above never enumerates — so its worker was never reaped, the
+  # "rotation failed" notice waited until something else made the pane an
+  # agent pane again (85 s, and after the human had fixed it by hand, in the
+  # 2026-09-23 drill). Reap only: a pane at a shell is not classified, and
+  # nothing is ever typed into it from here.
+  local rf rest seen=" $(printf '%s ' $panes)"
+  for rf in "$ANU_NOTIFY_DIR"/r_"$sh"_*; do
+    [ -e "$rf" ] || continue
+    rest="${rf##*/}"; rest="${rest#r_${sh}_}"
+    case "$rest" in ''|*[!0-9]*) continue ;; esac     # .log/.rc/.part, another socket's
+    pid="%$rest"
+    case "$seen" in *" $pid "*) continue ;; esac
+    _rot_read "$rf"; [ "$_r_worker" != 0 ] || continue
+    _rot_reap "$sh" "$pid" "$now" || true
+  done
+  # The rebalance arm, last: after every pane's own state machine and the
+  # limited arm, so a wall is always handled before a budget is.
+  _reb_arm "$sh" "$sock" "$now" "$reb_idle"
+}
+
+# Drop state files for panes that no longer exist.
+_watch_gc() {
+  local sock="${1:-}" sh; sh="$(_socket_hash "$sock")"
+  local present; present=" $(_watch_panes | tr '\n' ' ') "   # space-bounded for exact-token match
+  local f base pid
+  for f in "$ANU_NOTIFY_DIR"/w_"$sh"_*; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"; pid="%${base##*_}"
+    case "$present" in *" $pid "*) : ;; *) rm -f "$f" ;; esac   # %1 must not match %10
+  done
+  # The rotation arm's own files: r_<sock>_<pid>, plus its .log and .rc
+  # siblings. These live as long as the PANE does, not as long as it runs an
+  # agent: mid-rotation — or parked after a relaunch died — the pane is a bare
+  # shell, and dropping its in-flight record there would lose the reap.
+  local exist; exist=" $(_all_panes | cut -f1 | tr '\n' ' ') "
+  for f in "$ANU_NOTIFY_DIR"/r_"$sh"_*; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"; base="${base%.part}"; base="${base%.log}"; base="${base%.rc}"
+    base="${base#r_${sh}_}"
+    case "$base" in ''|*[!0-9]*) continue ;; esac
+    pid="%$base"
+    case "$exist" in *" $pid "*) : ;; *) rm -f "$f" ;; esac
+  done
+}
+
+# Idempotently ensure a daemon owns this socket (pid file + atomic mkdir lock).
+_watch_ensure() {
+  local sock="${1:-}" nospawn="${2:-0}" sh; sh="$(_socket_hash "$sock")"
+  _notify_dir
+  local pidf="$ANU_NOTIFY_DIR/watchd-$sh.pid" lock="$ANU_NOTIFY_DIR/watchd-$sh.lock" p
+  if [ -r "$pidf" ]; then
+    p="$(cat "$pidf" 2>/dev/null)"
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then printf 'pane: watchd already running (pid %s)\n' "$p"; return 0; fi
+  fi
+  if ! mkdir "$lock" 2>/dev/null; then printf 'pane: watchd is starting elsewhere\n'; return 0; fi
+  if [ "$nospawn" = 1 ]; then rmdir "$lock" 2>/dev/null || true; return 0; fi
+  local args=""; [ -n "$sock" ] && args="--socket $sock"
+  nohup "$0" watchd $args >/dev/null 2>&1 &
+  printf '%s' "$!" > "$pidf"
+  rmdir "$lock" 2>/dev/null || true
+  printf 'pane: watchd started (pid %s)\n' "$(cat "$pidf" 2>/dev/null)"
+}
+
+# The daemon loop: poll every 2s; exit after the server has been unreachable a
+# few times (so a killed tmux server doesn't leave an orphan).
+_watch_loop() {
+  local sock="${1:-}" once="${2:-0}" sh; sh="$(_socket_hash "$sock")"
+  local pidf="$ANU_NOTIFY_DIR/watchd-$sh.pid" fails=0 owner
+  _notify_dir
+  # Singleton: never run a SECOND loop if a live sibling already owns this socket's pidfile.
+  # _watch_ensure's lock guards the ensure path, but a start that races it (or a stray manual
+  # launch) could otherwise leave two persistent loops; this makes the loop self-enforcing.
+  if [ -r "$pidf" ]; then
+    owner="$(cat "$pidf" 2>/dev/null)"
+    [ -n "$owner" ] && [ "$owner" != "$$" ] && kill -0 "$owner" 2>/dev/null && return 0
+  fi
+  printf '%s' "$$" > "$pidf" 2>/dev/null
+  # Only clean OUR OWN pidfile. The EXIT trap covers a kill mid-loop (still in scope then); the
+  # explicit cleanup below covers a clean return (--once / tmux-gone), where the EXIT trap could
+  # not see the local $pidf and would trip `set -u`.
+  trap '[ "$(cat "$pidf" 2>/dev/null)" = "$$" ] && rm -f "$pidf" 2>/dev/null || true' EXIT
+  while :; do
+    if tmux list-panes -a >/dev/null 2>&1; then fails=0; _watch_tick "$sock"
+    else fails=$((fails + 1)); [ "$fails" -ge 5 ] && break; fi
+    [ "$once" = 1 ] && break          # --once: guard + a single tick, then exit (bounded; for tests/ops)
+    sleep 2 2>/dev/null || true
+  done
+  [ "$(cat "$pidf" 2>/dev/null)" = "$$" ] && rm -f "$pidf" 2>/dev/null
+  trap - EXIT
+}
+
+cmd_watchd() {
+  local mode=loop sock="" nospawn=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tick)     mode=tick; shift ;;
+      --once)     mode=once; shift ;;
+      --gc)       mode=gc; shift ;;
+      --ensure)   mode=ensure; shift ;;
+      --no-spawn) nospawn=1; shift ;;
+      --socket)   sock="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  # --socket SELECTS the server, it does not just name the state files: every
+  # tmux call below is a bare `tmux`. Started by tmux's own run-shell $TMUX
+  # already agreed; run by hand from inside another server it did not, and
+  # the tick scanned and stamped THAT server's panes under this one's names.
+  # A daemon has no pane of its own either, so none is ever left out.
+  _use_socket "$sock"
+  unset TMUX_PANE
+  case "$mode" in
+    tick)   _watch_tick "$sock" ;;
+    once)   _watch_loop "$sock" 1 ;;
+    gc)     _watch_gc "$sock" ;;
+    ensure) _watch_ensure "$sock" "$nospawn" ;;
+    loop)   _watch_loop "$sock" ;;
+  esac
+}
+
+# `pane needs [--json]` — the who-needs-you feed. Reads the needs ledger and emits, per
+# pane currently waiting on the human, one row: pane id, kind (call|input|done), reason
+# (call only), since (epoch s), session, window (idx:name). Drops dead panes (cleaning
+# their stale records) and skips panes the human is already on. Ordered call > input >
+# done, then oldest-waiting first. --json is the stable contract viz consumes each tick.
+cmd_needs() {
+  local json=0 a; for a in "$@"; do [ "$a" = --json ] && json=1; done
+  local tab; tab="$(printf '\t')"
+  local rows="" f base pid kind since reason sess win rank key n
+  key="$(_sock_key)"
+  if [ -d "$ANU_NOTIFY_DIR" ]; then
+    # THIS server's records only: a %N is resolved against this server, so
+    # another server's record would be misread as (or dropped for) ours.
+    for f in "$ANU_NOTIFY_DIR"/need_"$key"_*; do
+      [ -e "$f" ] || continue
+      base="${f##*/}"; n="${base#need_${key}_}"
+      case "$n" in ''|*[!0-9]*) continue ;; esac
+      pid="%$n"
+      read -r kind since reason < "$f" 2>/dev/null || { rm -f "$f"; continue; }
+      case "$kind" in call|input|done) ;; *) rm -f "$f"; continue ;; esac
+      sess="$(tmux display-message -p -t "$pid" '#{session_name}' 2>/dev/null)"
+      [ -n "$sess" ] || { rm -f "$f"; continue; }   # pane gone -> drop the stale record
+      _is_focused "$pid" && continue                # human already here -> not "needs you"
+      win="$(tmux display-message -p -t "$pid" '#{window_index}:#{window_name}' 2>/dev/null)"
+      rank="$(_need_rank "$kind")"
+      rows="${rows}${rank}${tab}${since:-0}${tab}${pid}${tab}${kind}${tab}${sess}${tab}${win}${tab}${reason}
+"
+    done
+  fi
+  [ -n "$rows" ] && rows="$(printf '%s' "$rows" | sort -t"$tab" -k1,1nr -k2,2n)"
+  if [ "$json" = 0 ]; then
+    [ -n "$rows" ] || { printf 'no panes need you\n'; return 0; }
+    while IFS="$tab" read -r rank since pid kind sess win reason; do
+      [ -n "$pid" ] || continue
+      printf '%-6s %-5s %-16s %s\n' "$kind" "$pid" "$win" "$reason"
+    done <<EOF
+$rows
+EOF
+    return 0
+  fi
+  local out="[" first=1
+  while IFS="$tab" read -r rank since pid kind sess win reason; do
+    [ -n "$pid" ] || continue
+    [ "$first" = 1 ] && first=0 || out="$out,"
+    out="$out{\"pane\":\"$pid\",\"kind\":\"$kind\",\"reason\":\"$(_json_str "$reason")\",\"since\":${since:-0},\"session\":\"$(_json_str "$sess")\",\"window\":\"$(_json_str "$win")\"}"
+  done <<EOF
+$rows
+EOF
+  printf '%s]\n' "$out"
+}
+
+main() {
+  local verb="${1:-help}"; [ $# -eq 0 ] || shift
+  case "$verb" in
+    send|state|read|wait|ls|id|status|focus|notify|call|needs|watchd|reply) "cmd_$verb" "$@" ;;
+    help|-h|--help) sed -n '2,4p' "${BASH_SOURCE[0]}" ;;
+    *) _die "unsupported observer operation: $verb" ;;
+  esac
+}
+main "$@"

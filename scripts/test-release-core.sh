@@ -14,6 +14,8 @@ python3 "$ROOT/scripts/test-homi-interface.py"
 python3 "$ROOT/scripts/test-homi-seat-unit.py"
 python3 "$ROOT/scripts/test-homi-control-token.py"
 python3 "$ROOT/scripts/test-provider-qualification.py"
+python3 "$ROOT/scripts/test-account-boundaries.py"
+bash "$ROOT/scripts/test-account-module.sh"
 bash "$ROOT/scripts/test-native-fixtures.sh"
 bash "$ROOT/scripts/test-homi-adopt.sh"
 for suite in homi-seat-menu homi-core homi-seat homi-spawn homi-ask homi-link homi-seat-link homi-pair homi-connect; do
