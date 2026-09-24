@@ -43,133 +43,19 @@ homi_adopt() {
   python3 "$HOMI_PY" call adopt "$@"
 }
 
-# ---- persistence: launchd (macOS) / systemd --user (linux) -------------------
-#
-# The homi is infrastructure: RunAtLoad + KeepAlive mean it survives
-# reboots, sleeps, and kill -9. `pm stop` on a managed daemon just gets it
-# respawned — that is the point; use `pm uninstall` to actually remove it.
-# The device name and state paths are resolved AT INSTALL TIME and baked into
-# the unit, so a launchd run (minimal PATH, no tailscale) keeps the same
-# identity as an interactive one.
-
+# Persistence belongs to the package installer's ownership ledger. Keep the
+# historical verbs as explicit refusals: their old fixed-label implementation
+# could replace another installation's service, even with an isolated HOME.
+# In particular, daemon-only uninstall must never silently remove client
+# integrations through the combined `homi uninstall` command.
 homi_install() {
-  comm_need_python
-  local label="${HOMI_LABEL:-com.communicate.homi}"
-  local state; state="$(homi_state_dir)"
-  mkdir -p "$state"
-  local selfdev="${HOMI_SELF:-$(python3 "$HOMI_PY" selfname)}"
-  [ -n "$selfdev" ] || die "could not resolve a device name"
-  case "$(uname -s)" in
-    Darwin) _homi_install_launchd "$label" "$state" "$selfdev";;
-    Linux)  _homi_install_systemd "$state" "$selfdev";;
-    *) die "unsupported platform: $(uname -s)";;
-  esac
-}
-
-_homi_install_launchd() {
-  local label="$1" state="$2" selfdev="$3"
-  local plist="$HOME/Library/LaunchAgents/$label.plist"
-  # A foreground daemon would fight the managed one for the singleton lock.
-  python3 "$HOMI_PY" call stop >/dev/null 2>&1 || true
-  sleep 0.5
-  mkdir -p "$HOME/Library/LaunchAgents"
-  local extra=""
-  [ -n "${HOMI_SOCK_DIR:-}" ] && extra="$extra
-    <key>HOMI_SOCK_DIR</key><string>$HOMI_SOCK_DIR</string>"
-  [ -n "${HOMI_SESSIONS_DIR:-}" ] && extra="$extra
-    <key>HOMI_SESSIONS_DIR</key><string>$HOMI_SESSIONS_DIR</string>"
-  cat > "$plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$COMM_HOME/bin/communicate</string>
-    <string>homi</string>
-    <string>__daemon</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>COMM_STATE</key><string>${COMM_STATE:-$HOME/.local/state/communicate}</string>
-    <key>HOMI_SELF</key><string>$selfdev</string>$extra
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <!-- A LaunchAgent with no ProcessType is spawned as a DAEMON, which means
-       BACKGROUND QoS, and every process it spawns inherits that class. There
-       is no error and no log line; work simply takes several times longer.
-       Measured on this machine: identical CPU-bound work 0.34s at default
-       against 1.23-1.70s under background QoS, and the sibling board daemon
-       ran its router in 46s as a child of launchd versus 4.5s from a shell.
-       The homi is latency-facing infrastructure - a person waits on the other
-       end of mail delivery, a link redial and an ask - so it is Interactive.
-       Verify with: launchctl print gui/$UID/<label> | grep 'spawn type'
-       (the plist is what we wrote; launchd is what actually runs). -->
-  <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>$state/launchd.log</string>
-  <key>StandardErrorPath</key><string>$state/launchd.log</string>
-</dict>
-</plist>
-EOF
-  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$plist" || die "launchctl bootstrap failed"
-  local i
-  for i in $(seq 1 50); do
-    python3 "$HOMI_PY" call status >/dev/null 2>&1 && { ok "homi installed ($label, device=$selfdev)"; return 0; }
-    sleep 0.2
-  done
-  die "installed but not answering — see $state/launchd.log"
-}
-
-_homi_install_systemd() {
-  local state="$1" selfdev="$2"
-  local unitdir="$HOME/.config/systemd/user"
-  mkdir -p "$unitdir"
-  cat > "$unitdir/communicate-homi.service" <<EOF
-[Unit]
-Description=communicate homi (agent fabric)
-
-[Service]
-ExecStart=$COMM_HOME/bin/communicate homi __daemon
-Environment=COMM_STATE=${COMM_STATE:-%h/.local/state/communicate}
-Environment=HOMI_SELF=$selfdev
-${HOMI_SOCK_DIR:+Environment=HOMI_SOCK_DIR=$HOMI_SOCK_DIR}
-${HOMI_SESSIONS_DIR:+Environment=HOMI_SESSIONS_DIR=$HOMI_SESSIONS_DIR}
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-EOF
-  python3 "$HOMI_PY" call stop >/dev/null 2>&1 || true
-  systemctl --user daemon-reload || die "systemctl daemon-reload failed"
-  systemctl --user enable --now communicate-homi.service \
-    || die "systemctl enable --now failed"
-  local i
-  for i in $(seq 1 50); do
-    python3 "$HOMI_PY" call status >/dev/null 2>&1 && { ok "homi installed (systemd --user, device=$selfdev)"; return 0; }
-    sleep 0.2
-  done
-  die "installed but not answering — check: journalctl --user -u communicate-homi"
+  printf '%s\n' "communicate: legacy daemon install is disabled; use 'homi setup --no-clients --service' for ownership-aware persistence (preview with --dry-run)" >&2
+  return 1
 }
 
 homi_uninstall() {
-  local label="${HOMI_LABEL:-com.communicate.homi}"
-  case "$(uname -s)" in
-    Darwin)
-      launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-      rm -f "$HOME/Library/LaunchAgents/$label.plist"
-      ok "homi uninstalled ($label)";;
-    Linux)
-      systemctl --user disable --now communicate-homi.service >/dev/null 2>&1 || true
-      rm -f "$HOME/.config/systemd/user/communicate-homi.service"
-      systemctl --user daemon-reload >/dev/null 2>&1 || true
-      ok "homi uninstalled (systemd --user)";;
-    *) die "unsupported platform: $(uname -s)";;
-  esac
+  printf '%s\n' "communicate: legacy daemon uninstall is disabled; inspect 'homi doctor', then preview 'homi uninstall --dry-run'. Managed uninstall also detaches owned client integrations; it preserves identity state. Existing unowned legacy units require explicit migration." >&2
+  return 1
 }
 
 # Files-as-API: the inbox is a plain JSONL file; reading it needs no daemon.

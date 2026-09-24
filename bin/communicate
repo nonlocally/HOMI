@@ -54,6 +54,16 @@ while [ -L "$_SELF" ]; do
 done
 COMM_HOME="$(cd "$(dirname "$_SELF")/.." && pwd)"
 export COMM_HOME
+# Reject retired persistence verbs before common.sh initializes runtime state.
+# The same refusals remain in homi_cmd for callers sourcing the native adapter.
+if [ "${1:-}" = homi ]; then
+  case "${2:-}" in
+    install|uninstall)
+      source "$COMM_HOME/lib/homi.sh"
+      "homi_$2" "${@:3}"
+      exit $?;;
+  esac
+fi
 # shellcheck source=lib/common.sh
 source "$COMM_HOME/lib/common.sh"
 # shellcheck source=lib/claude.sh
