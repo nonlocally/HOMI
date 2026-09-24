@@ -683,7 +683,14 @@ class DeviceWorker:
 # Only two source files travel; no checkout, token, auth file or TLS private key.
 BOOTSTRAP = """import base64,json,os,pathlib,sys,tempfile
 os.umask(0o077)
-files=json.loads(sys.stdin.readline())
+header=bytearray()
+while len(header)<=2*1024*1024:
+ byte=os.read(0,1)
+ if not byte: raise SystemExit('incomplete worker bundle header')
+ if byte==b'\\n': break
+ header.extend(byte)
+else: raise SystemExit('worker bundle header exceeds 2 MiB')
+files=json.loads(header)
 assert set(files)=={'qualify-provider-fleet.py','qualify-provider.py'}
 work=pathlib.Path(tempfile.mkdtemp(prefix='homi-fleet-',dir='/tmp'))
 for name,data in files.items(): (work/name).write_bytes(base64.b64decode(data,validate=True))
@@ -1233,6 +1240,27 @@ def self_test(runtime, archive=None, checksum=None):
                 self.assertFalse(work.exists())
                 if request:
                     self.assertFalse(json.loads(result.stdout)["ok"])
+
+        def test_actual_bootstrap_preserves_immediately_pipelined_configure(self):
+            # One pipe write includes both bundle and configure. A buffered
+            # header reader can consume the RPC into a buffer lost by execv.
+            # Reject before HOME lookup: this exercises no auth or provider.
+            request = {"id": 314159, "method": "configure", "params": {
+                "spec": {"provider": "invalid-pipeline-fixture", "timeout": 30}}}
+            data = json.dumps(bundle_files()) + "\n" + json.dumps(request) + "\n"
+            result = subprocess.run([sys.executable, "-u", "-c", BOOTSTRAP], input=data,
+                                    text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"id": request["id"], "ok": False, "error": "invalid provider/timeout"})
+
+        def test_bootstrap_rejects_unterminated_and_oversized_headers(self):
+            for data, error in (("{}", "incomplete worker bundle header"),
+                                (" " * (2 * 1024 * 1024 + 1), "worker bundle header exceeds 2 MiB")):
+                result = subprocess.run([sys.executable, "-u", "-c", BOOTSTRAP], input=data,
+                                        text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(error, result.stderr)
 
         def test_home_cleanup_requires_ownership_lease(self):
             with tempfile.TemporaryDirectory(prefix="homi-fleet-cleanup-") as tmp:
