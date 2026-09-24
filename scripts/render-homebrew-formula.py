@@ -15,8 +15,15 @@ TEMPLATE = '''class Homi < Formula
   depends_on "node"
   depends_on "python@3.14"
 
+  # Every runtime file is checksummed; wrappers provide the dependency PATH.
+  # Homebrew's shebang rewrite would invalidate the installed archive.
+  skip_clean "libexec"
+
   def install
     libexec.install Dir["*"]
+    # Homebrew moves metafiles out of libexec when the prefix has none.
+    # Expose the license at the prefix while retaining the immutable runtime.
+    prefix.install_symlink libexec/"LICENSE"
     (bin/"homi").write_env_script libexec/"bin/homi",
       PATH: "#{Formula["node"].opt_bin}:#{Formula["python@3.14"].opt_bin}:#{Formula["bash"].opt_bin}:$PATH"
     (bin/"communicate").write_env_script libexec/"bin/communicate",
@@ -42,6 +49,11 @@ TEMPLATE = '''class Homi < Formula
   end
 
   test do
+    require "json"
+    require "digest"
+    JSON.parse((libexec/"release.json").read).fetch("files").each do |name, sha|
+      assert_equal sha, Digest::SHA256.file(libexec/name).hexdigest
+    end
     assert_match "@VERSION@", shell_output("#{bin}/homi version")
     assert_match "bus", shell_output("#{bin}/homi --help")
     ENV["HOME"] = testpath
