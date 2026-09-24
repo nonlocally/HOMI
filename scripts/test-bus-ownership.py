@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -265,6 +266,66 @@ class OwnershipTests(unittest.TestCase):
             self.denied('create', code='conflict', bus='alice-private')
             self.assertNotIn('alice-private', self.buses())
             self.b = old_broker
+
+    def test_released_broker_rollback_and_reupgrade_preserve_owned_bus_data(self):
+        # Exact published v0.4.0 source, kept locally so shallow CI checkouts
+        # exercise the real old broker without network or Git-history access.
+        fixture = Path(__file__).parent / 'fixtures/bus_broker_v04.py'
+        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                         'bb5aeb1cf17dad3c36ab84c346c0bbdf8f8285c5b6ee8a21e51c329f9ef7ea63')
+        spec = importlib.util.spec_from_file_location('released_bus_broker_v04', fixture)
+        released = importlib.util.module_from_spec(spec)
+        prior_bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(released)
+        finally:
+            sys.dont_write_bytecode = prior_bytecode
+
+        def old_call(broker, token, op, **fields):
+            result = broker.handle(token, dict(fields, op=op))
+            self.assertTrue(result.get('ok'), result)
+            return result
+
+        with tempfile.TemporaryDirectory(prefix='bus-runtime-roundtrip-') as state:
+            old = released.Broker(state, clock=lambda: self.now)
+            old_call(old, old.admin_token, 'create', bus='old-private')
+            self.b = Broker(state, clock=lambda: self.now)
+            for reader in self.sessions:
+                digest = self.sessions[reader][1]
+                self.sessions[reader] = (self.b.browser_session(reader, digest)['token'], digest)
+            self.call('create', bus='account-private')
+            self.call('member_add', bus='account-private', user='bob')
+            alice = self.enroll('account-private')
+            bob = self.enroll('account-private', 'gh-b', 'bob')
+            for device in (alice, bob):
+                device['agent'] = self.call('register', device['token'], bus='account-private',
+                                           session_key='roundtrip', name=device['user'])['id']
+            sent = self.call('send', alice['token'], bus='account-private', sender=alice['agent'],
+                             target=bob['agent'], message='Persist through rollback and re-upgrade')
+            pending_invite = self.call('invite', 'gh-b', bus='account-private')['invite']
+            # Startup, positional bus creation and named-column invitation
+            # inserts all use the unmodified released implementation.
+            rolled = released.Broker(state, clock=lambda: self.now)
+            with rolled._connect() as db:
+                self.assertEqual([row[1] for row in db.execute('PRAGMA table_info(buses)')], ['name', 'visibility'])
+            self.assertEqual(rolled.admin_token, old.admin_token)
+            old_call(rolled, rolled.admin_token, 'create', bus='created-during-rollback')
+            invite = old_call(rolled, rolled.admin_token, 'invite', bus='created-during-rollback', user='bob')['invite']
+            old_call(rolled, bob['token'], 'redeem', invite=invite, device='existing-bob')
+            leased = old_call(rolled, bob['token'], 'poll', agent=bob['agent'])['messages'][0]
+            self.assertEqual(leased['message'], 'Persist through rollback and re-upgrade')
+            old_call(rolled, bob['token'], 'ack', agent=bob['agent'], id=sent['id'], lease=leased['lease'], status='delivered')
+
+            self.b = Broker(state, clock=lambda: self.now)
+            owned = self.buses()['account-private']
+            self.assertEqual(owned['owner_user'], 'alice')
+            self.assertEqual(owned['members'], [{'user': 'alice', 'role': 'owner'}, {'user': 'bob', 'role': 'member'}])
+            self.assertIsNone(self.buses('admin')['created-during-rollback']['owner_user'])
+            self.assertEqual(set(self.buses(bob['token'])), {'account-private', 'created-during-rollback'})
+            self.assertEqual(self.call('receipt', alice['token'], id=sent['id'])['status'], 'delivered')
+            self.call('redeem', '', invite=pending_invite, device='new-bob')
+            self.denied('create', 'gh-b', code='conflict', bus='account-private')
 
     def test_http_rejects_forged_gateway_context_and_cross_origin_mutation(self):
         server = BusHTTPServer(('127.0.0.1', 0), handler_factory(self.b))
