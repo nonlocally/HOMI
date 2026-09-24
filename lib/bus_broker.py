@@ -267,6 +267,10 @@ class Broker:
                   created_at REAL NOT NULL, expires_at REAL NOT NULL,
                   lease TEXT, lease_until REAL, updated_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS message_delivery ON messages(target,status,created_at);
+                CREATE TABLE IF NOT EXISTS reply_requests(
+                  sender TEXT NOT NULL, message TEXT NOT NULL, request_id TEXT NOT NULL,
+                  content_hash TEXT NOT NULL, result TEXT NOT NULL, created_at REAL NOT NULL,
+                  PRIMARY KEY(sender,message,request_id));
                 CREATE TABLE IF NOT EXISTS human_chats(
                   id TEXT PRIMARY KEY, identity TEXT NOT NULL, bus TEXT NOT NULL REFERENCES buses(name),
                   agent TEXT NOT NULL REFERENCES agents(id), created_at REAL NOT NULL, updated_at REAL NOT NULL,
@@ -564,6 +568,7 @@ class Broker:
         return row
 
     def _expire(self, db, now):
+        db.execute("DELETE FROM reply_requests WHERE created_at<?", (now - RECEIPT_RETENTION,))
         db.execute("""UPDATE human_chat_messages SET status='expired',detail='message expired',updated_at=?,closed=1
                       WHERE role='user' AND status IN ('accepted','leased') AND expires_at<=?""", (now, now))
         db.execute("UPDATE human_chat_messages SET closed=1 WHERE role='user' AND expires_at<=?", (now,))
@@ -973,8 +978,8 @@ class Broker:
         session_key = _text(r.get("session_key"), "session_key", 256)
         name = _text(r.get("name"), "name", 128)
         kind = r.get("kind", "claude")
-        if kind not in ("claude", "codex"):
-            raise BusError("kind must be claude or codex")
+        if kind not in ("claude", "codex", "service"):
+            raise BusError("kind must be claude, codex or service")
         description = _text(r.get("description", ""), "description", 2048, optional=True)
         status = r.get("status", "queueable" if kind == "codex" else "live")
         if status not in ("live", "queueable", "offline"):
@@ -1370,6 +1375,29 @@ class Broker:
         return self._enqueue(db, sender["id"], target, bus, r.get("message"), conversation, expires_at, now)
 
     def _op_reply(self, db, p, r, now):
+        # Atomic with enqueue: a lost HTTP response must not duplicate an answer.
+        # Existing clients omit request_id and retain their original semantics.
+        sender = self._owned(db, p, r.get("sender"))
+        if any(field in r for field in ("target", "bus", "conversation", "chat", "identity")):
+            raise BusError("reply destination and bus are fixed by the original message")
+        key = r.get("request_id")
+        if key is None:
+            return self._reply(db, p, r, now)
+        key = _text(key, "reply request id", 128)
+        mid = _text(r.get("id"), "message id", 128)
+        digest = _digest(self._message_content(r.get("message")))
+        previous = db.execute("SELECT * FROM reply_requests WHERE sender=? AND message=? AND request_id=?",
+                              (sender["id"], mid, key)).fetchone()
+        if previous:
+            if previous["content_hash"] != digest:
+                raise BusError("reply request id was reused with different content", "conflict")
+            return json.loads(previous["result"])
+        result = self._reply(db, p, r, now)
+        db.execute("INSERT INTO reply_requests VALUES(?,?,?,?,?,?)",
+                   (sender["id"], mid, key, digest, json.dumps(result), now))
+        return result
+
+    def _reply(self, db, p, r, now):
         sender = self._owned(db, p, r.get("sender"))
         mid = _text(r.get("id"), "message id", 128)
         if mid.startswith("hm_"):
