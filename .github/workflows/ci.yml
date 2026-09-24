@@ -1,0 +1,51 @@
+name: HOMI qualification
+on:
+  pull_request:
+  push:
+    branches: [main, release/homi-public]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/communicate/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install bash tmux jq
+      - run: npm ci --ignore-scripts
+        working-directory: packages/communicate
+      - run: npm run vendor
+        working-directory: packages/communicate
+      - name: Retained core and integration checks
+        run: bash scripts/test-release-core.sh
+      - name: Optional configuration checks
+        run: python3 scripts/test-profiles.py
+      - name: Build immutable runtime
+        run: python3 scripts/build-release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homi-runtime-${{ runner.os }}
+          path: dist/homi-*.tar.gz*
+          if-no-files-found: error
