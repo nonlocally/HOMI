@@ -2,6 +2,9 @@
 # Donor account/observer regressions use only disposable state and command stubs.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for tool in bash python3 jq perl shasum column; do
+  command -v "$tool" >/dev/null || { echo "UNQUALIFIED: account fixture dependency missing: $tool" >&2; exit 127; }
+done
 TEST_ROOT="$(mktemp -d /tmp/homi-accounts.XXXXXX)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/home" "$TEST_ROOT/bin" "$TEST_ROOT/fixtures/bash"

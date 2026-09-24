@@ -199,7 +199,7 @@ assert_contains "$(cat "$LOG")" "ssh usage-host" "…sync to the host still ran"
 # but what a human running this for real would see on their screen ($out).
 assert_contains "$out" "claude-badhost is stored and synced, but registering it on usage-host failed" \
   "…and the printed message says the token IS stored and synced, not just 'failed'"
-assert_contains "$out" 're-run `anu account add badhost`' "…with a concrete remedy: re-run add once the host is fixed"
+assert_contains "$out" 're-run `homi-account add badhost`' "…with a concrete remedy: re-run add once the host is fixed"
 assert_contains "$out" "accounts.json by hand" "…or paste the printed entry in by hand"
 assert_contains "$out" '"id": "claude-badhost"' "…and the entry itself is printed, for pasting"
 install_ssh_stub
@@ -215,7 +215,7 @@ assert_contains "$sync_line" "mv -f" "…atomic tmp+mv on the remote"
 local_cache="$(mktmp)/tokens.json"
 ANU_ACCOUNT_CACHE="$local_cache" "$ACCOUNT" sync local >/dev/null
 assert_file "$local_cache" "sync local writes the local launcher cache (the same ANU_ACCOUNT_CACHE write every sync does — local/self touch no device)"
-assert_eq "600" "$(stat -f %Lp "$local_cache" 2>/dev/null || stat -c %a "$local_cache")" "…mode 0600"
+assert_eq "600" "$(stat -c %a "$local_cache" 2>/dev/null || stat -f %Lp "$local_cache")" "…mode 0600"
 
 t_section "register: local/self counterpart (real jq, not the ssh stub)"
 : > "$LOG"
@@ -292,7 +292,7 @@ assert_not_contains "$out" "PANE" "…without the pane table"
 assert_contains "$out" "next for fable: account_alpha" "…but still with the picks"
 
 t_section "help + unknown"
-assert_contains "$("$ACCOUNT" help)" "anu account" "help names the command"
+assert_contains "$("$ACCOUNT" help)" "homi-account" "help names the command"
 "$ACCOUNT" bogus >/dev/null 2>&1; assert_fail $? "unknown verb fails"
 
 t_section "launch"
@@ -680,7 +680,7 @@ calls="$(grep -c '^anu-secrets get /anu/agents/claude/accounts ACCOUNT_ALPHA --s
 assert_eq "1" "$calls" "…calling anu-secrets get exactly once"
 assert_file "$cache_cold" "…and the miss writes the cache file"
 assert_jq "$cache_cold" '.ACCOUNT_ALPHA' "sk-ant-oat01-account_alpha" "…with the fetched token under the uppercased key"
-assert_eq "600" "$(stat -f %Lp "$cache_cold" 2>/dev/null || stat -c %a "$cache_cold")" "…mode 0600"
+assert_eq "600" "$(stat -c %a "$cache_cold" 2>/dev/null || stat -f %Lp "$cache_cold")" "…mode 0600"
 assert_not_contains "$(grep '^jq ' "$LOG")" "sk-ant-oat01-account_alpha" \
   "the cached token itself never reaches jq's argv (ps-visible) — it travels through a scratch file"
 
@@ -783,7 +783,7 @@ cache_nested="$(mktmp)/deep/nested/dir/tokens.json"
 : > "$LOG"
 out="$(ANU_ACCOUNT_CACHE="$cache_nested" "$ACCOUNT" sync cache 2>&1)"
 assert_ok $? "sync cache creates a nested cache directory that doesn't exist yet"
-dirmode="$(stat -f %Lp "$(dirname "$cache_nested")" 2>/dev/null || stat -c %a "$(dirname "$cache_nested")")"
+dirmode="$(stat -c %a "$(dirname "$cache_nested")" 2>/dev/null || stat -f %Lp "$(dirname "$cache_nested")")"
 assert_eq "700" "$dirmode" "…the newly created cache directory is 0700"
 
 t_section "rotate"
@@ -1014,7 +1014,7 @@ assert_contains "$out" "@anu_session" "…and names the missing stamp"
 out="$(OPT_ACCOUNT= "$ACCOUNT" rotate %4 2>&1)"; rc=$?
 assert_fail $rc "rotate refuses a pane with a session but no @anu_account (not anu-launched)"
 assert_contains "$out" "@anu_account" "…and names the missing stamp"
-assert_contains "$out" "not started by anu account launch" "…with the same message the missing-session guard uses"
+assert_contains "$out" "not started by homi-account launch" "…with the same message the missing-session guard uses"
 assert_not_contains "$(cat "$LOG")" "send-keys" "…without touching the pane"
 
 : > "$LOG"; : > "$COUNT"
@@ -1889,7 +1889,7 @@ assert_contains "$(cat "$LOG")" "@ACCOUNT_LAUNCH@ launch --as account_beta --nee
 assert_contains "$out" "resumed on account_beta" "…which the verb reports"
 ranking "${GOOD[@]}"
 out="$(RB_CMD_AFTER=bash RB_CMD_AFTER2=bash "$ACCOUNT" rebalance %4 2>&1)"
-assert_contains "$out" "pane left at a shell (anu account switch %4 --as account_beta --force)" "…and when even that fails, it says how to resume it by hand"
+assert_contains "$out" "pane left at a shell (homi-account switch %4 --as account_beta --force)" "…and when even that fails, it says how to resume it by hand"
 
 # --- --tick: the watchd worker ---------------------------------------------
 ranking "${GOOD[@]}"
@@ -1937,7 +1937,7 @@ out="$("$ACCOUNT" rebalance %99 2>&1)"; rc=$?
 assert_fail $rc "an unresolvable target is refused"
 assert_contains "$out" "no such pane" "…by name"
 out="$("$ACCOUNT" help)"
-assert_contains "$out" "anu account rebalance [<pane>] [--dry-run]" "help documents the verb"
+assert_contains "$out" "homi-account rebalance [<pane>] [--dry-run]" "help documents the verb"
 assert_contains "$out" "@anu_rebalance 0" "…and how to pause it"
 unset ANU_ACCOUNT_TEST ANU_ACCOUNT_TEST_NOW
 

@@ -149,7 +149,7 @@ out="$("$ACCOUNT" add --provider codex account_alpha 2>&1)"; rc=$?
 assert_ok $rc "add --provider codex exits 0"
 HOME_K="$ANU_ACCOUNT_CODEX_DIR/account_alpha"
 assert_eq "1" "$([ -d "$HOME_K" ] && echo 1 || echo 0)" "the account home is created"
-assert_eq "700" "$(stat -f %Lp "$HOME_K" 2>/dev/null || stat -c %a "$HOME_K")" "…0700, like the credential it holds"
+assert_eq "700" "$(stat -c %a "$HOME_K" 2>/dev/null || stat -f %Lp "$HOME_K")" "…0700, like the credential it holds"
 assert_contains "$(cat "$LOG")" "codex login --device-auth" "…and codex login --device-auth ran"
 assert_contains "$(cat "$LOG")" "CODEX_HOME=$HOME_K" "…pointed at that home, never the human own ~/.codex"
 assert_contains "$out" "PER DEVICE" "the note says codex logins do not travel"
@@ -163,7 +163,7 @@ assert_eq "$HOME/.codex/sessions" "$(readlink "$HOME_K/sessions")" \
   "…at ~/.codex/sessions itself, so every account AND plain codex resume the same rollouts"
 assert_eq "$HOME/.codex/sessions" "$(readlink "$ANU_ACCOUNT_CODEX_DIR/sessions")" \
   "the old shared store path is a link to it too, for homes that still point there"
-assert_eq "700" "$(stat -f %Lp "$HOME/.codex" 2>/dev/null || stat -c %a "$HOME/.codex")" \
+assert_eq "700" "$(stat -c %a "$HOME/.codex" 2>/dev/null || stat -f %Lp "$HOME/.codex")" \
   "a ~/.codex anu had to create is 0700"
 assert_eq "0" "$([ -L "$HOME_K/auth.json" ] && echo 1 || echo 0)" "auth.json is the home's own"
 assert_eq "0" "$([ -L "$HOME_K/config.toml" ] && echo 1 || echo 0)" "…and so is config.toml"
@@ -218,7 +218,7 @@ assert_eq "0" "$([ -f "$ANU_ACCOUNT_CODEX_DIR/nobody/config.toml" ] && echo 1 ||
 
 t_section "2f. the installed hook command is an ABSOLUTE path, never a PATH lookup"
 # Codex 0.156.0 stopped handing the hooks it spawns the launching shell's
-# PATH: an installed `anu account hook codex session-start` resolved to the
+# PATH: an installed `homi-account hook codex session-start` resolved to the
 # wrong `anu` and did nothing at all — silently, because a hook that fails is
 # a hook that writes no stamp. So `add` writes the absolute path of the
 # anu-account that ran it, and nothing about the hook depends on anyone's PATH.
@@ -226,7 +226,7 @@ stub "$SD" anu 'printf "anu %s\n" "$*"'      # on PATH, and deliberately ignored
 out="$(ANU_ACCOUNT_HOOK_CMD= "$ACCOUNT" add --provider codex abspath 2>&1)"; rc=$?
 assert_ok $rc "add works with no ANU_ACCOUNT_HOOK_CMD override"
 cfg_abs="$(cat "$ANU_ACCOUNT_CODEX_DIR/abspath/config.toml")"
-assert_not_contains "$cfg_abs" 'command = "anu account hook' \
+assert_not_contains "$cfg_abs" 'command = "homi-account hook' \
   "the dispatcher on PATH is NOT what gets written"
 assert_contains "$cfg_abs" "command = \"$ACCOUNT hook codex session-start\"" \
   "…the absolute path of the anu-account that ran the add is"
@@ -420,7 +420,7 @@ out="$(ANU_CODEX_BASE_CONFIG="$BASE" "$ACCOUNT" add --provider codex rendered 2>
 assert_ok $? "a second add exits 0"
 assert_eq "$before" "$(cat "$R")" "…and the render is byte-identical the second time"
 assert_eq "1" "$(grep -c 'anu-codex-hooks-begin' "$R")" "…still exactly one owned block"
-assert_eq "600" "$(stat -f %Lp "$R" 2>/dev/null || stat -c %a "$R")" "the rendered file is 0600"
+assert_eq "600" "$(stat -c %a "$R" 2>/dev/null || stat -f %Lp "$R")" "the rendered file is 0600"
 
 # The base is READ, never written. It is the human's file.
 assert_not_contains "$(cat "$BASE")" "anu-codex-hooks-begin" "~/.codex/config.toml is never touched"
@@ -516,8 +516,8 @@ d="$(mktmp)"; VH="$d/home"; VA="$d/acct"; VC="$VH/.codex"; mkdir -p "$VH"
 out="$(va add --provider codex first 2>&1)"; rc=$?
 assert_ok $rc "add with no ~/.codex at all exits 0"
 assert_eq "1" "$([ -d "$VC/sessions" ] && echo 1 || echo 0)" "~/.codex is created, with a sessions/ — it is still the canonical store"
-assert_eq "700" "$(stat -f %Lp "$VC" 2>/dev/null || stat -c %a "$VC")" "…0700"
-assert_eq "700" "$(stat -f %Lp "$VC/sessions" 2>/dev/null || stat -c %a "$VC/sessions")" "…and so is its sessions/"
+assert_eq "700" "$(stat -c %a "$VC" 2>/dev/null || stat -f %Lp "$VC")" "…0700"
+assert_eq "700" "$(stat -c %a "$VC/sessions" 2>/dev/null || stat -f %Lp "$VC/sessions")" "…and so is its sessions/"
 assert_eq "$VC/sessions" "$(readlink "$VA/first/sessions")" "…and the home links it"
 assert_eq "0" "$([ -e "$VC/auth.json" ] && echo 1 || echo 0)" "…and the account's login stays in its home"
 
@@ -856,7 +856,7 @@ assert_fail $rc "with no ranked account logged in here, launch refuses"
 assert_eq "1" "$rc" "…exit 1 — a local credential problem, not an exhausted pool (that is still 3)"
 assert_contains "$out" "account_epsilon, fixture_owner, account_beta" "…the message names the ranked accounts, in rank order"
 assert_contains "$out" "none is logged in on this device" "…and says what is actually wrong"
-assert_contains "$out" "anu account add --provider codex" "…with the command that fixes it"
+assert_contains "$out" "homi-account add --provider codex" "…with the command that fixes it"
 # The hint names an account this device really is logged in as — whichever
 # one it is; the invariant is that following the advice would work.
 suggested="$(printf '%s' "$out" | sed -n 's/.*--as \([A-Za-z0-9_-]*\).*/\1/p' | tail -1)"

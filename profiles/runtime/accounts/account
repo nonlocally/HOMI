@@ -1,41 +1,41 @@
 #!/usr/bin/env bash
 # HOMI optional account module; adapted from Anu 80d3c86 (profiles/NOTICE.md).
-# anu account — which subscription an agent pane runs on, and rotating it when
+# homi-account — which subscription an agent pane runs on, and rotating it when
 # a usage wall hits. Two providers: `claude` (the default everywhere) and
 # `codex`, which works differently enough to be worth reading about below.
 #
-#   anu account ls [--provider claude|codex]    every account with its windows
-#   anu account pick [--provider claude|codex] [--need any|fable]
+#   homi-account ls [--provider claude|codex]    every account with its windows
+#   homi-account pick [--provider claude|codex] [--need any|fable]
 #                    [--exclude <name>] [--json] [--stale]
-#   anu account launch [--provider claude|codex] [--as <name>]
+#   homi-account launch [--provider claude|codex] [--as <name>]
 #                      [--need auto|any|fable] [--box] [--cd <dir>]
 #                       [--fallback-keychain] [--keep-wall] -- <cli args>
 #                                              (--cd/--keep-wall are codex-only; --keep-wall
 #                                              is what a rotate/switch relaunch types)
-#   anu account rotate <pane> [--force]         resume a walled pane under the next account
+#   homi-account rotate <pane> [--force]         resume a walled pane under the next account
 #                                              exit 0 rotated, 2 nothing has room (the pane is
 #                                              left parked, claude resumes at reset), 1 anything
 #                                              else (refused, dashboard unreachable, relaunch
 #                                              died). There is no polling verb: unattended
-#                                              rotation is the `limited` arm of `pane watchd`,
+#                                              rotation is the `limited` arm of `homi-account-pane watchd`,
 #                                              gated by the tmux option @anu_autorotate.
-#   anu account switch <pane> [--as <name>] [--need any|fable] [--continue] [--force]
+#   homi-account switch <pane> [--as <name>] [--need any|fable] [--continue] [--force]
 #                                              move a pane to another account right now — idle or
 #                                              limited only unless --force; continues only a
 #                                              limited pane (or any pane with --continue)
-#   anu account rebalance [<pane>] [--dry-run]  move IDLE panes to the ranked best account when it
+#   homi-account rebalance [<pane>] [--dry-run]  move IDLE panes to the ranked best account when it
 #                                              is clearly better (see "rebalance" below): one row
 #                                              per managed pane — PANE PROVIDER ACCOUNT BEST
 #                                              REASON OUTCOME — then how many unmanaged panes
 #                                              were skipped; moves unless --dry-run. Unattended,
-#                                              it is an arm of `pane watchd`, paused on a server
+#                                              it is an arm of `homi-account-pane watchd`, paused on a server
 #                                              by the tmux option @anu_rebalance 0 (on otherwise)
-#   anu account rebalance <pane> --tick         internal: that arm's worker — one decision, at most
+#   homi-account rebalance <pane> --tick         internal: that arm's worker — one decision, at most
 #                                              one log line (a move, or a block other than
 #                                              "nothing better"); exit 0 moved, 2 stayed,
 #                                              3 dashboard unreachable, 1 the move failed
-#   anu account status                          which account each pane is on
-#   anu account add [--provider claude|codex] <name>
+#   homi-account status                          which account each pane is on
+#   homi-account add [--provider claude|codex] <name>
 #                    [--label t] [--shared] [--email e] [--no-register]
 #                                              claude: store a pasted `claude setup-token`, sync,
 #                                              and register the account on the serving host.
@@ -46,28 +46,28 @@
 #                                              --device-auth`, and render its config.toml from your
 #                                              own ~/.codex/config.toml plus the pre-trusted hooks.
 #                                              A codex login is PER DEVICE — nothing is synced.
-#   anu account doctor [--provider codex] [--fix]
+#   homi-account doctor [--provider codex] [--fix]
 #                                              name every codex home here that is not yet a view of
 #                                              ~/.codex, and the entries that are not links; --fix
 #                                              folds them in as a launch would. Exit 0 when all are.
-#   anu account sync [device|local|cache]       warm a launcher token cache: a named device gets
+#   homi-account sync [device|local|cache]       warm a launcher token cache: a named device gets
 #                                              ITS OWN cache warmed over ssh; 'local'/'self'/'cache'
 #                                              all just warm this device's own, no device touched
-#   anu account token <name> [--refresh]        print the token (scripts only; --refresh
+#   homi-account token <name> [--refresh]        print the token (scripts only; --refresh
 #                                              bypasses the cache and re-fetches)
-#   anu account hook session-start              internal: Claude Code's own SessionStart hook
+#   homi-account hook session-start              internal: Claude Code's own SessionStart hook
 #                                              (added to managed host launches) calls
 #                                              this on startup/resume/clear/compact/fork to
 #                                              stamp @anu_session/@anu_session_source/
 #                                              @anu_generation from the truth Claude itself just
 #                                              reported — never blocks Claude, always exits 0
-#   anu account hook codex session-start        internal: Codex's own SessionStart hook (declared
+#   homi-account hook codex session-start        internal: Codex's own SessionStart hook (declared
 #                                              in each codex account home's config.toml by `add
 #                                              --provider codex`) — stamps @anu_session,
 #                                              @anu_transcript and @anu_rollout_offset. Codex has
 #                                              no --session-id, so this is the ONLY place anu ever
 #                                              learns the id a rotation needs. Always exits 0.
-#   anu account hook codex user-prompt          internal: Codex's own UserPromptSubmit hook —
+#   homi-account hook codex user-prompt          internal: Codex's own UserPromptSubmit hook —
 #                                              stamps @anu_turn/@anu_prompted, so a wall record in
 #                                              the rollout can be matched to the turn in flight.
 #                                              Both codex hooks first compare their inherited
@@ -75,7 +75,7 @@
 #                                              @anu_launch_nonce and exit 0 silently on a
 #                                              mismatch: Codex fires SessionStart lazily, at the
 #                                              first prompt, so a hook can outlive its own launch.
-#   anu account hook stop-failure               internal: Claude Code's own StopFailure hook
+#   homi-account hook stop-failure               internal: Claude Code's own StopFailure hook
 #                                              (added to managed host launches with
 #                                              matcher `rate_limit`) — stamps @anu_wall_event
 #                                              on the pane when the turn died on a rate limit,
@@ -91,7 +91,7 @@
 #
 # `launch`/`token` are cache-first against a per-device file (0600, dir 0700)
 # at ${XDG_STATE_HOME:-~/.local/state}/homi/accounts/tokens.json
-# (ANU_ACCOUNT_CACHE overrides): `anu account sync cache` warms a device in
+# (ANU_ACCOUNT_CACHE overrides): `homi-account sync cache` warms a device in
 # one shot, `add` warms it immediately for the minting device, and once warm
 # a launch never touches the network — a miss falls back to Infisical and
 # caches the result, and `token --refresh` bypasses the cache on purpose.
@@ -99,14 +99,14 @@
 # Each account entry on the dashboard host carries up to TWO separate
 # credentials, because a `claude setup-token` cannot read usage limits (403
 # oauth_scope_insufficient):
-#   - token   — a launch setup-token, stored by `anu account add` here and
+#   - token   — a launch setup-token, stored by `homi-account add` here and
 #               exported by `launch`. Runs Claude Code as the account; can't
 #               poll limits.
 #   - configDir — a poll grant, a separate OAuth profile under
 #               ~/.claude-profiles/<name> on the serving host, set up there by
 #               `npm run add-claude -- <name>`. Lets the dashboard poll
 #               limits for the account; not used to launch panes.
-# `anu account add` only ever writes `token` — run `npm run add-claude` on
+# `homi-account add` only ever writes `token` — run `npm run add-claude` on
 # the serving host once per account to also get poll data on the dashboard.
 #
 # --- the codex branch ------------------------------------------------------
@@ -165,7 +165,7 @@
 # The wall is not on the screen and no hook reports it. Codex's quota branch
 # ends the turn through an internal error path that fires no lifecycle hook at
 # all; the only record is a `task_complete` line with `codex_error_info:
-# usage_limit_exceeded` in the session's rollout. `pane watchd` tails that file
+# usage_limit_exceeded` in the session's rollout. `homi-account-pane watchd` tails that file
 # (the pane's @anu_transcript, from a byte cursor the SessionStart hook sets)
 # and stamps @anu_wall_pending, which is what `pane state` reads as `limited`.
 # That stamp is cleared only by a launch: nothing anu can read ever says a
@@ -214,12 +214,12 @@
 # typing in (an attached client's current pane with a key in the last 5 min).
 # B must pass the preflight `switch --as` runs — a token on this device, or
 # for codex the `_codex_candidate_ok` chain — and one that fails is passed
-# over for the next ranked pick that still beats C. The move IS `anu account
+# over for the next ranked pick that still beats C. The move IS `homi-account
 # switch <pane> --as <dest>`: the pane lock, its re-checks, the same relaunch,
 # no continuation. A move that dies leaving the pane at a shell is resumed on C.
 # The ranking is cached per server in @anu_rebalance_rank_<provider> (plus
 # _<need> past any) as "<fetched> <expires> <best> <json>", good until
-# `expires`: 15 min, or sooner if a cached resetsAt passes first. `pane watchd`
+# `expires`: 15 min, or sooner if a cached resetsAt passes first. `homi-account-pane watchd`
 # runs this unattended, one worker per server at a time; the verb itself is the
 # human's and moves whatever the gate says, as `rotate` ignores @anu_autorotate.
 #
@@ -1336,7 +1336,7 @@ _codex_block() {  # $1 = config path, $2… = "<Event>=<index>" pairs
   local -a idx=("$@")
   local table snake sub timeout cmd key hash tables="" trust="" i n
   printf '%s\n' "$_CODEX_BEGIN"
-  printf '%s\n\n' "# anu installs its own Codex hooks here and pre-trusts them; re-run \`anu account add --provider codex <name>\` to refresh."
+  printf '%s\n\n' "# anu installs its own Codex hooks here and pre-trusts them; re-run \`homi-account add --provider codex <name>\` to refresh."
   while IFS="$(printf '\t')" read -r table snake sub timeout; do
     [ -n "$table" ] || continue
     cmd="$(_codex_hook_command "$sub")"
@@ -1789,7 +1789,7 @@ _codex_trust_scan() {
 _codex_candidate_ok() {  # $1 = account name, $2 = the pane's cwd
   local name="$1" cwd="$2" why
   if ! _codex_authed "$name"; then
-    printf 'anu account: skipping %s — no auth.json in %s (anu account add --provider codex %s)\n' \
+    printf 'anu account: skipping %s — no auth.json in %s (homi-account add --provider codex %s)\n' \
       "$name" "$(_codex_home "$name")" "$name" >&2
     return 1
   fi
@@ -1802,7 +1802,7 @@ _codex_candidate_ok() {  # $1 = account name, $2 = the pane's cwd
   # the other way round instead: a rendered home PASSES `_codex_hooks_ok`,
   # because the block it writes is the block this reads.)
   if ! _codex_hooks_ok "$name"; then
-    printf 'anu account: skipping %s — its hook tables are missing, or their trust hashes do not match the commands in %s, so Codex would refuse to run them (anu account add --provider codex %s)\n' \
+    printf 'anu account: skipping %s — its hook tables are missing, or their trust hashes do not match the commands in %s, so Codex would refuse to run them (homi-account add --provider codex %s)\n' \
       "$name" "$(_codex_config "$name")" "$name" >&2
     return 1
   fi
@@ -2070,17 +2070,17 @@ cmd_token() {
     -*) _die "token: unexpected '$1'" ;;
     *) [ -z "$name" ] || _die "token: unexpected '$1'"; name="$1"; shift ;;
   esac; done
-  [ -n "$name" ] || _die "usage: anu account token <name> [--refresh]"
+  [ -n "$name" ] || _die "usage: homi-account token <name> [--refresh]"
   if [ "$refresh" = 1 ]; then
     local key tok; key="$(_key "$name")"
     tok="$("$SECRETS_BIN" get "$TOKEN_PATH" "$key" --show 2>/dev/null)" \
-      || _die "no token for '$name' (anu account add $name)"
-    [ -n "$tok" ] || _die "no token for '$name' (anu account add $name)"
+      || _die "no token for '$name' (homi-account add $name)"
+    [ -n "$tok" ] || _die "no token for '$name' (homi-account add $name)"
     _cache_put "$key" "$tok"
     printf '%s\n' "$tok"
     return 0
   fi
-  local tok; tok="$(_token_for "$name")" || _die "no token for '$name' (anu account add $name)"
+  local tok; tok="$(_token_for "$name")" || _die "no token for '$name' (homi-account add $name)"
   printf '%s\n' "$tok"
 }
 
@@ -2170,7 +2170,7 @@ cmd_add_codex() {  # $1 = account name. A device-local act, start to finish.
   # same thing as "no rotation can ever resume it"). A re-add is also how a
   # home made before this rule is folded in, without waiting for a launch.
   _codex_share_all "$name" \
-    || _die "$home is not yet a view of $(_tilde "$CODEX_USER_DIR") (see above) — nothing else was done; \`anu account doctor --provider codex\` shows what is left"
+    || _die "$home is not yet a view of $(_tilde "$CODEX_USER_DIR") (see above) — nothing else was done; \`homi-account doctor --provider codex\` shows what is left"
   printf 'Logging in as %s. Finish the device authorization in the browser it opens.\n' "$name" >&2
   CODEX_HOME="$home" codex login --device-auth || _die "codex login failed for '$name' — nothing written"
   # auth.json is tested for EXISTENCE and never opened: anu points the CLI at
@@ -2179,7 +2179,7 @@ cmd_add_codex() {  # $1 = account name. A device-local act, start to finish.
   _codex_render_config "$name" || _die "could not render the Codex configuration into $cfg"
   printf 'codex account %s is ready on this device (%s).\n' "$name" "$home"
   printf 'its home is a view of %s: conversations, history and memories are shared with every account and with plain codex; only auth.json and config.toml are its own.\n' "$(_tilde "$CODEX_USER_DIR")"
-  printf 'note: a Codex login is PER DEVICE — nothing about it is synced to Infisical or registered on the dashboard. Run `anu account add --provider codex %s` again on every machine that should launch panes as %s.\n' "$name" "$name"
+  printf 'note: a Codex login is PER DEVICE — nothing about it is synced to Infisical or registered on the dashboard. Run `homi-account add --provider codex %s` again on every machine that should launch panes as %s.\n' "$name" "$name"
 }
 
 cmd_add() {
@@ -2194,7 +2194,7 @@ cmd_add() {
     *) [ -z "$name" ] || _die "add: unexpected '$1'"; name="$1"; shift ;;
   esac; done
   _provider_check add "$provider"
-  [ -n "$name" ] || _die "usage: anu account add [--provider claude|codex] <name> [--label <text>] [--shared] [--email <addr>] [--no-register]"
+  [ -n "$name" ] || _die "usage: homi-account add [--provider claude|codex] <name> [--label <text>] [--shared] [--email <addr>] [--no-register]"
   if [ "$provider" = codex ]; then cmd_add_codex "$name"; return $?; fi
   local key; key="$(_key "$name")"
   local display_label="${label:-Claude — $name}"
@@ -2239,7 +2239,7 @@ cmd_add() {
          | if has("shared") then . else . + {shared:false} end')"
       {
         printf 'anu account: claude-%s is stored and synced, but registering it on %s failed.\n' "$name" "$SYNC_DEVICE"
-        printf 'Fix the host, then re-run `anu account add %s` (safe — storing the token again is harmless), or paste this entry into %s/accounts.json by hand:\n\n' "$name" "$USAGE_REPO"
+        printf 'Fix the host, then re-run `homi-account add %s` (safe — storing the token again is harmless), or paste this entry into %s/accounts.json by hand:\n\n' "$name" "$USAGE_REPO"
         printf '%s\n' "$printed" | jq .
       } >&2
       exit 1
@@ -2516,11 +2516,11 @@ EOF
       here="$(_codex_local_accounts)"
       first="${here%%$'\n'*}"
       [ -n "$first" ] && hint=", or launch with --as $first (already logged in here)"
-      _die_code 1 "the best codex accounts are $listed — none is logged in on this device; run \`anu account add --provider codex <name>\` for one of them$hint"
+      _die_code 1 "the best codex accounts are $listed — none is logged in on this device; run \`homi-account add --provider codex <name>\` for one of them$hint"
     fi
   fi
   _codex_authed "$account" \
-    || _die_code 1 "no codex home for '$account' on this device (anu account add --provider codex $account)"
+    || _die_code 1 "no codex home for '$account' on this device (homi-account add --provider codex $account)"
   # EVERY launch keeps the home a view of ~/.codex before Codex reads a byte of
   # it: a link some writer replaced, an entry ~/.codex grew since the last
   # launch, a home from before the rule — each is folded back here, and says
@@ -2528,7 +2528,7 @@ EOF
   # Like the render below it never costs the pane: a home that could not be
   # repaired still launches, and the doctor names what is left.
   _codex_share_all "$account" \
-    || printf 'anu account: launching %s with its home not fully a view of %s (anu account doctor --provider codex)\n' \
+    || printf 'anu account: launching %s with its home not fully a view of %s (homi-account doctor --provider codex)\n' \
          "$account" "$(_tilde "$CODEX_USER_DIR")" >&2
   # EVERY launch re-renders the home from the human's own ~/.codex/config.toml,
   # which is what makes an edit they make there live in the next pane rather
@@ -2714,7 +2714,7 @@ cmd_launch() {
     exec "${cmd[@]}" "$@"
   fi
 
-  local tok; tok="$(_token_for "$account")" || _die "no token for '$account' (anu account add $account)"
+  local tok; tok="$(_token_for "$account")" || _die "no token for '$account' (homi-account add $account)"
   [ -n "$tok" ] || _die "empty token for '$account'"
   export CLAUDE_CODE_OAUTH_TOKEN="$tok" ANU_ACCOUNT="$account" ANU_PROVIDER=claude
   if [ "$from_last_pick" = 1 ]; then
@@ -3362,7 +3362,7 @@ cmd_rotate() {
     --force) force=1; shift ;;
     *) [ -z "$target" ] || _die "rotate: unexpected '$1'"; target="$1"; shift ;;
   esac; done
-  [ -n "$target" ] || _die "usage: anu account rotate <pane> [--force]"
+  [ -n "$target" ] || _die "usage: homi-account rotate <pane> [--force]"
   # `pane` (the anu plugin bin) is the only way this verb reads or drives a
   # pane. Without it `pane state` below fails the same way an unknown target
   # does, and a missing install would report itself as "no such pane" — a
@@ -3394,8 +3394,8 @@ cmd_rotate() {
   need="$(_opt "$pid" @anu_need)"; launch="$(_opt "$pid" @anu_launch)"; boxed="$(_opt "$pid" @anu_box)"
   pre_gen="$(_opt "$pid" @anu_generation)"; provider="$(_opt "$pid" @anu_provider)"
   [ -n "$provider" ] || provider=claude
-  [ -n "$session" ] || _die "$pid has no @anu_session — it was not started by anu account launch (a codex pane that has never been prompted has no session id yet, and there is nothing to resume)"
-  [ -n "$account" ] || _die "$pid has no @anu_account — it was not started by anu account launch"
+  [ -n "$session" ] || _die "$pid has no @anu_session — it was not started by homi-account launch (a codex pane that has never been prompted has no session id yet, and there is nothing to resume)"
+  [ -n "$account" ] || _die "$pid has no @anu_account — it was not started by homi-account launch"
   [ -n "$need" ] || need=any
   local state wall; state="$(printf '%s' "$st" | jq -r .state)"; wall="$(printf '%s' "$st" | jq -r '.wall // "session"')"
   [ "$state" = limited ] || _die "$pid is not at a wall (state: $state)"
@@ -3485,7 +3485,7 @@ cmd_switch() {
     --force)    force=1; shift ;;
     *) [ -z "$target" ] || _die "switch: unexpected '$1'"; target="$1"; shift ;;
   esac; done
-  [ -n "$target" ] || _die "usage: anu account switch <pane> [--as <name>] [--need any|fable] [--continue] [--force]"
+  [ -n "$target" ] || _die "usage: homi-account switch <pane> [--as <name>] [--need any|fable] [--continue] [--force]"
   # Same reason as rotate: a missing plugin bin must not masquerade as a
   # missing pane.
   [ -x "$HOMI_ACCOUNT_PANE" ] || _die "configured pane helper is not executable"
@@ -3507,8 +3507,8 @@ cmd_switch() {
   need="$(_opt "$pid" @anu_need)"; launch="$(_opt "$pid" @anu_launch)"; boxed="$(_opt "$pid" @anu_box)"
   pre_gen="$(_opt "$pid" @anu_generation)"; provider="$(_opt "$pid" @anu_provider)"
   [ -n "$provider" ] || provider=claude
-  [ -n "$session" ] || _die "$pid has no @anu_session — it was not started by anu account launch (a codex pane that has never been prompted has no session id yet, and there is nothing to resume)"
-  [ -n "$account" ] || _die "$pid has no @anu_account — it was not started by anu account launch"
+  [ -n "$session" ] || _die "$pid has no @anu_session — it was not started by homi-account launch (a codex pane that has never been prompted has no session id yet, and there is nothing to resume)"
+  [ -n "$account" ] || _die "$pid has no @anu_account — it was not started by homi-account launch"
   [ -n "$need" ] || need=any
   [ -n "$need_flag" ] && need="$need_flag"
   [ "$provider" = codex ] && need=any
@@ -3635,7 +3635,7 @@ cmd_doctor() {
   if [ -d "$CODEX_USER_DIR" ]; then
     printf '%s is the one store: every codex home here links all of it but auth.json and config.toml\n' "$canon"
   else
-    printf '%s does not exist yet; the first `anu account add --provider codex` creates it\n' "$canon"
+    printf '%s does not exist yet; the first `homi-account add --provider codex` creates it\n' "$canon"
   fi
   if [ -d "$CODEX_ACCOUNT_DIR" ]; then
     if [ "$fix" = 1 ]; then _codex_share_all "" || true; fi
@@ -3659,7 +3659,7 @@ cmd_doctor() {
     printf '  %-12s not a view yet — %s\n' "$name" "$(printf '%s\n' "$names" | _codex_doctor_line)"
   done
   if [ "$total" = 0 ]; then
-    printf 'no codex account homes on this device (anu account add --provider codex <name>)\n'
+    printf 'no codex account homes on this device (homi-account add --provider codex <name>)\n'
     [ "$bad" = 0 ] || return 1
     return 0
   fi
@@ -3667,7 +3667,7 @@ cmd_doctor() {
     if [ "$fix" = 1 ]; then
       printf 'still outside %s: an entry changed in the last minute moves on a later pass; anything else is named above\n' "$canon"
     else
-      printf 'state outside %s: `anu account doctor --provider codex --fix` folds it in, and so does the next launch as that account\n' "$canon"
+      printf 'state outside %s: `homi-account doctor --provider codex --fix` folds it in, and so does the next launch as that account\n' "$canon"
     fi
     return 1
   fi
@@ -3793,7 +3793,7 @@ _reb_decide() {  # $1 = picks json, $2 = the pane's account
 _reb_preflight() {  # $1 = candidate, $2 = provider, $3 = the pane's cwd — `switch --as`'s own check
   if [ "$2" = codex ]; then _codex_candidate_ok "$1" "$3"; return $?; fi
   _token_for "$1" >/dev/null 2>&1 && return 0
-  printf 'anu account: skipping %s — no token for it on this device (anu account add %s)\n' "$1" "$1" >&2
+  printf 'anu account: skipping %s — no token for it on this device (homi-account add %s)\n' "$1" "$1" >&2
   return 1
 }
 
@@ -3908,7 +3908,7 @@ _reb_one() {
       if "$0" switch "$pid" --as "$account" --force >/dev/null; then
         _rb_detail="$_rb_detail; resumed on $account"
       else
-        _rb_detail="$_rb_detail; could not resume it on $account either — pane left at a shell (anu account switch $pid --as $account --force)"
+        _rb_detail="$_rb_detail; could not resume it on $account either — pane left at a shell (homi-account switch $pid --as $account --force)"
       fi ;;
   esac
   return 1
@@ -3944,7 +3944,7 @@ cmd_rebalance() {
   [ -x "$HOMI_ACCOUNT_PANE" ] || _die "configured pane helper is not executable"
   local now; now="$(_reb_now)"
   if [ "$mode" = tick ]; then
-    [ -n "$target" ] || _die "usage: anu account rebalance <pane> --tick"
+    [ -n "$target" ] || _die "usage: homi-account rebalance <pane> --tick"
     # Paused since the arm looked: nothing moves, nothing is said.
     _reb_gate || exit 2
     local tr=0; _reb_tick "$target" "$now" || tr=$?

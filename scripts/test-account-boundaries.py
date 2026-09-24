@@ -75,6 +75,10 @@ class Accounts(unittest.TestCase):
         self.assertEqual(list(replies.iterdir()), [replies / correlation])
         for bad in ["../escape", ".hidden", "nested/id"]:
             self.assertNotEqual(self.run_tool("homi-account-pane", "reply", bad, "bad", check=False).returncode, 0)
+        self.assertNotEqual(self.run_tool("homi-account-pane", "reply", correlation,
+                                          "-f", "missing input", check=False).returncode, 0)
+        self.assertEqual((replies / correlation).read_bytes(), message.encode())
+        self.assertEqual(list(replies.iterdir()), [replies / correlation])
         old = replies / "old"
         old.write_text("old fixture")
         os.utime(old, (1, 1))

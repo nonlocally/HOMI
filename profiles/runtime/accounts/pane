@@ -698,7 +698,7 @@ cmd_reply() {
   (umask 077; mkdir -p "$dir") || _die "could not create reply directory"
   chmod 700 "$dir" || _die "could not protect reply directory"
   local temp; temp="$(mktemp "$dir/.$id.part.XXXXXX")" || _die "could not stage reply"
-  if _read_msg "$@" > "$temp" && chmod 600 "$temp" && mv -f "$temp" "$dir/$id"; then
+  if ( _read_msg "$@" ) > "$temp" && chmod 600 "$temp" && mv -f "$temp" "$dir/$id"; then
     printf 'pane: reply recorded (%s)\n' "$id"
   else
     rm -f "$temp"
@@ -1428,7 +1428,7 @@ EOF
   # account rotate`/`switch`, never come through this arm and are unaffected.
   if [ "$provider" = codex ] && [ "$codex_gate" != 1 ]; then
     if [ "$_r_nogate" != 1 ]; then
-      printf '%s codex wall recorded, not rotating: @anu_codex_autorotate is not 1 (automatic Codex rotation is opt-in until a live wall handoff passes). Move it by hand with `anu account rotate %s`.\n' \
+      printf '%s codex wall recorded, not rotating: @anu_codex_autorotate is not 1 (automatic Codex rotation is opt-in until a live wall handoff passes). Move it by hand with `homi-account rotate %s`.\n' \
         "$(date '+%H:%M:%S')" "$pid" >> "$log"
       _r_nogate=1
     fi
@@ -1523,7 +1523,7 @@ EOF
     [ -n "$_r_bin_warn" ] && {
       printf '[%s] %s\n' "$now" "$_r_bin_warn" >> "$log" 2>/dev/null; warned=1; }
     if [ "$bin_rc" -ne 0 ] || [ -z "$_r_bin" ]; then
-      printf '[%s] no anu-account on PATH (set ANU_ACCOUNT_BIN) — not rotating %s\n' \
+      printf '[%s] no homi-account helper available (set ANU_ACCOUNT_BIN) — not rotating %s\n' \
         "$now" "$pid" >> "$log" 2>/dev/null; warned=1
     fi
     [ "$warned" = 1 ] && _r_nobin=1
@@ -1733,7 +1733,7 @@ _reb_arm() {
     _rot_bin || bin_rc=$?
     if [ "$bin_rc" -ne 0 ] || [ -z "$_r_bin" ]; then
       if [ "$_b_nobin" != 1 ]; then
-        printf '[%s] no anu-account on PATH (set ANU_ACCOUNT_BIN) — not rebalancing\n' "$now" >> "$(_rot_log "$sh" "$pid")" 2>/dev/null
+        printf '[%s] no homi-account helper available (set ANU_ACCOUNT_BIN) — not rebalancing\n' "$now" >> "$(_rot_log "$sh" "$pid")" 2>/dev/null
         _b_nobin=1
       fi
       break
