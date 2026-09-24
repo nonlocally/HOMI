@@ -60,7 +60,7 @@ ACTIVE = ("accepted", "leased")
 TERMINAL = ("delivered", "queued", "failed", "expired", "cancelled")
 CHAT_OPS = frozenset(("chat_open", "chat_list", "chat_messages", "chat_send", "chat_read"))
 ACCOUNT_OPS = frozenset(("create", "member_add", "member_remove", "invite", "invite_revoke",
-                         "event_create", "event_revoke", "event_remove"))
+                         "event_create", "event_get", "event_revoke", "event_remove"))
 CHAT_FIELDS = {"chat_open": {"bus", "agent"}, "chat_list": set(), "chat_messages": {"chat", "after", "limit"},
                "chat_send": {"chat", "request_id", "message"}, "chat_read": {"chat", "through"}}
 
@@ -784,17 +784,18 @@ class Broker:
         db.execute("UPDATE invites SET expires_at=MIN(expires_at,?) WHERE digest=?", (now, _digest(secret)))
         return {"revoked": True, "bus": invitation["bus"]}
 
-    def _event_record(self, db, event, now):
+    def _event_record(self, db, event, now, *, participants=False):
         result = {key: event[key] for key in ("id", "bus", "created_at", "expires_at", "max_uses", "uses")}
         result["revoked"] = bool(event["revoked"])
         result["active"] = not event["revoked"] and event["expires_at"] > now and event["uses"] < event["max_uses"]
-        result["participants"] = [{"principal": row["principal"], "user": row["user"], "device": row["device"],
-                                   "joined_at": row["joined_at"],
-                                   "removed": bool(row["removed"] or row["revoked"] or
-                                                   not self._granted(db, row["principal"], event["bus"]))}
-                                  for row in db.execute("""SELECT j.*,p.user,p.device,p.revoked FROM event_joins j
-                                    JOIN principals p ON p.id=j.principal WHERE j.event=?
-                                    ORDER BY j.joined_at,j.principal""", (event["id"],))]
+        if participants:
+            result["participants"] = [{"principal": row["principal"], "user": row["user"], "device": row["device"],
+                                       "joined_at": row["joined_at"],
+                                       "removed": bool(row["removed"] or row["revoked"] or
+                                                       not self._granted(db, row["principal"], event["bus"]))}
+                                      for row in db.execute("""SELECT j.*,p.user,p.device,p.revoked FROM event_joins j
+                                        JOIN principals p ON p.id=j.principal WHERE j.event=?
+                                        ORDER BY j.joined_at,j.principal LIMIT 100""", (event["id"],))]
         return result
 
     def _managed_event(self, db, p, value):
@@ -823,7 +824,15 @@ class Broker:
         db.execute("""INSERT INTO event_invites(id,digest,bus,created_at,expires_at,max_uses,issuer_user)
                       VALUES(?,?,?,?,?,?,?)""", (event, _digest(secret), bus["name"], now, now + ttl, limit, self._account_user(p)))
         row = db.execute("SELECT * FROM event_invites WHERE id=?", (event,)).fetchone()
-        return {"event": self._event_record(db, row, now), "invite": secret, "bus": bus["name"], "expires_at": now + ttl}
+        return {"event": self._event_record(db, row, now, participants=True), "invite": secret,
+                "bus": bus["name"], "expires_at": now + ttl}
+
+    def _op_event_get(self, db, p, r, now):
+        event = self._managed_event(db, p, r.get("event"))
+        # Participant details belong to one explicitly selected, owned event;
+        # returning every historical list in snapshots exceeds released clients'
+        # response cap. Admission already limits each event to 100 devices.
+        return {"event": self._event_record(db, event, now, participants=True)}
 
     def _op_event_revoke(self, db, p, r, now):
         event = self._managed_event(db, p, r.get("event"))
@@ -1034,8 +1043,9 @@ class Broker:
                     {"user": member[0], "role": "member"} for member in db.execute(
                         "SELECT user FROM account_memberships WHERE bus=? ORDER BY user", (bus,))]
             if event_join:
-                # Bounded recent history; no plaintext code or token digest is
-                # exposed. Exact event IDs still permit managing older entries.
+                # Bounded recent summaries; participant lists are available only
+                # through event_get, including for older exact event IDs. Neither
+                # path exposes a plaintext admission code or token digest.
                 row["events"] = [self._event_record(db, event, now) for event in db.execute(
                     "SELECT * FROM event_invites WHERE bus=? ORDER BY created_at DESC,id DESC LIMIT ?",
                     (bus, MAX_EVENT_HISTORY))]

@@ -71,7 +71,9 @@ class EventTests(unittest.TestCase):
             self.denied('register', guest['token'], bus='other-bus', name='spoof', session_key='spoof')
             self.call('register', guest['token'], bus='event-bus', name='exact', session_key='exact')
         row = self.rows()['event-bus']['events'][0]
-        self.assertEqual(row['uses'], 3); self.assertEqual(len(row['participants']), 3)
+        self.assertEqual(row['uses'], 3); self.assertNotIn('participants', row)
+        detail = self.call('event_get', event=row['id'])['event']
+        self.assertEqual(len(detail['participants']), 3)
         self.assertNotIn(event['invite'], json.dumps(self.call('snapshot')))
         data = self.b.db_path.read_bytes(); self.assertNotIn(event['invite'].encode(), data)
         for guest in guests: self.assertNotIn(guest['token'].encode(), data)
@@ -145,10 +147,69 @@ class EventTests(unittest.TestCase):
         event=self.call('event_create','alice-reader',bus='alice-bus')
         guest=self.call('redeem','',invite=event['invite'])
         self.assertNotIn(event['event']['id'],json.dumps(self.call('snapshot','bob-reader')))
+        self.denied('event_get','bob-reader',event=event['event']['id'])
         self.denied('event_revoke','bob-reader',event=event['event']['id'])
         self.denied('event_remove','bob-reader',event=event['event']['id'],principal=guest['principal'])
         self.denied('event_create','bob-reader',bus='alice-bus')
         self.assertTrue(self.rows('alice-reader')['alice-bus']['events'][0]['active'])
+
+    def test_event_details_require_exact_bus_owner_or_admin_and_never_return_secrets(self):
+        self.call('create', 'alice-reader', bus='owned')
+        self.call('create', 'bob-reader', bus='bobs-bus')
+        self.call('member_add', 'alice-reader', bus='owned', user='bob')
+        event = self.call('event_create', 'alice-reader', bus='owned')
+        guest = self.call('redeem', '', invite=event['invite'], device='Guest')
+        event_id = event['event']['id']
+        summary = self.rows('alice-reader')['owned']['events'][0]
+        self.assertNotIn('participants', summary)
+        for who in ('alice-reader', 'admin'):
+            detail = self.call('event_get', who, event=event_id)['event']
+            self.assertEqual({k: v for k, v in detail.items() if k != 'participants'}, summary)
+            self.assertEqual([p['principal'] for p in detail['participants']], [guest['principal']])
+            self.assertNotIn(event['invite'], json.dumps(detail))
+            self.assertNotIn(guest['token'], json.dumps(detail))
+            self.assertNotIn('digest', detail)
+        for who in ('bob-reader', guest['token']):
+            self.denied('event_get', who, event=event_id)
+        self.denied('event_get', '', code='unauthorized', event=event_id)
+        self.denied('event_get', 'alice-reader', code='not_found', event='missing')
+        for invalid in (None, [], {}, 123, 'x' * 129):
+            self.denied('event_get', 'alice-reader', code='invalid_request', event=invalid)
+        self.assertEqual(self.rows('alice-reader')['owned']['events'][0]['uses'], 1)
+        self.assertEqual(list(self.rows(guest['token'])), ['owned'])
+
+    def test_large_valid_event_history_stays_below_existing_client_response_limit(self):
+        # Reproduce the reported overflow using only permitted operations:
+        # two buses, 20 events each, the same 100 devices, and valid 128-byte
+        # labels. No new principals or fake capacity overrides after event 1.
+        guests = []
+        for name in ('event-bus', 'other-bus'):
+            for _ in range(20):
+                event = self.call('event_create', bus=name, max_uses=100)
+                if not guests:
+                    guests = [self.call('redeem', '', invite=event['invite'], device='\U0001f9ea' * 32)
+                              for _ in range(100)]
+                else:
+                    for guest in guests:
+                        self.call('redeem', guest['token'], invite=event['invite'])
+                self.call('event_revoke', event=event['event']['id'])
+        with self.b._connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM event_joins').fetchone()[0], 4000)
+        snapshot = self.call('snapshot')
+        raw = json.dumps(snapshot).encode()
+        self.assertLess(len(raw), 2 * 1024 * 1024)
+        history = [event for row in snapshot['buses'] for event in row.get('events', [])]
+        self.assertEqual(len(history), 40)
+        self.assertTrue(all('participants' not in event for event in history))
+        detail = self.call('event_get', event=history[0]['id'])['event']
+        self.assertEqual(len(detail['participants']), 100)
+        self.assertLess(len(json.dumps(detail).encode()), 2 * 1024 * 1024)
+        # Exercise the unchanged v0.4 client decoder and its byte cap without
+        # opening a socket or widening that cap.
+        with mock.patch('bus.urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(raw)
+            decoded = bus.request({'url': 'https://broker.example', 'token': self.b.admin_token}, 'snapshot')
+        self.assertEqual(decoded, snapshot)
 
     def test_participant_removal_only_affects_target_bus_and_closes_pending_delivery(self):
         event = self.event()
@@ -163,7 +224,7 @@ class EventTests(unittest.TestCase):
         self.assertEqual(self.call('receipt', other['token'], id=message['id'])['status'], 'cancelled')
         self.assertEqual(list(self.rows(guest['token'])), ['other-bus'])
         self.denied('redeem', guest['token'], invite=event['invite'])
-        row = self.rows()['event-bus']['events'][0]
+        row = self.call('event_get', event=event['event']['id'])['event']
         self.assertTrue(next(p for p in row['participants'] if p['principal']==guest['principal'])['removed'])
         self.assertEqual(row['uses'], 2, 'removal must not refill the public event cap')
         self.denied('event_remove', code='not_found', event=event['event']['id'], principal='admin')
