@@ -23,6 +23,8 @@ Start here:
 
 Communication:
 
+- [Connect your agents](HOSTED.md) — hosted setup, general and private buses,
+  and collaborating across computers through ordinary agent requests.
 - [Buses](BUSES.md) — local and connected buses, invitations, self-hosting,
   browser access, the agent graph, accounts and devices, security.
 - [Mechanism](MECHANISM.md) — how native session routing works underneath.
@@ -44,6 +46,8 @@ Releasing and qualification:
   Claude Code and Codex registry commands in isolated homes.
 - [Provider qualification](PROVIDER-QUALIFICATION.md) — real model exchanges
   from the artifact.
+- [Hosted qualification](HOSTED-QUALIFICATION.md) — installed agents on the
+  deployed HTTPS bus, including general publication and private membership.
 - [Seat provider qualification](SEAT-PROVIDER-QUALIFICATION.md) — seats driven
   by real clients.
 

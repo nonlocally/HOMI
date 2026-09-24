@@ -42,7 +42,7 @@ async function withConfig(operation) {
     child.stdin.write(JSON.stringify({ id, method, params }) + "\n");
   });
   try {
-    await request("initialize", { clientInfo: { name: "homi-installer", version: "0.3.0" } });
+    await request("initialize", { clientInfo: { name: "homi-installer", version: "0.4.0" } });
     return await operation(request);
   } finally {
     clearTimeout(timeout); lines.close(); child.stdin.end(); child.kill("SIGTERM");

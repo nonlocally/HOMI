@@ -14,7 +14,7 @@ open a fresh session and ask your agent to create peers, send messages, or
 coordinate work. See the [Quickstart](QUICKSTART.md) for examples and
 [Homebrew](#homebrew) below for upgrades and removal.
 
-You can also install from the [HOMI 0.3.0 release archive](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0).
+You can also install from the [HOMI 0.4.0 release archive](https://github.com/nonlocally/HOMI/releases/tag/v0.4.0).
 
 ## Requirements
 
@@ -28,7 +28,8 @@ You can also install from the [HOMI 0.3.0 release archive](https://github.com/no
 | Optional profiles | Bash 4+ and fzf; tmux for terminal, jq and SSH for mesh; see [PROFILES.md](PROFILES.md) |
 
 Guided setup can install missing dependencies and clients for selected features.
-It does not obtain provider credentials for you or enroll you in a hosted bus.
+It can also join a shared bus using your invitation; this is an explicit choice.
+Provider sign-in remains with the provider, and installation alone grants no hosted access.
 Node.js must already be available to start the archive's installer; the HOMI
 Homebrew formula supplies Node and the core runtime dependencies.
 
@@ -38,10 +39,10 @@ The release provides `homi-VERSION.tar.gz` and its matching `.sha256` file.
 Download both, then verify the archive before extracting it:
 
 ```sh
-curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz
-curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz.sha256
-shasum -a 256 -c homi-0.3.0.tar.gz.sha256
-tar -xzf homi-0.3.0.tar.gz
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.4.0/homi-0.4.0.tar.gz
+curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.4.0/homi-0.4.0.tar.gz.sha256
+shasum -a 256 -c homi-0.4.0.tar.gz.sha256
+tar -xzf homi-0.4.0.tar.gz
 ```
 
 The archive contains the CLI, the MCP server, the plugin, the daemon, and its
@@ -55,11 +56,11 @@ to a machine over SSH installs exactly like a downloaded one.
 For Homebrew, run `homi setup`. From an extracted archive, use:
 
 ```sh
-./homi-0.3.0/bin/homi setup
+./homi-0.4.0/bin/homi setup
 ```
 
 With no flags in an interactive terminal, `setup` guides you through the clients,
-terminal/mesh tools, optional Ghostty, and service choices. It shows the selected
+terminal/mesh tools, optional Ghostty, service and bus choices. It shows the selected
 package and configuration actions before asking you to apply them. Use
 `--guided` to request that flow explicitly. Declining or reaching end-of-input
 at confirmation does not authorize installation.
@@ -68,13 +69,13 @@ For automation or a selection you already know, use explicit flags:
 
 ```sh
 # Preview only: no downloads, login, package installation or configuration writes.
-./homi-0.3.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --dry-run
+./homi-0.4.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --dry-run
 
 # Apply that selection; omit either client or profile you do not want.
-./homi-0.3.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --yes
+./homi-0.4.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --yes
 
 # CLI-only configuration, including on a server:
-./homi-0.3.0/bin/homi setup --no-clients --no-service
+./homi-0.4.0/bin/homi setup --no-clients --no-service
 ```
 
 Add `--ghostty` on macOS to select the application, the configured Nerd Font,
@@ -101,12 +102,36 @@ downloads. `update` remains the explicit release activation command.
 | `--no-clients` | Install the CLI only; register clients later with `homi setup --claude` or `--codex`. |
 | `--terminal`, `--mesh` | Select owned profiles and check their required tools. |
 | `--ghostty` | Explicitly select Ghostty, its configured font, and the terminal profile on macOS. |
+| `--bus=local` | Select local bus operation without starting a broker; keep saved remote connections. |
+| `--bus=HTTPS_ORIGIN` | Select a shared hub this installation has already joined. Does not enroll a new device. |
+| `--bus-invite-file=/absolute/path` | Join using a private invitation file owned by you. Cannot be combined with `--bus`. |
 | `--yes` | Confirm the explicit installation selection; does not authorize provider login. |
 | `--login-claude`, `--login-codex` | Request the selected provider's interactive login separately; skip it if already logged in. Requires a terminal. |
 | `--service` | Also install the per-user daemon service (launchd or systemd `--user`). |
 | `--no-service` | Leave an existing managed service untouched during an update. |
 | `--service-inherit=NAME` | Add an allowed variable to the service environment, such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Repeat for each variable. |
 | `--dry-run` | Print the selected setup/dependency plan and change nothing. Use `homi profile preview` for the exact profile paths and conflicts. |
+
+### Choosing a bus
+
+Setup keeps your existing connection unless you explicitly choose another. For
+local work, no hosted account is needed. For a shared hub, get an invitation
+from its administrator, enter it at the hidden prompt, and confirm the displayed
+HTTPS destination. You can finish installation and connect later with
+`homi setup --guided`.
+
+Automated setup accepts `--bus-invite-file=/absolute/path` alongside an explicit
+client selection and `--yes`. The file must be a regular, non-symlink file owned
+by your account with no permissions for other accounts, for example mode `0600`.
+The invitation travels to the bus command through standard input and is never
+printed. Dry-run does not read its contents or contact the hub. Setup does not
+delete your invitation file; remove it yourself when it is no longer needed.
+
+If joining fails after core installation, setup reports the connection failure
+and keeps the installed core available. Correct the invitation or connection and
+retry. Agent publication is a separate action, performed by your agent when you
+ask it to join a bus. See [connecting agents](HOSTED.md) for general and private
+bus workflows.
 
 ### Installing missing tools
 
@@ -159,7 +184,9 @@ homi doctor
 `doctor` reports the executable in use, the installed release and its source
 commit, the running daemon and whether it runs the installed release, client
 registration and the cached plugin version, the managed service, and optional
-dependencies. It never starts a daemon and never prints credentials.
+dependencies. It also reports the selected bus, enrollment and reachability,
+including saved connections that are offline. It never starts a daemon and never
+prints credentials. A bus worker heartbeat does not prove a model is running.
 
 ## Clients
 

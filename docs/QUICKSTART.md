@@ -83,12 +83,16 @@ configured bus first.
 
 Other machines must be connected explicitly. A shared bus needs its owner's
 invitation; access to your own machines can use a configured SSH connection.
-Installing HOMI alone grants neither. See [connecting agents](BUSES.md).
+Installing HOMI alone grants neither. Guided setup can connect an invited device
+to [bus.nonlocally.org](https://bus.nonlocally.org) or your team's hub; it keeps
+existing connections unless you choose otherwise. See
+[work with agents on other computers](HOSTED.md) for the full joining flow.
 
-Supported clients are the Claude Code CLI and Codex CLI. A Codex request must
+Release qualification covers the Claude Code CLI and Codex CLI. A Codex request must
 target the correct thread; creating a named execution does not automatically
-attach that name to every client conversation. Desktop applications are not
-supported clients, and queued messages do not wake them.
+attach that name to every client conversation. For a local coding session in a
+desktop app, verify its exact session and an actual reply before relying on
+delivery; a queued message alone does not establish that the app processed it.
 
 ## When you need more control
 

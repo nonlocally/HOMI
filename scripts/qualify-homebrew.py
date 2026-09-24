@@ -47,7 +47,7 @@ def verify_runtime(runtime):
         file = runtime / name
         if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != digest:
             raise RuntimeError("Homebrew changed or removed an immutable artifact file: " + name)
-    return {"source": manifest["source"], "files": len(manifest["files"])}
+    return {"source": manifest["source"], "version": manifest["version"], "files": len(manifest["files"])}
 
 
 def process_state(pid):
@@ -269,7 +269,7 @@ def main():
             report["formula_test"] = "pass"
         minimal = {**env, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
         version = run([entry, "version"], env=minimal)
-        assert "HOMI 0.3.0" in version
+        assert "HOMI " + report["installed_manifest"]["version"] in version
         assert "bus" in run([entry, "--help"], env=minimal)
         run([entry, "setup", "--no-clients", "--dry-run"], env=minimal)
         assert not (temporary / "data").exists(), "formula install/test unexpectedly ran setup"

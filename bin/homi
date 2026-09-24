@@ -31,7 +31,7 @@ case "$cmd" in
 HOMI — persistent agent identities, communication, and execution
 
   homi setup [--claude|--codex|--no-clients] [--service] [--dry-run]
-  homi setup --guided              choose clients, dependencies and profiles
+  homi setup --guided              choose clients, dependencies, profiles and bus
   homi setup --install-missing [--claude|--codex|--no-clients]
              [--terminal] [--mesh] [--ghostty] [--service|--no-service]
              [--yes] [--dry-run]

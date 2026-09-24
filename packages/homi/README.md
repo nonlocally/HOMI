@@ -6,7 +6,7 @@ profiles. Install the reviewed archive from
 [nonlocally/HOMI releases](https://github.com/nonlocally/HOMI/releases); see the
 [combined package guide](../communicate/README.md) for setup and lifecycle details.
 The historical npm name is retained for compatibility; this does not claim that
-version 0.3.0 has been published to npm.
+version 0.4.0 has been published to npm.
 
 This package preserves the legacy durable MCP tool names (`claim`, `send`,
 `agents_list`, `seat_spawn`, and others). `homi serve` still exposes that legacy

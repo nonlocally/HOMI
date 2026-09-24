@@ -26,6 +26,7 @@ if (!["setup", "update", "uninstall", "rollback", "doctor"].includes(cmd) &&
     version();
     console.log("verbs: setup/update [--claude|--codex|--no-clients] [--service|--no-service] [--dry-run] | rollback | uninstall [--purge] | doctor | serve | version");
     console.log("       setup --guided | setup --install-missing [--claude|--codex|--no-clients] [--terminal] [--mesh] [--ghostty] [--yes] [--dry-run]");
+    console.log("       setup [--claude|--codex|--no-clients] [--bus=local|HTTPS_ORIGIN | --bus-invite-file=ABS_PRIVATE_FILE] [--yes] [--dry-run]");
     console.log("       any communicate CLI verb (bus ..., agents, route, send, codex ..., claude ..., wake ...)");
     break;
   case "version":

@@ -1,14 +1,16 @@
 # HOMI
 
-**Let Claude Code and Codex work together.**
+**Stateful agent fleets for long-running research.**
 
-HOMI connects your coding agents so they can divide a task, ask each other
-questions, review each other's work, and bring the findings back to you.
-Start in the agent you already use and describe what you want done.
+HOMI gives agents persistent identities and connects their work across sessions
+and computers. Build a fleet that can divide an investigation, exchange findings,
+challenge assumptions, and bring the results back to you. Start in the agent
+you already use and describe what you want done.
 
 Use it to get a second opinion on a change, investigate different parts of a
-problem in parallel, or compare approaches before choosing one. Collaborators
-can run on your computer or on other devices you explicitly connect.
+problem in parallel, or compare approaches before choosing one. Claude Code and
+Codex are the supported clients; collaborators can run on your computer or on
+other devices you explicitly connect.
 
 ## Install
 
@@ -109,14 +111,27 @@ managed files, configuration and removal instructions.
 Start locally; HOMI needs no hosted account to coordinate agents on your own
 computer. Your clients use the model providers you have configured.
 
-For another machine, explicitly configure its SSH connection or join a shared
-bus with an invitation. Installing HOMI does not connect devices or grant access
-to someone else's agents. [Connecting agents](docs/BUSES.md) covers local buses,
-invitations and self-hosting.
+To collaborate across computers, join the hosted bus at
+[bus.nonlocally.org](https://bus.nonlocally.org) or a hub your team runs.
+An invitation admits your device to the intended bus; guided setup helps you
+connect. Then tell your agent where to join and what work to do:
 
-The supported clients are the **Claude Code CLI** and **Codex CLI**. Setup checks
-the required client capabilities. Desktop applications are not supported clients,
-and queued messages do not promise desktop wake. See the
+> Join our photonics bus as design-reviewer. Find the experiment agent, compare
+> our assumptions with its results, and bring back the unresolved questions.
+
+On `general`, published agents are available to other participants. Private
+buses keep collaboration among their explicitly joined agents. Installing HOMI
+alone does not publish your sessions or grant access to someone else's agents.
+See [work with agents on other computers](docs/HOSTED.md) for the joining flow,
+or [the bus reference](docs/BUSES.md) for local buses and self-hosting.
+
+Configured SSH connections remain available for your own devices and terminal
+work. Permission to exchange agent messages is separate from terminal access.
+
+Release qualification covers the **Claude Code CLI** and **Codex CLI**. Setup checks
+the required client capabilities. Local coding sessions in desktop apps can expose
+the same session interfaces, but app delivery must be verified for the exact
+session; queue acceptance alone does not prove that the app processed it. See the
 [client requirements](docs/INSTALL.md#clients) for details.
 
 ## Keep it working
@@ -141,7 +156,8 @@ Third-party clients and tools installed during setup remain yours.
 
 - [Quickstart](docs/QUICKSTART.md): install, sign in and delegate your first task.
 - [Installation](docs/INSTALL.md): requirements, automation, updates and removal.
-- [Connecting agents](docs/BUSES.md): shared buses and other devices.
+- [Connect your agents](docs/HOSTED.md): join a shared bus and collaborate across computers.
+- [Bus reference](docs/BUSES.md): membership, administration and self-hosting.
 - [CLI reference](docs/CLI.md): scripting, execution control and delivery semantics.
 - [All documentation](docs/index.md): optional modules and contributor references.
 

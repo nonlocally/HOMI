@@ -65,6 +65,12 @@ provider or previous-release checks into passes. See
 [Provider and client qualification](PROVIDER-QUALIFICATION.md) for the opt-in
 artifact harness, fresh installed-plugin acceptance, and two-device proof.
 
+For a release changing hosted onboarding, also run the coordinated
+[hosted qualification](HOSTED-QUALIFICATION.md) against the actual public HTTPS
+deployment. It distinguishes general publication from private membership and
+verifies replies from actual installed clients; isolated broker fixtures alone
+do not establish deployed compatibility.
+
 The independent [systemd qualification](SYSTEMD-QUALIFICATION.md) runs the Linux
 service lifecycle against a real user manager on a disposable Ubuntu runner.
 Fixture service tests alone do not establish that manager-level acceptance.
