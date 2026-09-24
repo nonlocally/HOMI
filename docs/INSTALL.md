@@ -194,6 +194,29 @@ puts `homi` and `communicate` on PATH; you still run `homi setup` to register
 clients and, optionally, the service. Formula installation never configures your
 machine by itself.
 
+Homebrew upgrades make a new release available; activate it explicitly:
+
+```sh
+brew upgrade nonlocally/tap/homi
+"$(brew --prefix nonlocally/tap/homi)/bin/homi" update
+homi doctor
+```
+
+Calling the formula's full path ensures that `update` uses the new installer
+even if an older HOMI launcher comes first on PATH. Runtime commands continue
+using the release selected by setup or rollback until you activate another one.
+
+Remove HOMI's owned client registrations and service before removing the formula:
+
+```sh
+"$(brew --prefix nonlocally/tap/homi)/bin/homi" uninstall
+brew uninstall nonlocally/tap/homi
+```
+
+Use `uninstall --purge` in the first command if you also want to remove retained
+release copies. Identities, mail and credentials remain preserved. Homebrew alone
+does not remove HOMI's per-user integrations or state.
+
 ## Qualification
 
 How a release is built, tested, and qualified before publication is described in
