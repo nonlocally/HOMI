@@ -50,6 +50,25 @@ _PERM_ASK = re.compile(
     r"held message|deliver this message|drop it and tell the sender", re.I)
 _AFFORD = re.compile(r"❯\s*\d|›\s*\d|^\s*\d[.)]\s|\(y/n\)|\[y/n\]|\by/n\b"
                      r"|^\s*[❯›]\s+\S", re.M)  # bare highlighted row (unnumbered menus)
+# Choosing a menu row. An "allow" must be the plain, one-shot affirmative: never a row that would
+# widen permissions beyond this one action. Claude Code 2.1.278 offers "Yes, and switch to accept
+# edits (auto-approve file edits ... for this session)" as option 2 of a Write prompt; the older
+# skip list (always / don't ask / all future) let it through, and only row order kept respond()
+# from approving the whole session. Measured 2026-09-22 (scripts/fixtures/seat-claude-write-prompt.txt).
+_AFF = re.compile(r"yes|allow|approve|proceed|deliver|accept|ok\b", re.I)
+_STICKY = re.compile(r"always|don'?t ask|all future|auto-approve|accept edits|for this session"
+                     r"|switch to|remember|from now on|every time", re.I)
+_NEG = re.compile(r"\bno\b|deny|decline|drop|reject|cancel", re.I)
+
+
+def choose_option(menu, decision="allow"):
+    """Pure: pick the row to drive for `decision`, or None (fail closed) when no row is
+    unambiguously right. allow = affirmative, not negative, not sticky/session-wide.
+    deny = negative, not affirmative."""
+    if decision in ("deny", "no", "reject"):
+        return next((r for r in menu if _NEG.search(r["text"]) and not _AFF.search(r["text"])), None)
+    return next((r for r in menu if _AFF.search(r["text"]) and not _STICKY.search(r["text"])
+                 and not _NEG.search(r["text"])), None)
 # Secret shapes to mask on read unless --raw.
 _SECRETS = [
     # Distinctive credential prefixes — matched anywhere (a leading word char,
@@ -346,9 +365,6 @@ class SeatDriver:
         # option. Both allow and deny drive to a matching row and Enter; NEITHER
         # ever presses a bare Enter on an unknown default (that could confirm the
         # opposite of what was asked). No matching row => FAIL CLOSED.
-        aff = re.compile(r"yes|allow|approve|proceed|deliver|accept|ok\b", re.I)
-        skip = re.compile(r"always|don'?t ask|all future", re.I)
-        neg = re.compile(r"\bno\b|deny|decline|drop|reject|cancel", re.I)
         menu = self._menu_block(bottom)
         if decision in ("deny", "no", "reject"):
             if not menu:
@@ -357,20 +373,18 @@ class SeatDriver:
                     self._tmux("send-keys", "-t", seat, "Enter")
                     return {"ok": True, "responded": "n"}
                 return {"ok": False, "err": "no menu to deny in — refusing to guess"}
-            tgt = next((r for r in menu
-                        if neg.search(r["text"]) and not aff.search(r["text"])), None)
+            tgt = choose_option(menu, "deny")
             if tgt is None:
                 return {"ok": False, "err": "no clear deny option — refusing to guess"}
             return self._drive_menu(seat, menu, tgt, "deny")
         if not menu:
             return {"ok": False, "err": "no menu block found on screen"}
-        target = next((r for r in menu
-                       if aff.search(r["text"]) and not skip.search(r["text"])
-                       and not neg.search(r["text"])), None)
+        target = choose_option(menu, "allow")
         if target is None:
             return {"ok": False,
-                    "err": "no clearly-affirmative option in the menu — refusing "
-                           "to guess (respond by hand or seat send)"}
+                    "err": "no clearly-affirmative one-shot option in the menu (sticky/"
+                           "session-wide rows are never chosen) — refusing to guess "
+                           "(respond by hand or seat send)"}
         return self._drive_menu(seat, menu, target, "allow")
 
     def _drive_menu(self, seat, menu, target, kind):
@@ -422,6 +436,9 @@ class SeatDriver:
                                  "text": m.group(2).strip()})
             return rows
         hl_indent = len(lines[hl_idx]) - len(lines[hl_idx].lstrip())
+        # In a NUMBERED menu every option carries a digit; an unnumbered line is a wrapped
+        # continuation or a footer ("Esc to cancel · Tab to amend"), never an option.
+        numbered = bool(re.match(r"^\s*[❯›]\s+\d[.)]\s", lines[hl_idx]))
 
         def row_of(ln):
             m = re.match(r"^(\s*)([❯›]\s+)?(?:(\d)[.)]\s+)?(\S.*)$", ln)
@@ -430,6 +447,10 @@ class SeatDriver:
             indent = len(m.group(1))
             hl = bool(m.group(2))
             text = m.group(4).strip()
+            # The ASK itself ("Do you want to create x?") sits right above the options and is
+            # never one of them; nor is anything from a diff/file preview above the ask.
+            if not hl and not m.group(3) and text.endswith("?"):
+                return None
             # The highlighted row is always in. For non-highlighted candidates,
             # exclude PROSE that happens to share the indent: a message body in
             # guillemets, or a label/sentence ending in a colon (e.g. "…what
@@ -440,20 +461,34 @@ class SeatDriver:
                     return None
                 if text.endswith(":") or "«" in text or "»" in text:
                     return None
+                if numbered and not m.group(3):
+                    return None
             return {"hl": hl, "digit": m.group(3), "text": text}
 
+        border = re.compile(r"^\s*[│╰╭─└┌╌┄═]")   # box, rule AND the dashed diff-preview rule
         block = []
         i = hl_idx
         while i >= 0:
             r = row_of(lines[i])
-            if r is None or re.match(r"^\s*[│╰╭─└┌]", lines[i]):
+            if r is None or border.match(lines[i]):
                 break
             block.insert(0, r)
             i -= 1
         i = hl_idx + 1
         while i < len(lines):
-            r = row_of(lines[i])
-            if r is None or re.match(r"^\s*[│╰╭─└┌]", lines[i]):
+            ln = lines[i]
+            if border.match(ln):
+                break
+            r = row_of(ln)
+            if r is None:
+                # A wrapped option continues on deeper-indented lines ("Yes, and switch to accept
+                # edits (auto-approve file / edits and common ...) for this session"). Fold them
+                # into the previous row instead of ending the menu there, which used to hide "3. No".
+                m = re.match(r"^(\s*)(\S.*)$", ln)
+                if block and m and len(m.group(1)) > hl_indent and not m.group(2).endswith(":"):
+                    block[-1]["text"] = (block[-1]["text"] + " " + m.group(2).strip()).strip()
+                    i += 1
+                    continue
                 break
             block.append(r)
             i += 1
