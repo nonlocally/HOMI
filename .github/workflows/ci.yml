@@ -142,7 +142,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check formula payload preservation through opt-linked reinstall paths
-        run: python3 -B scripts/test-homebrew-formula.py
+        run: |
+          python3 -B scripts/test-homebrew-formula.py
+          python3 -B scripts/test-homebrew-qualification.py
       - name: Build the immutable runtime independently of the core test matrix
         run: python3 scripts/build-release.py
       - name: Qualify canonical Homebrew install and reinstall on the disposable runner

@@ -9,6 +9,7 @@ then tests the canonical linked formula with ordinary dependency resolution,
 brew test and brew reinstall. Never use that mode on a shared workstation.
 """
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 def run(argv, *, env=None, timeout=180, quiet=False):
@@ -46,6 +48,122 @@ def verify_runtime(runtime):
         if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != digest:
             raise RuntimeError("Homebrew changed or removed an immutable artifact file: " + name)
     return {"source": manifest["source"], "files": len(manifest["files"])}
+
+
+def process_state(pid):
+    """A PID is gone only when the kernel says ESRCH; never signal it."""
+    try:
+        os.kill(pid, 0)
+    except OSError as error:
+        return "gone" if error.errno == errno.ESRCH else "unknown"
+    return "live"
+
+
+def bounded_output(value):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return (value or "")[:4096]
+
+
+class OwnedDaemon:
+    """Track only this fixture's daemon, including its asynchronous shutdown."""
+
+    def __init__(self, root, entry, env, *, command=subprocess.run, probe=process_state,
+                 clock=time.monotonic, sleep=time.sleep, timeout=10):
+        self.root, self.entry, self.env = root, entry, env
+        self.socket = root / "state/homi/homi.sock"
+        self.pidfile = root / "state/homi/daemon.pid"
+        self.command, self.probe = command, probe
+        self.clock, self.sleep, self.timeout = clock, sleep, timeout
+        self.records = []
+        self.current = None
+
+    def begin_start(self):
+        if self.current and not self.current.get("confirmed"):
+            raise RuntimeError("previous isolated daemon shutdown was not confirmed")
+        self.current = {"start_attempted": True, "pid": None, "shutdown_checks": []}
+        self.records.append(self.current)
+
+    def observe(self):
+        record = self.current
+        state = {"socket_exists": self.socket.exists(), "pidfile_exists": self.pidfile.exists()}
+        if state["pidfile_exists"]:
+            try:
+                with self.pidfile.open() as handle:
+                    pid = int(handle.read(64).strip())
+                if not 1 < pid <= 2**31 - 1:
+                    raise ValueError("invalid PID")
+                if record["pid"] is None:
+                    record["pid"] = pid
+                elif record["pid"] != pid:
+                    record["ownership_error"] = "owned pidfile changed"
+            except (OSError, ValueError):
+                state["pid_error"] = "owned pidfile unreadable or invalid"
+        if state["socket_exists"] or state["pidfile_exists"]:
+            record["observed_endpoint"] = True
+        if record.get("ownership_error"):
+            state["pid_error"] = record["ownership_error"]
+        state["process"] = self.probe(record["pid"]) if record["pid"] is not None else "unrecorded"
+        return state
+
+    def capture_pid(self):
+        state = self.observe()
+        self.current["startup_state"] = state
+        if self.current["pid"] is None or state.get("pid_error"):
+            raise RuntimeError("could not record isolated daemon PID after startup")
+
+    def stop(self, *, required=True):
+        if self.current and self.current.get("confirmed"):
+            return True  # Never issue a second stop after the acknowledged exit.
+        if self.current is None:
+            self.current = {"start_attempted": False, "pid": None, "shutdown_checks": []}
+            self.records.append(self.current)
+        record = self.current
+        started = self.clock()
+        deadline = started + self.timeout
+        state = self.observe()
+        # Capture the PID before asking the exact owned endpoint to stop. An
+        # unsuccessful command is not itself proof that the daemon survived.
+        if (record["pid"] is not None and not state.get("pid_error") and
+                state["process"] != "gone" and "stop_command" not in record):
+            command = record["stop_command"] = {"returncode": None, "stdout": "", "stderr": ""}
+            try:
+                result = self.command([str(self.entry), "stop"], env=self.env, text=True,
+                                      capture_output=True, timeout=max(0.001, deadline - self.clock()))
+                command.update(returncode=result.returncode, stdout=bounded_output(result.stdout),
+                               stderr=bounded_output(result.stderr))
+            except subprocess.TimeoutExpired as error:
+                command.update(error="timeout", stdout=bounded_output(error.stdout), stderr=bounded_output(error.stderr))
+            except OSError as error:
+                command.update(error=type(error).__name__, errno=error.errno)
+        while True:
+            state = self.observe()
+            absent = not state["socket_exists"] and not state["pidfile_exists"]
+            inert = record["pid"] is None and not record["start_attempted"] and not record.get("observed_endpoint")
+            confirmed = absent and not state.get("pid_error") and (state["process"] == "gone" or inert)
+            if confirmed or self.clock() >= deadline:
+                break
+            self.sleep(min(0.05, max(0, deadline - self.clock())))
+        record["confirmed"] = confirmed
+        record["shutdown_checks"].append({"confirmed": confirmed, "final_state": state,
+                                           "elapsed_seconds": round(self.clock() - started, 3)})
+        if not confirmed and required:
+            raise RuntimeError(f"isolated daemon shutdown unconfirmed; retaining {self.root}")
+        return confirmed
+
+
+def finish_fixture_cleanup(report, root, cleanup_errors):
+    """Keep the fixture and original error whenever cleanup is unconfirmed."""
+    if not cleanup_errors:
+        try:
+            shutil.rmtree(root)
+        except OSError as error:
+            cleanup_errors.append("fixture removal: " + type(error).__name__)
+    report["temporary_root"] = str(root)
+    report["fixture_retained"] = root.exists()
+    report["cleanup_errors"] = cleanup_errors
+    if cleanup_errors:
+        report["ok"] = False
 
 
 def main():
@@ -118,6 +236,8 @@ def main():
     for key in ("HOMI_SOCK", "HOMI_DAEMON_DIR", "CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "COMMUNICATE_HOME"):
         env.pop(key, None)
     stable = temporary / "data/bin/homi"
+    daemon = OwnedDaemon(temporary, stable, env)
+    report["daemon_lifecycles"] = daemon.records
     try:
         # Current Homebrew rejects arbitrary formula files. A private local tap
         # exercises normal formula loading without a source clone or publication.
@@ -155,12 +275,14 @@ def main():
         assert not (temporary / "data").exists(), "formula install/test unexpectedly ran setup"
         report["checks"].append("formula install and equivalent version/help/dry-run checks with minimal PATH")
         run([entry, "setup", "--no-clients"], env=env)
+        daemon.begin_start()
         run([stable, "start"], env=env)
+        daemon.capture_pid()
         run([stable, "claim", "brew-fixture"], env=env)
         run([stable, "send", "brew-fixture", "--from", "qualification", "--", "brew-reinstall-sentinel"], env=env)
         stored = run([stable, "inbox", "brew-fixture"], env=env)
         assert "brew-reinstall-sentinel" in stored
-        run([stable, "stop"], env=env)
+        daemon.stop()
         report["checks"].append("explicit isolated setup and durable claim/send/inbox")
         # Older host dependencies may not meet current tap metadata. Reinstall
         # exposes no --ignore-dependencies flag, so forbid changes to every
@@ -186,16 +308,20 @@ def main():
             run([brew, "test", qualified_name], env=brew_env)
             report["reinstalled_formula_test"] = "pass"
         run([keg / "bin/communicate", "version"], env=minimal)
+        daemon.begin_start()
         run([stable, "start"], env=env)
+        daemon.capture_pid()
         assert "brew-reinstall-sentinel" in run([stable, "inbox", "brew-fixture"], env=env)
-        run([stable, "stop"], env=env)
+        daemon.stop()
         report["checks"].append("formula reinstall preserves stable installation and mail")
         run([brew, "uninstall", "--formula", qualified_name], env=brew_env)
         installed = False
         assert not (prefix / "opt" / formula_name).exists()
+        daemon.begin_start()
         run([stable, "start"], env=env)
+        daemon.capture_pid()
         assert "brew-reinstall-sentinel" in run([stable, "inbox", "brew-fixture"], env=env)
-        run([stable, "stop"], env=env)
+        daemon.stop()
         report["checks"].append("formula uninstall preserves explicit installation and mail")
         after = {str(p): fingerprint(p) for p in protected}
         assert before == after, "pre-existing executable changed"
@@ -207,24 +333,19 @@ def main():
         raise
     finally:
         cleanup_errors = []
-        if stable.exists() and (temporary / "state/homi/homi.sock").exists():
-            try:
-                stopped = subprocess.run([str(stable), "stop"], env=env, capture_output=True, timeout=20)
-                if stopped.returncode:
-                    cleanup_errors.append("isolated daemon stop")
-            except subprocess.TimeoutExpired:
-                cleanup_errors.append("isolated daemon stop timeout")
+        if not daemon.stop(required=False):
+            cleanup_errors.append("isolated daemon shutdown unconfirmed")
         # A failed install can still have created a keg. Its name was absent
         # before this run, so this cleanup never owns a pre-existing formula.
         if installed or (prefix / "Cellar" / formula_name).exists():
             try:
                 run([brew, "uninstall", "--formula", qualified_name], env=brew_env)
-            except RuntimeError:
+            except (RuntimeError, subprocess.TimeoutExpired):
                 cleanup_errors.append("candidate keg removal")
         if tap_created:
             try:
                 run([brew, "untap", tap], env=brew_env)
-            except RuntimeError:
+            except (RuntimeError, subprocess.TimeoutExpired):
                 cleanup_errors.append("candidate tap removal")
         report["protected_after"] = {str(p): fingerprint(p) for p in protected}
         report["dependencies_after"] = {name: subprocess.run([brew, "list", "--versions", name], env=brew_env,
@@ -234,13 +355,9 @@ def main():
             cleanup_errors.append("pre-existing executable changed")
         if not args.disposable_ci and report["dependencies_after"] != dependencies:
             cleanup_errors.append("dependency versions changed")
-        report["cleanup_errors"] = cleanup_errors
-        if cleanup_errors:
-            report["ok"] = False
-        else:
-            shutil.rmtree(temporary)
+        finish_fixture_cleanup(report, temporary, cleanup_errors)
         (args.work / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        if cleanup_errors:
+        if cleanup_errors and "error" not in report:
             raise RuntimeError("qualification cleanup requires attention: " + ", ".join(cleanup_errors))
     print("PASS: Homebrew install, wrappers, reinstall and uninstall with preserved state; brew test: " + report["formula_test"], flush=True)
 
