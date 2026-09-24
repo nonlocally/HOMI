@@ -1,0 +1,3 @@
+# Optional adapter only; sourcing this file never probes/starts a runtime.
+export HOMI_BOX_LAUNCHER="${HOMI_BOX_LAUNCHER:-$HOME/.local/bin/homi-box}"
+box() { "$HOMI_BOX_LAUNCHER" "$@"; }
