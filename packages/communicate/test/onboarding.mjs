@@ -2,7 +2,7 @@
 // Dependency planning/consent tests. Installers, providers and host setup are
 // injected fakes; actual package installation is a separate artifact gate.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseOnboardingArgs, planOnboarding, executeOnboarding, shouldGuide,
@@ -514,6 +514,51 @@ test("automated private invitation never appears in logs or the returned setup p
     assert.equal(readFileSync(file, "utf8"), code);
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
+
+for (const mode of ["local", "existing", "invite"]) {
+  for (const fails of [false, true]) {
+    test(`${mode} bus setup uses the selected Python and restores PATH after ${fails ? "failure" : "success"}`, async () => {
+      const temp = mkdtempSync(path.join(os.tmpdir(), "homi-bus-python-"));
+      const originalPath = process.env.PATH;
+      try {
+        const earlier = path.join(temp, "earlier"), selected = path.join(temp, "selected");
+        for (const [directory, label] of [[earlier, "earlier-python"], [selected, "selected-python"]]) {
+          mkdirSync(directory);
+          writeFileSync(path.join(directory, "python3"), `#!/bin/sh\nprintf '%s\\n' '${label}'\n`, { mode: 0o755 });
+        }
+        process.env.PATH = earlier + path.delimiter + (originalPath || "");
+        const priorPath = process.env.PATH;
+        const state = snapshot({ paths: { python3: path.join(selected, "python3") } });
+        const f = fixture(makePlan(state), state);
+        const { prepareBus: _fixturePrepare, ...io } = f.io;
+        const invite = path.join(temp, "invitation");
+        const code = "commbus1." + Buffer.from(JSON.stringify({ url: "https://shared.example", invite: "fixture-only" })).toString("base64url");
+        writeFileSync(invite, code, { mode: 0o600 });
+        const flag = mode === "invite" ? `--bus-invite-file=${invite}` : `--bus=${mode === "local" ? "local" : "https://shared.example"}`;
+        let resolved, appliedMode;
+        const launch = () => runOnboarding(["--install-missing", "--claude", "--no-service", "--yes", flag], {
+          ...io, stdinTTY: false, stdoutTTY: false,
+          applyBus: async (choice, { env }) => {
+            appliedMode = choice.mode;
+            // Exercise child executable lookup using harmless fixture programs,
+            // as the bus launcher resolves its bare python3 through this PATH.
+            resolved = (await runOnboardingCommand("python3", [], { env, capture: true })).stdout.trim();
+            if (fails) throw new Error("fixture bus failure");
+          },
+        });
+        if (fails) await assert.rejects(launch(), /optional bus setup did not complete/);
+        else assert.equal((await launch()).status, "complete");
+        assert.equal(appliedMode, mode);
+        assert.equal(resolved, "selected-python", "bus setup used an earlier, unselected interpreter");
+        assert.equal(process.env.PATH, priorPath, "bus setup leaked its selected PATH into the caller");
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+        rmSync(temp, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 test("default command runner preserves literal executable paths and arguments", async () => {
   const temp = mkdtempSync(path.join(os.tmpdir(), "homi-onboard-argv-"));

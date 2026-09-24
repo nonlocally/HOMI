@@ -334,6 +334,11 @@ export async function runOnboarding(argv, injected = {}) {
     try { await callback(); }
     finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
   };
+  const applySelectedBus = async (choice) => {
+    let result;
+    await withSelectedPath(async () => { result = await applyBus(choice, { env: environment() }); });
+    return result;
+  };
   try {
     if (options.guided && !options.dryRun && stdinTTY) {
       if (!options.claude && !options.codex && !options.noClients) {
@@ -371,12 +376,12 @@ export async function runOnboarding(argv, injected = {}) {
       profile,
       prepareBus: async (selected) => {
         if (selected.bus) return { description: selected.bus === "local" ? "local, without starting a service" : `existing enrollment at ${selected.bus}`,
-          apply: () => applyBus(selected.bus === "local" ? { mode: "local" } : { mode: "existing", hub: selected.bus }, { env: environment() }) };
+          apply: () => applySelectedBus(selected.bus === "local" ? { mode: "local" } : { mode: "existing", hub: selected.bus }) };
         const code = selected.busInviteFile ? readPrivateInvitation(selected.busInviteFile) : await secret("Paste the invitation (hidden; empty cancels):");
         if (!code) return null;
         const hub = invitationOrigin(code);
         if (stdinTTY && !await confirm(`Enroll this installation at ${hub} using this invitation?`)) return null;
-        return { description: `invited enrollment at ${hub}`, apply: () => applyBus({ mode: "invite", code }, { env: environment() }) };
+        return { description: `invited enrollment at ${hub}`, apply: () => applySelectedBus({ mode: "invite", code }) };
       },
       doctor: async () => { await withSelectedPath(async () => (await import("./setup.mjs")).runDoctor()); },
       installScript: (step, options) => installScript(step, options, injected.run || runOnboardingCommand),
