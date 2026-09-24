@@ -21,9 +21,9 @@ usually get tangled:
 - **Execution.** Where that identity is running right now: a Claude Code or Codex
   session, a tmux seat, a linked device. It can stop and restart without the
   identity changing.
-- **Delivery.** Whether a message was *stored*, *submitted* to a running client,
-  or *replied* to. HOMI reports which one happened and never upgrades a weaker
-  result into a stronger claim.
+- **Delivery.** Whether a message was *stored*, *submitted* to a client,
+  or *replied* to. A delivery receipt alone does not prove an answer; use an
+  explicit reply token to correlate a response with its question.
 
 HOMI runs on your machine and sends no usage telemetry. Local communication needs
 no hosted account. Your model clients use their configured providers; remote

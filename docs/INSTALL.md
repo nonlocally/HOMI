@@ -76,7 +76,7 @@ Codex thread. A running session keeps the plugin it loaded at start.
 The plugin is `communicate@communicate` from the marketplace `communicate`, served
 from the installed release. Setup records what was registered before it ran
 (installed, enabled, marketplace source, and for Codex the plugin's user
-configuration) and restores exactly that on uninstall. If you edit those client
+configuration) and restores that installation and its settings on uninstall. If you edit those client
 settings after setup, later setup, rollback, or uninstall refuse to replace them
 until you reconcile the change; they are never silently overwritten. Client
 plugin registration is verified with Claude Code's `claude plugin` commands and
