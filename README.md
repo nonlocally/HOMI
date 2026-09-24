@@ -5,10 +5,10 @@ other across sessions and machines, and runs them in terminal seats you can obse
 and control. One `homi` command, one Claude Code/Codex plugin, one MCP server.
 macOS and Linux.
 
-> **Status.** 0.3.0 is a release candidate. The public release archive and the
-> Homebrew tap are not published yet. Until they are, install from a release
-> archive obtained from the maintainers; the commands below are the ones that
-> archive uses. See [release qualification](docs/RELEASING.md).
+> **HOMI 0.3.0 release.** The [release archive and checksum](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
+> require repository access while public distribution is pending. Install from
+> the archive below; Homebrew availability awaits public launch.
+> See [release qualification](docs/RELEASING.md).
 
 ## Why
 
@@ -35,7 +35,10 @@ Requirements: macOS or Linux, Node.js 20+, Python 3.9+, Bash. Optional:
 tmux for terminal seats; Claude Code and/or Codex CLI, authenticated by you,
 for agent sessions; SSH (and optionally Tailscale) for other devices.
 
+With GitHub CLI authenticated to an account that has repository access:
+
 ```sh
+gh release download v0.3.0 --repo nonlocally/HOMI --pattern 'homi-0.3.0.tar.gz*'
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
 tar -xzf homi-0.3.0.tar.gz
 ./homi-0.3.0/bin/homi setup --claude --codex     # enable only the clients you use
@@ -50,8 +53,9 @@ recovery. Core setup leaves your shell rc, editor, and Git configuration alone;
 client changes are limited to the selected plugin registration. Full details, flags, and the
 lifecycle are in [INSTALL.md](docs/INSTALL.md).
 
-Homebrew (`brew install nonlocally/tap/homi`) is the planned channel once the tap
-is published. It installs the commands; then run `homi setup --claude --codex`
+The Homebrew tap is being staged privately for public launch; use the archive
+for now. Once public, `brew install nonlocally/tap/homi` installs the commands;
+then run `homi setup --claude --codex`
 yourself to enable the clients you use. Service installation is also explicit.
 
 ## First success

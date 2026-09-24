@@ -1,9 +1,8 @@
 # Installation
 
-> **Status.** 0.3.0 is a release candidate. The public release archive and the
-> Homebrew tap are not published yet. Install from a release archive obtained
-> from the maintainers; the same archive and commands become the public channel
-> when publication completes.
+> **HOMI 0.3.0 release.** The [release archive and checksum](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
+> require repository access while public distribution is pending. Use the
+> authenticated archive download below; Homebrew availability awaits public launch.
 
 ## Requirements
 
@@ -20,10 +19,12 @@ hosted service.
 
 ## Get the archive
 
-The release is `homi-VERSION.tar.gz` with a `.sha256` beside it. Verify before
-extracting:
+The release is `homi-VERSION.tar.gz` with a `.sha256` beside it. With GitHub CLI
+authenticated to an account that has repository access, download both files,
+then verify before extracting:
 
 ```sh
+gh release download v0.3.0 --repo nonlocally/HOMI --pattern 'homi-0.3.0.tar.gz*'
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
 tar -xzf homi-0.3.0.tar.gz
 ```
@@ -188,8 +189,10 @@ removes only what is still exactly what it wrote. See [PROFILES.md](PROFILES.md)
 
 ## Homebrew
 
-`brew install nonlocally/tap/homi` is the planned channel once the tap is
-published. The formula installs the same archive under Homebrew's prefix and
+The Homebrew tap is being staged privately for public launch. Use the release
+archive for now; the commands below apply once the tap is public.
+
+`brew install nonlocally/tap/homi` installs the same archive under Homebrew's prefix and
 puts `homi` and `communicate` on PATH; you still run `homi setup` to register
 clients and, optionally, the service. Formula installation never configures your
 machine by itself.
