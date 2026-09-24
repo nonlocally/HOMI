@@ -537,7 +537,8 @@ assert_eq "1" "$(grep -c "rotate %1" "$RACCT")" "a worker still running is never
 
 # --- the StopFailure corroboration: rotate on the FIRST tick -----------------
 rdir c3; rwall
-RP_GATE=1 RP_WALLEV=480 rtick 500
+RP_GATE=1 RP_WALLEV=430 rtick 500
+assert_contains "$(cat "$ANU_NOTIFY_DIR/r_default_1")" "confirm=1" "the 70-second-old event still needs a second confirming tick"
 assert_eq "" "$(cat "$RACCT")" "a stale @anu_wall_event (>60s) does not shortcut the confirmation"
 rdir c4
 RP_GATE=1 RP_WALLEV=490 rtick 500; rwait
