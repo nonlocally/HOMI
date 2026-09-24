@@ -260,6 +260,9 @@ class CodexAppServer:
                                                    "sandbox_approval": False, "request_permissions": False, "skill_approval": False}}}
         if session:
             params["threadId"] = session
+            # Resume may immediately dispatch a queued turn before the response
+            # arrives. Its approval context is the already verified exact ID.
+            self.session = session
         result = self.call("thread/resume" if session else "thread/start", params)
         self.session = result["thread"]["id"]
         require(not session or self.session == session, "Codex app-server resumed a different session")
@@ -471,6 +474,13 @@ def main():
         nonce = uuid.uuid4().hex
         payload = "nonce=" + nonce + "\n" + "\n".join(f"{i:03d}|{uuid.uuid4().hex}|literal $HOME `id` --from \\\" '" for i in range(112))
         challenge = "Reply with the complete enclosed payload, preserving every byte.\nHOMI_PAYLOAD_BEGIN\n" + payload + "\nHOMI_PAYLOAD_END"
+        if installed_codex:
+            # This phase proves dormant-session delivery. If we enqueue while
+            # registration is still running, Codex can start the queued turn
+            # as soon as registration ends; closing then interrupts delivery.
+            process.wait_turn()
+            process.close()
+            require(process.process.poll() is not None, "Codex registration process is still running before queueing")
         sent = bus.request(control, "send", sender=sender["id"], target=registration["id"], bus="general", message=challenge)
         terminal = "delivered" if args.provider == "claude" else "queued"
 
@@ -481,12 +491,10 @@ def main():
 
         receipt = wait_for(delivered, args.timeout, "provider endpoint delivery")
         if installed_codex:
-            process.wait_turn()
-            process.close()
             process = CodexAppServer(executable, env, temp, evidence, "resume", name, args.timeout, args.codex_profile)
             active.append(process)
-            process.thread(session)
             process.reply = {"id": sent["id"], "payload": payload, "recipient": registration["id"], "hub": owner["url"]}
+            process.thread(session)
             process.prompt("Consume the queued HOMI message and reply through bus_reply exactly as previously instructed. "
                            "Do not start a new conversation. Set from=" + registration["id"] + ".")
         elif args.provider == "codex":

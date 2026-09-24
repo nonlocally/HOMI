@@ -74,6 +74,14 @@ override the installed MCP executable or environment. This qualifies the Codex
 app-server client surface; it does not claim that noninteractive `codex exec` can
 answer approval prompts.
 
+For the dormant-session phase, the registration turn finishes and its process
+exits **before** the challenge is queued. Codex can automatically consume a
+queued message as soon as a running turn ends; shutting it down at that point
+would interrupt delivery. The resumed process has the exact reply authorization
+and verified session ID ready before `thread/resume`, which may immediately
+start processing the queue. A `queued` receipt alone never counts as a model
+reply.
+
 Codex 0.156.1 intersects host plugin policies with the plugin's declared approval
 policy. An `approve` override cannot relax a required prompt, and `codex exec`
 rejects that prompt under its noninteractive policy. Installed qualification
