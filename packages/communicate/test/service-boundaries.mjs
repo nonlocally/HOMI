@@ -57,11 +57,16 @@ else if(a.includes('enable')){op='enable';label=a.at(-1);}
 else if(a.includes('start')){op='load';label=a.at(-1);}
 else if(a.includes('daemon-reload'))process.exit(0);
 if(op==='print'){
+ if(process.env.FAIL_INSPECT==='1'){console.error('manager unavailable');process.exit(9);}
  const job=jobs[label];
  if(!job||(a[0]==='print'&&!job.active)){console.error('Could not find service');process.exit(113);}
- console.log(a[0]==='print'?'path = '+job.path:'FragmentPath='+job.path+'\\nActiveState='+(job.active?'active':'inactive')+'\\nUnitFileState='+(job.enabled?(job.runtime?'enabled-runtime':'enabled'):'disabled'));process.exit(0);
+ console.log(a[0]==='print'?'path = '+job.path:'FragmentPath='+(process.env.EMPTY_FRAGMENT==='1'?'':job.path)+'\\nActiveState='+(job.active?'active':'inactive')+'\\nUnitFileState='+(job.enabled?(job.runtime?'enabled-runtime':'enabled'):'disabled'));process.exit(0);
 }
-if(op==='bootout'){if(jobs[label]){jobs[label].active=false;if(a[0]!=='bootout')jobs[label].enabled=false;}}
+if(op==='bootout'){
+ if(process.env.FAIL_UNLOAD==='1'){console.error('manager refused unload');process.exit(9);}
+ if(process.env.NOOP_UNLOAD==='1')process.exit(0);
+ if(jobs[label]){jobs[label].active=false;if(a[0]!=='bootout')jobs[label].enabled=false;}
+}
 if(op==='enable'){
  jobs[label]??={active:false,path:path.join(process.env.XDG_CONFIG_HOME,'systemd/user',label)};
  jobs[label].enabled=true;jobs[label].runtime=a.includes('--runtime');
@@ -163,6 +168,76 @@ fs.writeFileSync(file,JSON.stringify(jobs));
     assert.equal(readRegistry()[definition.label].runtime, true);
     assert.equal(readRegistry()[definition.label].active, false);
   }
+
+  // A unit can be deleted while its manager job remains loaded. Missing files
+  // must not cause ownership to be released without checking/stopping that job.
+  const restoreManager = () => {
+    const jobs = readRegistry();
+    jobs[definition.label] = { active: true, enabled: true, path: definition.path, source: "/owned/daemon.py" };
+    writeRegistry(jobs);
+  };
+  const missingRecord = JSON.parse(JSON.stringify({ ...record, original: null }));
+  fs.rmSync(definition.path);
+  restoreManager();
+  const ledger = path.join(data, "missing-unit-ledger.json");
+  writeJson(ledger, { service: missingRecord });
+  const uninstallRecorded = async () => {
+    const saved = JSON.parse(fs.readFileSync(ledger));
+    if (await uninstallService(saved.service)) delete saved.service;
+    writeJson(ledger, saved);
+  };
+  for (const failure of ["foreign", "inspect", "unload", "noop"]) {
+    restoreManager();
+    if (failure === "foreign") {
+      const jobs = readRegistry(); jobs[definition.label].path = path.join(temp, "foreign-unit"); writeRegistry(jobs);
+    } else process.env[{ inspect: "FAIL_INSPECT", unload: "FAIL_UNLOAD", noop: "NOOP_UNLOAD" }[failure]] = "1";
+    const beforeCalls = fs.readFileSync(calls, "utf8").length;
+    await assert.rejects(uninstallRecorded(), /another\/unknown unit|verify service ownership|refused unload|did not stop and disable/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(ledger)).service, missingRecord, "failed missing-unit uninstall lost ownership");
+    assert.equal(readRegistry()[definition.label].active, true);
+    assert(!fs.existsSync(definition.path), "failed missing-unit inspection recreated a unit");
+    if (["foreign", "inspect"].includes(failure)) assert(!/bootout|disable/.test(fs.readFileSync(calls, "utf8").slice(beforeCalls)), "unverified manager job was stopped");
+    delete process.env.FAIL_INSPECT; delete process.env.FAIL_UNLOAD; delete process.env.NOOP_UNLOAD;
+  }
+  if (process.platform === "linux") {
+    process.env.EMPTY_FRAGMENT = "1";
+    for (const [active, enabled] of [[true, false], [false, true]]) {
+      const jobs = readRegistry(); jobs[definition.label] = { ...jobs[definition.label], active, enabled }; writeRegistry(jobs);
+      await assert.rejects(uninstallRecorded(), /no FragmentPath/);
+      assert.deepEqual(JSON.parse(fs.readFileSync(ledger)).service, missingRecord);
+    }
+    const jobs = readRegistry(); jobs[definition.label].active = false; jobs[definition.label].enabled = false; writeRegistry(jobs);
+    await uninstallRecorded();
+    assert(!JSON.parse(fs.readFileSync(ledger)).service, "explicit absent/inactive systemd unit was not removable");
+    writeJson(ledger, { service: missingRecord });
+    delete process.env.EMPTY_FRAGMENT;
+  }
+  restoreManager();
+  await uninstallRecorded();
+  assert(!JSON.parse(fs.readFileSync(ledger)).service);
+  assert.equal(readRegistry()[definition.label].active, false);
+  if (process.platform === "linux") assert.equal(readRegistry()[definition.label].enabled, false);
+  assert(!fs.existsSync(definition.path));
+
+  // Missing managed units still retain the original operator's backup lineage.
+  restoreManager();
+  process.env.FAIL_ORIGINAL = "1";
+  await assert.rejects(uninstallService(record), /already missing.*ownership and original backup retained/);
+  delete process.env.FAIL_ORIGINAL;
+  assert(!fs.existsSync(definition.path), "failed original restoration left a replacement for an already missing unit");
+  assert.equal(fs.readFileSync(record.original.backup, "utf8"), original);
+  restoreManager();
+  await uninstallService(record);
+  assert.equal(fs.readFileSync(definition.path, "utf8"), original);
+  assert.equal(fs.readFileSync(record.original.backup, "utf8"), original);
+  assert.equal(readRegistry()[definition.label].source, "/legacy/daemon.py");
+  fs.writeFileSync(definition.path, record.content);
+  restoreManager();
+  process.env.FAIL_UNLOAD = "1";
+  await assert.rejects(uninstallService(record), /refused unload/);
+  delete process.env.FAIL_UNLOAD;
+  assert.equal(fs.readFileSync(definition.path, "utf8"), record.content, "rejected unload removed an existing unit");
+  assert.equal(readRegistry()[definition.label].active, true);
   assert.deepEqual(readRegistry()[standard.label], production, "isolated service changed production manager job");
 
   // Managed-path guards must stop aliases before writes; system /tmp aliases and
@@ -179,7 +254,7 @@ fs.writeFileSync(file,JSON.stringify(jobs));
   process.env.COMMUNICATE_DATA = alias;
   await assert.rejects(withInstallLock(() => {}), /symlink/);
   assert.deepEqual(fs.readdirSync(outside), []);
-  console.log(`PASS (${process.platform} fixture): scoped service ownership, explicit environment, unchanged refresh, original lineage/activity/enablement, restoration failure, and symlink boundaries`);
+  console.log(`PASS (${process.platform} fixture): scoped service ownership, explicit environment, unchanged refresh, original lineage/activity/enablement, missing-unit/rejected-unload ownership, restoration failure, and symlink boundaries`);
 } finally {
   if (server) await new Promise((resolve) => server.close(resolve));
   for (const key of Object.keys(process.env)) if (!(key in priorEnv)) delete process.env[key];

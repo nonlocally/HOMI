@@ -187,11 +187,18 @@ function serviceState(definition) {
   const activePath = definition.platform === "darwin"
     ? result.stdout.match(/^\s*path = (.+)$/m)?.[1]?.trim()
     : result.stdout.match(/^FragmentPath=(.*)$/m)?.[1]?.trim();
-  if (!activePath && definition.platform === "linux") return { active: false, enabled: false };
+  const activeState = result.stdout.match(/^ActiveState=(.*)$/m)?.[1];
+  const unitFileState = definition.platform === "linux" ? result.stdout.match(/^UnitFileState=(.*)$/m)?.[1] : undefined;
+  if (!activePath && definition.platform === "linux") {
+    // systemd can describe an absent unit successfully. Only its explicit
+    // inactive/failed, non-enabled state proves there is no job to own/stop.
+    if (/^(inactive|failed)$/.test(activeState || "") && /^(|disabled|not-found)$/.test(unitFileState ?? ""))
+      return { active: false, enabled: false };
+    throw new Error("Could not verify service ownership: systemd reported no FragmentPath for an active, enabled or unknown unit");
+  }
   if (!activePath || canonical(activePath) !== canonical(definition.path))
     throw new Error(`Refusing to replace a loaded service from another/unknown unit: ${activePath || definition.label}`);
-  const running = definition.platform === "darwin" || /^(active|activating|reloading)$/.test(result.stdout.match(/^ActiveState=(.*)$/m)?.[1] || "");
-  const unitFileState = definition.platform === "linux" ? result.stdout.match(/^UnitFileState=(.*)$/m)?.[1] : undefined;
+  const running = definition.platform === "darwin" || !/^(inactive|failed)$/.test(activeState || "");
   if (definition.platform === "linux" && !unitFileState)
     throw new Error("Could not verify service enablement: UnitFileState was not reported");
   return { active: running, enabled: definition.platform === "darwin" ? running : /^(enabled|enabled-runtime)$/.test(unitFileState), unitFileState, path: activePath };
@@ -199,8 +206,11 @@ function serviceState(definition) {
 export function unloadService(definition) {
   const status = serviceState(definition);
   if (definition.platform === "darwin") {
-    if (status.active) serviceRun("launchctl", ["bootout", `gui/${process.getuid()}/${definition.label}`], true);
-  } else if (status.active || status.enabled) serviceRun("systemctl", ["--user", "disable", ...(status.unitFileState === "enabled-runtime" ? ["--runtime"] : []), "--now", definition.label], true);
+    if (status.active) serviceRun("launchctl", ["bootout", `gui/${process.getuid()}/${definition.label}`]);
+  } else if (status.active || status.enabled) serviceRun("systemctl", ["--user", "disable", ...(status.unitFileState === "enabled-runtime" ? ["--runtime"] : []), "--now", definition.label]);
+  const after = serviceState(definition);
+  if (after.active || after.enabled)
+    throw new Error("Service manager did not stop and disable the owned service; ownership retained");
 }
 export function loadService(definition, activation = { active: true, enabled: true }) {
   serviceState(definition); // A colliding manager label is never ours to replace.
@@ -338,22 +348,33 @@ export async function installService(dry = false, beforeRestore = () => {}, prio
 export async function uninstallService(record, dry = false) {
   if (!record) return true;
   assertManagedPath(record.path);
-  if (!fs.existsSync(record.path)) return true;
-  if (hash(fs.readFileSync(record.path)) !== record.hash) {
+  const before = fs.existsSync(record.path) ? fs.readFileSync(record.path) : null;
+  if (before !== null && hash(before) !== record.hash) {
     console.log(`kept changed service definition: ${record.path}`); return false;
   }
   const original = originalService(record), originalData = originalBytes(original);
   if (dry) { console.log(`[dry-run] would stop owned service ${record.label} at ${record.path}; ${original ? "restore original unit" : "remove owned unit"}; preserve ${record.state}`); return true; }
-  const active = serviceState(record), before = fs.readFileSync(record.path);
+  // A deleted unit file does not mean its manager job stopped. Verify the
+  // recorded scope and loaded path before dropping ownership or restoring the
+  // original unit, even when there is no file left on disk.
+  const active = serviceState(record);
   unloadService(record);
   try {
-    if (originalData === null) fs.rmSync(record.path);
+    if (originalData === null) fs.rmSync(record.path, { force: true });
     else writeService(record.path, originalData, original.mode ?? 0o600);
     if (record.platform === "linux") serviceRun("systemctl", ["--user", "daemon-reload"]);
     if (original) loadService(record, original);
   } catch (error) {
-    writeService(record.path, before);
-    loadService(record, active);
+    if (before !== null) {
+      writeService(record.path, before);
+      loadService(record, active);
+    } else {
+      // There was no unit available to reload. Keep the filesystem as found;
+      // the caller retains the ledger and original backup for an explicit retry.
+      fs.rmSync(record.path, { force: true });
+      if (record.platform === "linux") serviceRun("systemctl", ["--user", "daemon-reload"]);
+      throw new Error(`${error.message}; managed unit was already missing, so its prior job cannot be reloaded; ownership and original backup retained`);
+    }
     throw error;
   }
   console.log(original ? `restored original service ${record.path}${original.active ? " and reloaded it" : " (previously inactive)"}` : `removed owned service ${record.path}`);
