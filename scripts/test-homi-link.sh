@@ -14,7 +14,19 @@ A_STATE="$T/a-state"; A_SOCKS="$T/a-socks"; A_SESS="$T/a-sess"
 B_STATE="$T/b-state"; B_SOCKS="$T/b-socks"; B_SESS="$T/b-sess"
 mkdir -p "$A_SESS" "$B_SESS"
 
-acomm() { COMM_STATE="$A_STATE" HOMI_SOCK_DIR="$A_SOCKS" HOMI_SESSIONS_DIR="$A_SESS" HOMI_SELF=alpha HOMI_TICK=1 "$COMM" "$@"; }
+# Only the final SSH-failure case uses ssh; all real link exchanges below use
+# local Unix sockets. Fail deterministically instead of relying on a DNS lookup
+# of .invalid completing within three seconds (macOS resolvers can take longer).
+# Actual authenticated SSH delivery is qualified separately on installed devices.
+mkdir -p "$T/sshbin"
+cat > "$T/sshbin/ssh" <<'SH'
+#!/bin/sh
+printf 'fixture: SSH endpoint unavailable\n' >&2
+exit 255
+SH
+chmod +x "$T/sshbin/ssh"
+
+acomm() { PATH="$T/sshbin:$PATH" COMM_STATE="$A_STATE" HOMI_SOCK_DIR="$A_SOCKS" HOMI_SESSIONS_DIR="$A_SESS" HOMI_SELF=alpha HOMI_TICK=1 "$COMM" "$@"; }
 bcomm() { COMM_STATE="$B_STATE" HOMI_SOCK_DIR="$B_SOCKS" HOMI_SESSIONS_DIR="$B_SESS" HOMI_SELF=beta  HOMI_TICK=1 "$COMM" "$@"; }
 
 pass=0; fail=0
