@@ -104,6 +104,11 @@ settings JSON contains `BUS_GATEWAY_SHARED_SECRET`, `BUS_ADMIN_READERS`, and
 account owners; it is deployment configuration, not a built-in list of users.
 Neither secret values nor device tokens belong in source control or a plist.
 
+An optional `BUS_ACCOUNT_LABELS` JSON map gives existing canonical accounts
+readable names in collaborator selectors, such as their GitHub logins. Labels
+are presentation only; requests and access checks continue to use account IDs.
+Keep the labels in step with the reviewed gateway roster and reader mappings.
+
 The service binds to `127.0.0.1:7433`, behind the operator's configured HTTPS
 origin tunnel. A gateway uses matching `BUS_ORIGIN_URL` and
 `BUS_GATEWAY_SHARED_SECRET` settings. Every origin request, including health and

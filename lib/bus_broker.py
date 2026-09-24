@@ -140,6 +140,16 @@ class Broker:
             raise ValueError("BUS_READER_USERS must map reader logins to valid user handles") from None
         self.users = sorted(set(self.reader_users.values()))
         try:
+            self.account_labels = json.loads(os.environ.get("BUS_ACCOUNT_LABELS", "{}"), object_pairs_hook=_unique_object)
+            if (not isinstance(self.account_labels, dict) or len(self.account_labels) > MAX_PRINCIPALS
+                    or any(user not in self.users or not isinstance(label, str)
+                           or not 1 <= len(label) <= 128 or label != label.strip()
+                           or any(ord(char) < 32 or ord(char) == 127 for char in label)
+                           for user, label in self.account_labels.items())):
+                raise ValueError()
+        except (ValueError, TypeError, BusError):
+            raise ValueError("BUS_ACCOUNT_LABELS must map configured accounts to readable labels") from None
+        try:
             self.chat_readers = json.loads(os.environ.get("BUS_CHAT_READERS", "{}"), object_pairs_hook=_unique_object)
             if not isinstance(self.chat_readers, dict) or len(self.chat_readers) > MAX_PRINCIPALS:
                 raise ValueError()
@@ -919,7 +929,8 @@ class Broker:
         if self.users and result["can_create_bus"]:
             # Account IDs only for explicit collaborator selection. Device and
             # cross-bus membership records remain restricted to administrators.
-            result["users"] = [{"id": user} for user in self.users]
+            result["users"] = [{"id": user, **({"label": self.account_labels[user]} if user in self.account_labels else {})}
+                               for user in self.users]
         return result
 
     @staticmethod

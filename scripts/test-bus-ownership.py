@@ -24,7 +24,8 @@ class OwnershipTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.env = {'BUS_GATEWAY_SHARED_SECRET': 'test-only-' + 's' * 40,
                     'BUS_READER_USERS': json.dumps({'gh-a': 'alice', 'gh-b': 'bob', 'gh-c': 'carol'}),
-                    'BUS_ADMIN_READERS': '', 'BUS_CHAT_READERS': '{}', 'BUS_OPENWEBUI_READERS': '1'}
+                    'BUS_ADMIN_READERS': '', 'BUS_CHAT_READERS': '{}', 'BUS_OPENWEBUI_READERS': '1',
+                    'BUS_ACCOUNT_LABELS': '{}'}
         self.patch = mock.patch.dict(os.environ, self.env)
         self.patch.start(); self.addCleanup(self.patch.stop)
         self.now = 1800000000
@@ -77,6 +78,26 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(self.b.browser_session('gh-a', digest)['token'], token)
         self.assertEqual(self.buses()['alice-private']['owner_user'], 'alice')
         self.assertFalse(self.call('snapshot')['chat']['enabled'])
+
+    def test_account_labels_are_display_only_and_never_identity_authority(self):
+        os.environ['BUS_ACCOUNT_LABELS'] = json.dumps({'alice': 'Alice on GitHub', 'bob': '<literal github name>'})
+        self.b = Broker(self.tmp.name, clock=lambda: self.now)
+        accounts = {row['id']: row for row in self.call('snapshot')['users']}
+        self.assertEqual(accounts['alice']['label'], 'Alice on GitHub')
+        self.assertEqual(accounts['bob']['label'], '<literal github name>')
+        self.assertNotIn('label', accounts['carol'])
+        self.call('create', bus='project')
+        self.assertFalse(self.raw('member_add', bus='project', user='Alice on GitHub')['ok'])
+        self.call('member_add', bus='project', user='bob')
+        self.assertEqual(self.buses('gh-b')['project']['role'], 'member')
+        device = self.enroll('project', user='bob')
+        self.assertNotIn('users', self.call('snapshot', device['token']))
+        for labels in ({'unknown-account': 'Somebody'}, {'alice': ''}, {'alice': 'bad\nlabel'},
+                       {'alice': 12}, {'alice': ' x '}, ['alice']):
+            with self.subTest(labels=labels):
+                os.environ['BUS_ACCOUNT_LABELS'] = json.dumps(labels)
+                with self.assertRaises(ValueError):
+                    Broker(self.tmp.name, clock=lambda: self.now)
 
     def test_collaborator_assignment_and_invitation_target_scope(self):
         self.call('create', bus='lab')
