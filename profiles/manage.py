@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 VERSION = "0.3.0"
 HERE = Path(__file__).resolve().parent
@@ -113,6 +114,16 @@ class Profile:
                 h.update(str(p.relative_to(HERE)).encode() + b"\0" + p.read_bytes())
         return VERSION + "-" + h.hexdigest()[:16]
 
+    def snapshot_schedule(self, runtime=None):
+        # Execute installed source directly: importing an immutable artifact
+        # must not add __pycache__ files to its verified inventory.
+        path = HERE / "runtime/modules/snapshots/schedule.py"
+        module = types.ModuleType("homi_snapshot_schedule")
+        module.__file__ = str(path)
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+        manage = types.SimpleNamespace(**globals())
+        return module.Schedule(manage, self.home, "darwin" if sys.platform == "darwin" else "linux", runtime)
+
     def targets(self, modules):
         runtime = self.payloads / self.payload_id() / "runtime"
         active = self.config / "active.sh"
@@ -148,6 +159,9 @@ class Profile:
             if name.startswith("homi-account") and "accounts" not in modules:
                 continue
             out.append((self.home / ".local/bin" / name, wrapper + ('exec ' if name == 'homi-box' else '. ') + command + '\n', "file", 0o755))
+        if "snapshots" in modules:
+            out.append((self.home / ".local/bin/homi-snapshot",
+                        self.snapshot_schedule(runtime).wrapper_text(), "file", 0o755))
         shell_block = f'{BEGIN}\n[[ $- != *i* ]] || . {quote(active)}\n{END}\n'
         out.extend((self.home / p, shell_block, "block", 0o600) for p in [".bashrc", ".bash_profile"])
         if "terminal" in modules:
@@ -278,34 +292,58 @@ class Profile:
         return {"ok": True, "modules": modules, "payload": str(dest), "paths": len(plan),
                 "activation": "Open a fresh Bash shell; load the tmux profile deliberately. No running sessions or services were changed."}
 
+    def uninstall_plan(self, record):
+        actions, conflicts = [], []
+        for name, entry in record["entries"].items():
+            path = Path(name)
+            try:
+                self.check_parent(path)
+                now = snapshot(path)
+                if entry["kind"] == "block":
+                    data = managed(path.read_text(), "", entry["block"], remove=True).encode()
+                    orig = entry["original"]
+                    original_data = Path(orig["backup"]).read_bytes() if orig["kind"] == "file" else b''
+                    # Repeat installs must not turn later user additions
+                    # into installer-owned content and erase them here.
+                    if data == original_data or (not original_data.endswith(b'\n') and data == original_data + b'\n'):
+                        data = original_data if orig["kind"] == "file" else None
+                else:
+                    if now.get("hash") != entry["installed_hash"]:
+                        raise Conflict("target was replaced or edited; left untouched")
+                    orig = entry["original"]
+                    data = Path(orig["backup"]).read_bytes() if orig["kind"] == "file" else None
+                actions.append((path, data, now))
+            except (Conflict, OSError, UnicodeError) as e:
+                conflicts.append({"path": name, "reason": str(e)})
+        return actions, conflicts
+
     def uninstall(self):
+        # The schedule shares this ledger/lock. Never invoke it while holding
+        # our lock; it must verify and stop its owned job before unlinking units.
+        record = json.loads(self.ledger.read_text()) if self.ledger.exists() else {"entries": {}}
+        if any(e.get("owner") == "snapshots-schedule" for e in record["entries"].values()):
+            with self.lock():
+                record = json.loads(self.ledger.read_text())
+                _, conflicts = self.uninstall_plan(record)
+                if conflicts:
+                    return {"ok": False, "conflicts": conflicts, "changed": 0}
+            try:
+                result = self.snapshot_schedule().uninstall()
+            except Exception as error:
+                return {"ok": False, "changed": 0, "error": "snapshot schedule uninstall failed: " + str(error)}
+            if not result.get("ok") or result.get("unloaded") is not True:
+                return {"ok": False, "changed": 0, "error": "snapshot schedule could not confirm its job unloaded",
+                        "schedule": result}
+            record = json.loads(self.ledger.read_text())
+            if any(e.get("owner") == "snapshots-schedule" for e in record["entries"].values()):
+                return {"ok": False, "changed": 0, "error": "snapshot schedule still owns files after uninstall"}
         with self.lock():
             record = json.loads(self.ledger.read_text()) if self.ledger.exists() else {"entries": {}}
-            actions, conflicts = [], []
-            for name, entry in record["entries"].items():
-                path = Path(name)
-                try:
-                    self.check_parent(path)
-                    now = snapshot(path)
-                    if entry["kind"] == "block":
-                        data = managed(path.read_text(), "", entry["block"], remove=True).encode()
-                        orig = entry["original"]
-                        original_data = Path(orig["backup"]).read_bytes() if orig["kind"] == "file" else b''
-                        # Repeat installs must not turn later user additions
-                        # into installer-owned content and erase them here.
-                        if data == original_data or (not original_data.endswith(b'\n') and data == original_data + b'\n'):
-                            data = original_data if orig["kind"] == "file" else None
-                    else:
-                        if now.get("hash") != entry["installed_hash"]:
-                            raise Conflict("target was replaced or edited; left untouched")
-                        orig = entry["original"]
-                        data = Path(orig["backup"]).read_bytes() if orig["kind"] == "file" else None
-                    actions.append((path, data, now))
-                except (Conflict, OSError, UnicodeError) as e:
-                    conflicts.append({"path": name, "reason": str(e)})
-            # All-or-nothing preflight: do not remove wrappers while an edited rc still refers to them.
+            actions, conflicts = self.uninstall_plan(record)
             if conflicts:
                 return {"ok": False, "conflicts": conflicts, "changed": 0}
+            if any(e.get("owner") == "snapshots-schedule" for e in record["entries"].values()):
+                return {"ok": False, "changed": 0, "error": "snapshot ownership changed; retry uninstall"}
             rollback = []
             try:
                 for path, data, before in actions:
@@ -361,6 +399,7 @@ def main(argv=None):
     ap.add_argument("command", choices=["preview", "install", "status", "uninstall", "migrate-preview"], nargs="?", default="preview")
     ap.add_argument("--terminal", action="store_true")
     ap.add_argument("--mesh", action="store_true")
+    ap.add_argument("--snapshots", action="store_true", help="optional snapshot commands; scheduling remains a separate explicit operation")
     ap.add_argument("--box", action="store_true", help="optional local container adapter; no runtime is started")
     ap.add_argument("--accounts", action="store_true", help="optional configured account launch and observer tools; no watcher or service is started")
     ap.add_argument("--home", default=str(Path.home()), help="installation home; use an isolated home for qualification")
@@ -368,7 +407,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         profile = Profile(args.home)
-        selected = [m for m in ["terminal", "mesh", "accounts", "box"] if getattr(args, m)]
+        selected = [m for m in ["terminal", "mesh", "accounts", "box", "snapshots"] if getattr(args, m)]
         modules = sorted(set(profile.record.get("modules", [])) | set(selected or ["terminal"]))
         if args.command == "install":
             result = profile.install(modules)

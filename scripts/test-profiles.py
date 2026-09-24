@@ -174,6 +174,69 @@ class Profiles(unittest.TestCase):
         result = self.run_tool(str(self.home / ".local/bin/homi-agent"), "cdxx", "message")
         self.assertEqual(result.stdout, "launch\n--provider\ncodex\n--\n--yolo\nmessage\n")
 
+    def test_snapshot_selection_installs_shared_wrapper_but_no_job(self):
+        self.install(["snapshots"])
+        runtime = Path(self.profile.record["payload"]) / "runtime"
+        wrapper = self.home / ".local/bin/homi-snapshot"
+        self.assertEqual(wrapper.read_text(), self.profile.snapshot_schedule(runtime).wrapper_text())
+        self.assertIn("homi-snapshot", self.run_tool(str(wrapper), "help").stdout)
+        self.assertFalse((self.home / "Library/LaunchAgents").exists())
+        self.assertFalse((self.home / ".config/systemd").exists())
+        self.assertTrue(self.profile.uninstall()["ok"])
+
+    def add_schedule_fixture(self):
+        unit = self.home / ".config/systemd/user/fixture-snapshots.timer"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("fixture unit, never loaded\n")
+        record = json.loads(self.profile.ledger.read_text())
+        record["entries"][str(unit)] = {"kind": "file", "original": {"kind": "absent"},
+            "installed_hash": mod.digest(unit.read_bytes()), "owner": "snapshots-schedule"}
+        self.profile.ledger.write_text(json.dumps(record))
+        return unit
+
+    def test_profile_uninstall_preserves_files_when_schedule_cannot_confirm_unload(self):
+        from unittest.mock import Mock, patch
+        self.install(["snapshots"])
+        unit = self.add_schedule_fixture()
+        before = self.profile.ledger.read_bytes()
+        schedule = Mock()
+        for answer in [{"ok": False, "unloaded": False}, {"ok": True, "unloaded": None}]:
+            schedule.uninstall.return_value = answer
+            with patch.object(self.profile, "snapshot_schedule", return_value=schedule):
+                self.assertFalse(self.profile.uninstall()["ok"])
+            self.assertEqual(self.profile.ledger.read_bytes(), before)
+            self.assertTrue(unit.exists())
+            self.assertTrue((self.home / ".local/bin/homi-snapshot").exists())
+        # An edited startup block is caught before asking the manager to unload.
+        rc = self.home / ".bashrc"
+        rc.write_text(rc.read_text().replace("[[ $-", "# changed\n[[ $-"))
+        schedule.reset_mock()
+        with patch.object(self.profile, "snapshot_schedule", return_value=schedule):
+            self.assertFalse(self.profile.uninstall()["ok"])
+        schedule.uninstall.assert_not_called()
+
+    def test_profile_uninstall_delegates_job_then_reloads_shared_ownership(self):
+        from unittest.mock import Mock, patch
+        self.install(["snapshots"])
+        unit = self.add_schedule_fixture()
+        def unload_owned():
+            # No nested ownership lock, and wrappers are still available to the
+            # service manager until its owned job has been stopped.
+            self.assertFalse((self.profile.state / "install.lock").exists())
+            self.assertTrue((self.home / ".local/bin/homi-snapshot").exists())
+            record = json.loads(self.profile.ledger.read_text())
+            unit.unlink()
+            del record["entries"][str(unit)]
+            self.profile.ledger.write_text(json.dumps(record))
+            return {"ok": True, "unloaded": True}
+        schedule = Mock()
+        schedule.uninstall.side_effect = unload_owned
+        with patch.object(self.profile, "snapshot_schedule", return_value=schedule):
+            self.assertTrue(self.profile.uninstall()["ok"])
+        schedule.uninstall.assert_called_once()
+        self.assertFalse((self.home / ".local/bin/homi-snapshot").exists())
+        self.assertEqual(json.loads(self.profile.ledger.read_text())["entries"], {})
+
     @unittest.skipUnless(shutil.which("jq"), "jq unavailable")
     def test_manual_mesh_hosts_and_ssh_export_preserve_ssh_config(self):
         self.install(["mesh"])

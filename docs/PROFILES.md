@@ -53,8 +53,9 @@ memory. The inherited Claude inference chooses an unclaimed transcript for a
 working directory; Codex uses an open rollout file with a last-session fallback.
 Those fallback cases do not prove exact conversation identity. Non-agent
 commands are staged but not automatically executed on restore. Existing sessions
-are skipped. Scheduled external-drive archives are a separate personal migration
-component; installing this profile does not claim to migrate a LaunchAgent.
+are skipped. `homi profile install --snapshots` adds explicit snapshot/archive commands.
+Scheduling remains a separate operation; see [snapshots](SNAPSHOTS.md).
+Installing the profile does not migrate or load an existing LaunchAgent.
 
 ## User configuration and optional accounts
 
