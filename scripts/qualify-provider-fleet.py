@@ -94,6 +94,10 @@ def stop_owned_group(process):
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # EPERM does not establish absence. Darwin can also return it
+            # while an exiting group awaits reaping; keep the bounded wait.
+            return True
     for signum in (signal.SIGTERM, signal.SIGKILL):
         if not exists():
             return True
@@ -101,6 +105,10 @@ def stop_owned_group(process):
             os.killpg(process.pid, signum)
         except ProcessLookupError:
             return True
+        except PermissionError:
+            # No authority to signal this group: wait and remain fail-closed
+            # unless a later probe independently confirms ESRCH.
+            pass
         deadline = time.monotonic() + 3
         while exists() and time.monotonic() < deadline:
             time.sleep(.05)
@@ -230,14 +238,18 @@ def authorize_fleet_tool(params, session, name, reply=None, tool=None, outgoing=
 
 def create_tls(work):
     """One-day private CA and leaf; neither system trust nor live TLS is changed."""
-    config = work / "tls.cnf"
-    with gate.private_file(config) as out:
-        out.write("[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=HOMI fleet qualification\n"
-                  "[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n"
-                  "[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
-                  "extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n")
+    config, ca_config = work / "tls.cnf", work / "ca.cnf"
+    # Separate request configs avoid version-specific -subj precedence and
+    # explicit identifiers avoid depending on OpenSSL/LibreSSL defaults.
+    for path, name in ((ca_config, "CA"), (config, "server")):
+        with gate.private_file(path) as out:
+            out.write("[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=HOMI fleet qualification " + name + "\n"
+                      "[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
+                      "[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+                      "extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n"
+                      "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always,issuer\n")
     commands = [
-        ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-sha256", "-config", str(config),
+        ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-sha256", "-config", str(ca_config),
          "-extensions", "ca", "-keyout", str(work / "ca.key"), "-out", str(work / "ca.pem")],
         ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256", "-config", str(config),
          "-keyout", str(work / "server.key"), "-out", str(work / "server.csr")],
@@ -1232,6 +1244,43 @@ def self_test(runtime, archive=None, checksum=None):
                 self.assertEqual(worker.close()["status"], "pass")
                 self.assertFalse(worker.home.exists())
 
+        def test_transient_group_eperm_requires_later_esrch_and_leader_reap(self):
+            process = mock.Mock(pid=470001)
+            outcomes = [PermissionError(), PermissionError(), PermissionError(), ProcessLookupError(), ProcessLookupError()]
+            with mock.patch.object(os, "killpg", side_effect=outcomes) as killpg, mock.patch.object(time, "sleep"):
+                self.assertTrue(stop_owned_group(process))
+            self.assertEqual(killpg.call_args_list, [mock.call(470001, 0), mock.call(470001, signal.SIGTERM),
+                                                    mock.call(470001, 0), mock.call(470001, 0), mock.call(470001, 0)])
+            self.assertEqual(process.poll.call_count, 4)
+
+        def test_persistent_group_eperm_stays_bounded_and_retains_home(self):
+            import io
+            with tempfile.TemporaryDirectory(prefix="homi-fleet-eperm-") as tmp:
+                base = Path(tmp)
+                worker = DeviceWorker(base)
+                worker.home, worker.evidence = base / "home", base / "evidence"
+                worker.home.mkdir(mode=0o700)
+                worker.evidence.mkdir(mode=0o700)
+                worker.run_id, worker.owned_home = "permission-denied", True
+                worker.lease = worker.home / ".homi-fleet-lease"
+                worker.lease.write_text(worker.run_id)
+                worker.cli, worker.env, worker.timeout = Path("/unused"), {}, 30
+                process = mock.Mock(pid=470001)
+                process.stdout, process.stderr = io.StringIO(), io.StringIO()
+                process.communicate.return_value = ("", "")
+                process.poll.return_value = 0
+                with mock.patch.object(subprocess, "Popen", return_value=process), \
+                        mock.patch.object(os, "killpg", side_effect=PermissionError()) as killpg, \
+                        mock.patch.object(time, "monotonic", side_effect=range(20)) as ticks, mock.patch.object(time, "sleep"):
+                    with self.assertRaisesRegex(RuntimeError, "unconfirmed process group"):
+                        worker.command([], "permission-denied")
+                self.assertEqual([call.args[1] for call in killpg.call_args_list if call.args[1]], [signal.SIGTERM, signal.SIGKILL])
+                self.assertTrue(all(call.args[0] == 470001 for call in killpg.call_args_list))
+                self.assertEqual(ticks.call_count, 8)
+                self.assertFalse(worker.commands_stopped)
+                self.assertEqual(worker.close()["status"], "fail")
+                self.assertTrue(worker.home.exists())
+
         def test_unconfirmed_process_cleanup_retains_auth_home(self):
             with tempfile.TemporaryDirectory(prefix="homi-fleet-retained-") as tmp:
                 worker = DeviceWorker(Path(tmp))
@@ -1479,6 +1528,34 @@ def self_test(runtime, archive=None, checksum=None):
                 with socket.create_connection(("127.0.0.1", self.fixture.port), timeout=3) as connection:
                     with self.assertRaises(ssl.SSLCertVerificationError):
                         context.wrap_socket(connection, server_hostname=hostname)
+
+        def test_system_openssl_fixture_chain_passes_verified_https(self):
+            # On macOS this selects LibreSSL, whose certificate defaults differ
+            # from Homebrew OpenSSL. Exercise the real bus client with no trust
+            # bypass, as well as direct trusted/wrong-host/untrusted handshakes.
+            with tempfile.TemporaryDirectory(prefix="homi-fleet-system-tls-", dir="/tmp") as tmp:
+                work = Path(tmp)
+                with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "SSL_CERT_FILE": str(work / "ca.pem")}):
+                    fixture = FixtureBroker(runtime, work, "system-tls-test")
+                    try:
+                        origin = "https://127.0.0.1:" + str(fixture.port)
+                        fixture.invitation(origin, "tls-test-user")
+                        enrolled = fixture.bus.request({"url": origin}, "redeem", invite=fixture.invites[-1], device="fixture")
+                        self.assertEqual(enrolled["user"], "tls-test-user")
+                        trusted = ssl.create_default_context(cafile=str(work / "ca.pem"))
+                        with socket.create_connection(("127.0.0.1", fixture.port), timeout=3) as connection:
+                            with trusted.wrap_socket(connection, server_hostname="127.0.0.1") as secure:
+                                certificate = secure.getpeercert()
+                                secure.sendall(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                                while secure.recv(8192):
+                                    pass
+                        self.assertNotEqual(certificate["subject"], certificate["issuer"])
+                        for context, hostname in ((trusted, "wrong.invalid"), (ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), "127.0.0.1")):
+                            with socket.create_connection(("127.0.0.1", fixture.port), timeout=3) as connection:
+                                with self.assertRaises(ssl.SSLCertVerificationError):
+                                    context.wrap_socket(connection, server_hostname=hostname)
+                    finally:
+                        fixture.close()
 
         def test_account_scoped_single_use_enrollment_and_revocation(self):
             connection, first = self.enroll("test-claude")
