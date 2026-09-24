@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 const pkg = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const cli = path.join(pkg, 'src/homi.mjs');
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'homi-install-boundaries-'));
+// macOS's per-user TMPDIR leaves too little room for the Unix control socket.
+// Keep both the state root and peer sockets short and private, like other
+// daemon fixtures; HOMI_SOCK_DIR alone does not move state/homi/homi.sock.
+const temp = fs.mkdtempSync(path.join(process.platform === 'darwin' ? '/tmp' : os.tmpdir(), 'homi-install-'));
 const homes = [];
 const daemons = [];
 function fixture(name) {
@@ -19,6 +22,8 @@ function fixture(name) {
     CODEX_HOME: path.join(home, '.codex'), XDG_CONFIG_HOME: path.join(home, '.config'),
     PATH: path.join(home, 'bin') + path.delimiter + process.env.PATH };
   for (const key of ['HOMI_SOCK','HOMI_SOCK_DIR','HOMI_SESSIONS_DIR','HOMI_DAEMON_DIR','CLAUDE_CODE_MESSAGING_SOCKET','COMMUNICATE_HOME','CODEX_THREAD_ID']) delete env[key];
+  env.HOMI_SOCK_DIR = path.join(home, 'socks');
+  env.HOMI_SESSIONS_DIR = path.join(home, 'sessions');
   fs.writeFileSync(path.join(home, 'bin/claude'), `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),a=process.argv.slice(2),h=process.env.HOME;
 fs.appendFileSync(path.join(h,'calls'),JSON.stringify(a)+'\\n');
@@ -128,7 +133,9 @@ try {
   const busyCli = path.join(busyRoot,'src/homi.mjs');
   const start = spawnSync(process.execPath,[busyCli,'start'],{env:busy.env,encoding:'utf8',timeout:15000});
   daemons.push([busyCli,busy.env]);
-  assert.equal(start.status,0,start.stdout+start.stderr);
+  const daemonLog = path.join(busy.env.COMM_STATE, 'homi/daemon.log');
+  assert.equal(start.status,0,[start.error?.message, start.stdout, start.stderr,
+    fs.existsSync(daemonLog) ? fs.readFileSync(daemonLog, 'utf8') : 'daemon log not created'].filter(Boolean).join('\n'));
   const purge = run(busy,['uninstall','--purge'],false);
   assert.match(purge.stderr,/running daemon still uses a retained release/);
   assert(fs.existsSync(path.join(busyRoot,'vendor/lib/homi.py')),'purge deleted active daemon code');
