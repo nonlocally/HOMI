@@ -340,7 +340,7 @@ def main():
             report.update(status="fail", cleanup="stop failed")
         if setup_attempted:
             try:
-                removed = subprocess.run([str(cli), "uninstall", "--" + args.provider, "--purge"],
+                removed = subprocess.run([str(cli), "uninstall", "--purge"],
                                          env=env, cwd=temp, text=True, capture_output=True, timeout=90)
                 with private_file(evidence / "uninstall.log") as out:
                     out.write(removed.stdout + removed.stderr)
