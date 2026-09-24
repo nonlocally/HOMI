@@ -98,6 +98,15 @@ function eventRecord() {
   return {id:'event-fixture',bus:'study',created_at:Date.now()/1000,expires_at:Date.now()/1000+14400,
     max_uses:40,uses:0,revoked:false,active:true,participants:[]};
 }
+function eventSnapshot(data) {
+  const result=JSON.parse(JSON.stringify(data));
+  for (const bus of result.buses) for (const event of bus.events || []) delete event.participants;
+  return result;
+}
+function eventExpand(page,id='event-fixture') {
+  const visit=root=>[root,...root.children.flatMap(visit)];
+  return visit(page.ids['event-list']).find(el=>el.attrs['aria-label']==='View devices for event ' + id);
+}
 
 (async () => {
   const p=page();await flush();
@@ -265,9 +274,10 @@ function eventRecord() {
   const generatedEvent=eventRecord();
   eventPage.setHandler(r=>{
     if(r.op==='event_create'){eventData.buses[1].events.push(generatedEvent);return {ok:true,event:generatedEvent,invite:'event-shared-fixture-secret'};}
+    if(r.op==='event_get')return {ok:true,event:JSON.parse(JSON.stringify(generatedEvent))};
     if(r.op==='event_revoke'){generatedEvent.revoked=true;generatedEvent.active=false;}
     if(r.op==='event_remove') generatedEvent.participants.find(p=>p.principal===r.principal).removed=true;
-    return r.op==='snapshot'?eventData:{ok:true};
+    return r.op==='snapshot'?eventSnapshot(eventData):{ok:true};
   });
   await eventPage.ids['event-form'].fire('submit');
   const createEvent=eventPage.requests.find(r=>r.op==='event_create');
@@ -280,6 +290,10 @@ function eventRecord() {
   generatedEvent.uses=1;generatedEvent.participants.push({principal:'event-device-one',user:'event-guest-one',device:'<img onerror=bad()>',joined_at:Date.now()/1000,removed:false});
   await eventPage.ids.refresh.fire('click');
   assert.ok(eventPage.ids['event-list'].textContent.includes('1 of 40 devices'));
+  assert.equal(eventPage.requests.filter(r=>r.op==='event_get').length,0,'routine snapshots never fetch participant lists');
+  assert.ok(!eventPage.ids['event-list'].textContent.includes('<img onerror=bad()>'));
+  await eventExpand(eventPage).fire('click');
+  assert.equal(eventPage.requests.filter(r=>r.op==='event_get').length,1);
   assert.ok(eventPage.ids['event-list'].textContent.includes('<img onerror=bad()>'));
   await children(eventPage.ids['event-list']).find(el=>el.attrs['aria-label']==='Close event code event-fixture').fire('click');
   assert.ok(eventPage.requests.some(r=>r.op==='event_revoke' && r.event==='event-fixture'));
@@ -288,8 +302,64 @@ function eventRecord() {
   await children(eventPage.ids['event-list']).find(el=>el.attrs['aria-label']==='Remove event device event-device-one').fire('click');
   assert.ok(eventPage.requests.some(r=>r.op==='event_remove' && r.event==='event-fixture' && r.principal==='event-device-one'));
   assert.equal(generatedEvent.participants[0].removed,true);
+  assert.equal(eventPage.requests.filter(r=>r.op==='event_get').length,2,'removal refreshes only the expanded event');
+  assert.ok(eventPage.ids['event-list'].textContent.includes('0 devices connected'));
   assert.ok(!eventPage.requests.some(r=>r.op==='revoke' || r.op==='member_remove' || r.op.startsWith('chat_')));
   console.log('ok event code is bounded, copyable, scoped, secret-free in storage, and tracks separate close/removal actions');
+
+  const manyData=eventFixture();manyData.buses[1].events=Array.from({length:20},(_,i)=>({...eventRecord(),id:'event-'+i}));
+  const many=page({snapshot:eventSnapshot(manyData)});await flush();await many.ids['event-button'].fire('click');
+  const pendingDetails=[];
+  many.setHandler(r=>r.op==='event_get'?new Promise(resolve=>pendingDetails.push({r,resolve})):eventSnapshot(manyData));
+  const firstDetail=eventExpand(many,'event-0').fire('click');await flush();
+  const secondDetail=eventExpand(many,'event-1').fire('click');await flush();
+  assert.equal(pendingDetails.length,2,'only explicitly chosen events are fetched, never all 20');
+  assert.equal(pendingDetails[0].r.options.signal.aborted,true,'changing the expanded event aborts its pending fetch');
+  const secretParticipant={principal:'late-device',device:'private late device',user:'guest',removed:false};
+  pendingDetails[0].resolve({ok:true,event:{...manyData.buses[1].events[0],participants:[secretParticipant]}});await firstDetail;
+  assert.ok(!many.ids['event-list'].textContent.includes('private late device'));
+  pendingDetails[1].resolve({ok:true,event:{...manyData.buses[1].events[1],participants:[]}});await secondDetail;
+  assert.equal(eventExpand(many,'event-1').attrs['aria-expanded'],'true');
+  await many.ids.refresh.fire('click');assert.equal(pendingDetails.length,2,'periodic summary updates do not refetch details');
+  await eventExpand(many,'event-1').fire('click');
+  assert.equal(eventExpand(many,'event-1').attrs['aria-expanded'],'false');
+  assert.ok(!many.ids['event-list'].textContent.includes('0 devices connected'));
+  console.log('ok 20 event summaries stay lightweight; switching expansion aborts and ignores late participant responses');
+
+  for (const boundary of ['close','collapse','bus','account','principal','server','capability','event-removed','disconnect']) {
+    const data=eventFixture();data.buses[1].events=[eventRecord()];
+    data.buses[2].capabilities.event_join=true;data.buses[2].events=[];
+    const test=page({snapshot:eventSnapshot(data)});await flush();await test.ids['event-button'].fire('click');
+    let finishDetail;
+    test.setHandler(r=>r.op==='event_get'?new Promise(resolve=>{finishDetail=resolve;}):eventSnapshot(data));
+    const pending=eventExpand(test).fire('click');await flush();
+    const request=test.requests.find(r=>r.op==='event_get');
+    if(boundary==='close')test.ids['event-dialog'].close();
+    if(boundary==='collapse')await eventExpand(test).fire('click');
+    if(boundary==='bus'){test.ids['event-bus'].value='other-study';await test.ids['event-bus'].fire('change');}
+    if(boundary==='account'){data.user='different-owner';await test.ids.refresh.fire('click');}
+    if(boundary==='principal'){data.principal='different-principal';await test.ids.refresh.fire('click');}
+    if(boundary==='server'){data.server_id='different-server';await test.ids.refresh.fire('click');}
+    if(boundary==='capability'){data.buses[1].capabilities.event_join=false;await test.ids.refresh.fire('click');}
+    if(boundary==='event-removed'){data.buses[1].events=[];await test.ids.refresh.fire('click');}
+    if(boundary==='disconnect')await test.ids.disconnect.fire('click');
+    assert.equal(request.options.signal.aborted,true,boundary+' aborts the selected detail request');
+    finishDetail({ok:true,event:{...eventRecord(),participants:[secretParticipant]}});await pending;
+    assert.ok(!test.ids['event-list'].textContent.includes('private late device'),boundary+' rejects late private details');
+  }
+  console.log('ok close, collapse, bus, account, server, permission, history and logout changes discard pending event details');
+
+  const deniedData=eventFixture();deniedData.buses[1].events=[eventRecord()];
+  const deniedDetail=page({snapshot:eventSnapshot(deniedData)});await flush();await deniedDetail.ids['event-button'].fire('click');
+  deniedDetail.setHandler(r=>r.op==='event_get'?{ok:false,status:403,error:'Event access denied'}:eventSnapshot(deniedData));
+  await eventExpand(deniedDetail).fire('click');
+  assert.ok(deniedDetail.ids['event-list'].textContent.includes('Event access denied'));
+  assert.ok(children(deniedDetail.ids['event-list']).some(el=>el.textContent==='Retry'));
+  deniedDetail.setHandler(r=>r.op==='event_get'?{ok:true,event:{...eventRecord(),bus:'wrong-bus',participants:[secretParticipant]}}:eventSnapshot(deniedData));
+  await children(deniedDetail.ids['event-list']).find(el=>el.textContent==='Retry').fire('click');
+  assert.ok(deniedDetail.ids['event-list'].textContent.includes('invalid event details'));
+  assert.ok(!deniedDetail.ids['event-list'].textContent.includes('private late device'));
+  console.log('ok denied or mismatched event details never display participant data and offer an explicit retry');
 
   const noEvents=page({snapshot:accountFixture()});await flush();
   assert.equal(noEvents.ids['event-button'].hidden,true,'matching owner role without event capability grants nothing');

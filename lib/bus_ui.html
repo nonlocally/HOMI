@@ -182,8 +182,7 @@
     #member-list .role { display: inline-flex; flex-shrink: 0; }
     .event-record { border-top: 1px solid var(--line); padding: 15px 0; }
     .event-record > .device-row { border: 0; padding-top: 0; }
-    .event-record details { margin-top: 12px; font-size: 12px; }
-    .event-record summary { color: var(--ink-2); cursor: pointer; }
+    .event-devices { margin-top: 12px; font-size: 12px; }
     .event-record .device-row > div { min-width: 0; overflow-wrap: anywhere; }
     .event-record .button { flex: none; }
     .device-row p { font-size: 11px; overflow-wrap: anywhere; }
@@ -454,6 +453,7 @@
       $('graph-filter-panel').append($('status-filters'),$('identity-filters'));
     }
     let toastTimer, activeInvite='', inviteEpoch=0, memberBus=null, eventEpoch=0, activeEvent=null;
+    let eventDetail=null;
     function getToken() {
       const fragment = new URLSearchParams(location.hash.slice(1));
       const token = fragment.get('token');
@@ -1157,11 +1157,45 @@
       return event.revoked ? 'Closed' : event.expires_at*1000 <= Date.now() ? 'Expired' :
         event.uses >= event.max_uses ? 'Full' : event.active ? 'Open' : 'Closed';
     }
+    function eventDetailScope(bus) {
+      return JSON.stringify([state.epoch,state.data && state.data.server_id,state.data && state.data.user,
+        state.data && state.data.principal,state.data && state.data.browser_session,bus]);
+    }
+    function clearEventDetail() {
+      if (eventDetail) eventDetail.controller.abort();
+      eventDetail=null;
+    }
+    function currentEventDetail(detail) {
+      return eventDetail === detail && $('event-dialog').open && $('event-bus').value === detail.bus &&
+        detail.scope === eventDetailScope(detail.bus) && busCapability(detail.bus,'event_join') &&
+        (busRecord(detail.bus).events || []).some(event => event.id === detail.id);
+    }
+    async function loadEventDetail(bus,id) {
+      clearEventDetail();
+      const detail={bus,id,scope:eventDetailScope(bus),controller:new AbortController(),data:null,error:'',loading:true};
+      eventDetail=detail;
+      if (!currentEventDetail(detail)) {clearEventDetail();return;}
+      renderEvents();
+      try {
+        const response=await api('event_get',{event:id},detail.controller.signal);
+        if (!currentEventDetail(detail)) return;
+        if (!response.event || response.event.id !== id || response.event.bus !== bus ||
+            !Array.isArray(response.event.participants) || response.event.participants.length > 100)
+          throw new Error('The broker returned invalid event details.');
+        detail.data=response.event;
+      } catch(error) {
+        if (!currentEventDetail(detail) || detail.controller.signal.aborted) return;
+        detail.error=error.message;
+      } finally {
+        if (currentEventDetail(detail)) {detail.loading=false;renderEvents();}
+      }
+    }
     function renderEvents() {
       const bus=busRecord($('event-bus').value), list=$('event-list');list.replaceChildren();
       if (!bus || !busCapability(bus.name,'event_join')) {
-        $('event-dialog').close();toast('Your event-management access changed.');return;
+        clearEventDetail();$('event-dialog').close();toast('Your event-management access changed.');return;
       }
+      if (eventDetail && !currentEventDetail(eventDetail)) clearEventDetail();
       const events=bus.events || [];
       if (!events.length) list.append(node('p','muted','No event codes created for this bus.'));
       for (const event of events) {
@@ -1185,10 +1219,26 @@
           });row.append(close);
         }
         section.append(row);
-        const participants=event.participants || [];
-        if (participants.length) {
-          const detail=node('details'), connected=participants.filter(participant => !participant.removed).length;
-          detail.append(node('summary','',connected + (connected === 1 ? ' device connected' : ' devices connected')));
+        const selected=eventDetail && eventDetail.id === event.id, expand=node('button','text-button',selected ? 'Hide devices' : 'View devices');
+        expand.setAttribute('aria-label','View devices for event ' + event.id);
+        expand.setAttribute('aria-expanded',String(Boolean(selected)));
+        expand.addEventListener('click',() => {
+          if (eventDetail && eventDetail.id === event.id) {clearEventDetail();renderEvents();}
+          else return loadEventDetail(bus.name,event.id);
+        });
+        section.append(expand);
+        if (selected) {
+          const loaded=eventDetail, detail=node('div','event-devices'), participants=loaded.data ? loaded.data.participants : [];
+          if (loaded.loading) detail.append(node('p','muted','Loading devices…'));
+          else {
+            if (loaded.error) {const error=node('p','form-error',loaded.error);error.setAttribute('role','alert');detail.append(error);}
+            else {
+              const connected=participants.filter(participant => !participant.removed).length;
+              detail.append(node('p','muted',connected + (connected === 1 ? ' device connected' : ' devices connected')));
+            }
+            const reload=node('button','text-button',loaded.error ? 'Retry' : 'Refresh devices');
+            reload.addEventListener('click',() => loadEventDetail(bus.name,event.id));detail.append(reload);
+          }
           for (const participant of participants) {
             const participantRow=node('div','device-row'), label=node('div');
             label.append(node('strong','',participant.device || 'Guest device'),node('p','muted',accountLabel(participant.user)));
@@ -1198,10 +1248,15 @@
               const remove=node('button','button small danger','Remove');
               remove.setAttribute('aria-label','Remove event device ' + participant.principal);
               remove.addEventListener('click',async () => {
-                if (!busCapability(bus.name,'event_join') || !confirm('Remove ' + (participant.device || 'this device') + ' from ' + bus.name + '? Its other bus access stays unchanged. It cannot rejoin using this event code.')) return;
-                remove.disabled=true;const epoch=eventEpoch;
-                try {await api('event_remove',{event:event.id,principal:participant.principal});if(epoch !== eventEpoch)return;await refresh();toast('Device removed from ' + bus.name);}
-                catch(error) {if(epoch === eventEpoch){$('event-error').textContent=error.message;remove.disabled=false;}}
+                if (!currentEventDetail(loaded) || !confirm('Remove ' + (participant.device || 'this device') + ' from ' + bus.name + '? Its other bus access stays unchanged. It cannot rejoin using this event code.')) return;
+                remove.disabled=true;
+                try {
+                  await api('event_remove',{event:event.id,principal:participant.principal});
+                  if (!currentEventDetail(loaded)) return;
+                  await refresh();
+                  if (!currentEventDetail(loaded)) return;
+                  await loadEventDetail(bus.name,event.id);toast('Device removed from ' + bus.name);
+                } catch(error) {if(currentEventDetail(loaded)){$('event-error').textContent=error.message;remove.disabled=false;}}
               });participantRow.append(remove);
             }
             detail.append(participantRow);
@@ -1218,7 +1273,7 @@
     function openEvent() {
       const allowed=eventBuses();
       if (!allowed.some(bus => state.bus === null || bus.name === state.bus)) return;
-      resetEvent();$('event-error').textContent='';$('event-bus').replaceChildren();
+      clearEventDetail();resetEvent();$('event-error').textContent='';$('event-bus').replaceChildren();
       for (const bus of allowed) {const option=node('option','',bus.name);option.value=bus.name;$('event-bus').append(option);}
       $('event-bus').value=allowed.some(bus => bus.name === chosenBus()) ? chosenBus() : allowed[0].name;
       $('event-url').value=location.origin;$('event-ttl').value='14400';$('event-limit').value='40';$('event-local').checked=false;
@@ -1315,8 +1370,8 @@
       finally {$('leave-button').disabled=false;}
     });
     $('event-button').addEventListener('click',openEvent);
-    $('event-dialog').addEventListener('close',() => {resetEvent();$('event-list').replaceChildren();});
-    $('event-bus').addEventListener('change',() => {resetEvent();$('event-error').textContent='';renderEvents();});
+    $('event-dialog').addEventListener('close',() => {clearEventDetail();resetEvent();$('event-list').replaceChildren();});
+    $('event-bus').addEventListener('change',() => {clearEventDetail();resetEvent();$('event-error').textContent='';renderEvents();});
     $('event-url').addEventListener('input',() => {
       resetEvent();$('event-local').checked=false;
       try {$('event-local-label').hidden=!isLoopback(new URL($('event-url').value.trim()));} catch(_) {$('event-local-label').hidden=true;}

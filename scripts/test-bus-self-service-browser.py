@@ -39,7 +39,8 @@ class FakeAPI:
                    "role": "owner" if owner else "member", "agents": [],
                    "capabilities": {"invite": True, "manage_members": owner, "leave": not owner, "event_join": owner}}
             if owner:
-                row["events"] = bus.get("events", [])
+                row["events"] = [{key: value for key, value in event.items() if key != "participants"}
+                                 for event in bus.get("events", [])]
                 row["members"] = [{"user": user, "role": "owner" if user == bus["owner"] else "member"}
                                   for user in bus["members"]]
             rows.append(row)
@@ -66,10 +67,12 @@ class FakeAPI:
                          "uses": 0, "active": True, "revoked": False, "participants": []}
                 bus.setdefault("events", []).append(event)
                 return {"ok": True, "event": event, "invite": "fixture-shared-event-code"}
-            if op in ("event_revoke", "event_remove"):
+            if op in ("event_get", "event_revoke", "event_remove"):
                 bus, event = next((bus, event) for bus in self.buses.values() for event in bus.get("events", [])
                                   if event["id"] == request["event"])
                 assert bus["owner"] == self.user
+                if op == "event_get":
+                    return {"ok": True, "event": copy.deepcopy(event)}
                 if op == "event_revoke":
                     event.update(revoked=True, active=False)
                 else:
@@ -183,13 +186,18 @@ def main():
                                       "device": "<literal guest>", "joined_at": time.time(), "removed": False}]
             page.locator("#refresh").evaluate("element => element.click()")
             expect(page.locator("#event-list")).to_contain_text("2 of 40 devices")
+            expect(page.locator("#event-list")).not_to_contain_text("Guest laptop")
+            assert not any(r["op"] == "event_get" for r in api.requests), "summaries must not preload participants"
             page.get_by_role("button", name="Close event code fixture-event-1", exact=True).click()
             expect(page.locator("#event-list")).to_contain_text("Closed")
             expect(page.locator("#event-result")).to_be_hidden()
             assert not any(p["removed"] for p in event["participants"]), "closing code must leave participants connected"
-            page.locator("#event-list summary").click()
+            page.get_by_role("button", name="View devices for event fixture-event-1", exact=True).click()
+            expect(page.locator("#event-list")).to_contain_text("Guest laptop")
+            assert sum(r["op"] == "event_get" for r in api.requests) == 1
             page.get_by_role("button", name="Remove event device fixture-event-device-1", exact=True).click()
             expect(page.locator("#event-list")).to_contain_text("1 device connected")
+            assert sum(r["op"] == "event_get" for r in api.requests) == 2
             assert event["participants"][0]["removed"] and not event["participants"][1]["removed"]
             page.locator('#event-dialog [data-close]').first.click()
             page.locator("#create-button").click()
