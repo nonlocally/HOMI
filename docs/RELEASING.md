@@ -65,6 +65,10 @@ provider or previous-release checks into passes. See
 [Provider and client qualification](PROVIDER-QUALIFICATION.md) for the opt-in
 artifact harness, fresh installed-plugin acceptance, and two-device proof.
 
+The independent [systemd qualification](SYSTEMD-QUALIFICATION.md) runs the Linux
+service lifecycle against a real user manager on a disposable Ubuntu runner.
+Fixture service tests alone do not establish that manager-level acceptance.
+
 Also run the opt-in [client restoration matrix](CLIENT-RESTORATION-QUALIFICATION.md)
 against the extracted release. It uses actual client registry commands in isolated
 homes to verify that setup and removal restore prior enabled, disabled and custom

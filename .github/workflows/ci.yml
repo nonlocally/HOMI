@@ -95,6 +95,35 @@ jobs:
           path: ${{ runner.temp }}/homi-ui-evidence
           if-no-files-found: warn
 
+  systemd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: packages/communicate/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build an independent immutable runtime
+        run: |
+          python3 scripts/build-release.py
+          mkdir -p "$RUNNER_TEMP/homi-systemd-artifact"
+          tar -xzf "dist/homi-$(cat VERSION).tar.gz" -C "$RUNNER_TEMP/homi-systemd-artifact"
+      - name: Qualify actual scoped systemd service lifecycle on the disposable runner
+        run: |
+          python3 scripts/qualify-systemd.py "$RUNNER_TEMP/homi-systemd-artifact/homi-$(cat VERSION)" \
+            --work "$RUNNER_TEMP/homi-systemd-evidence" --disposable-ci --start-user-manager
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: homi-systemd-qualification
+          path: ${{ runner.temp }}/homi-systemd-evidence
+          if-no-files-found: warn
+
   homebrew:
     runs-on: macos-14
     timeout-minutes: 45
