@@ -236,7 +236,7 @@ class Proof:
                 self.cli("uninstall", "--no-clients")
             except Exception as error:
                 errors.append("owned installer cleanup failed: " + str(error))
-        if self.label:
+        if self.label and self.setup_attempted:
             try:
                 state = self.state(self.label)
                 require(state["LoadState"] == "not-found" and state["ActiveState"] == "inactive", "owned service remains loaded")
