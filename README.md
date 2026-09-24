@@ -33,6 +33,23 @@ flags? See the [installation guide](docs/INSTALL.md). HOMI runs on macOS and
 Linux. The archive needs Node.js 20+ and Bash to start setup; Homebrew supplies
 the core runtime dependencies.
 
+## Choose the model behind your agents
+
+The v0.5 development branch adds named model connections: use GLM to power
+Claude Code or Codex while keeping your usual client settings and subscriptions
+available. Select **model API connection** during setup, provide the model
+service's address and a scoped key through the hidden prompt, then ask:
+
+> Create a GLM-powered Codex collaborator called reviewer. Have it check this
+> change for incorrect assumptions while you investigate the failing tests.
+> Compare your findings and bring me the issues that need attention.
+
+Your agent selects the saved connection when it launches that worker. Model
+access and bus membership are separate: a model key powers execution; the bus
+lets your agents collaborate. See [model connections](docs/MODELS.md) for setup
+and the current qualification status. v0.5 is not published yet; existing
+Homebrew releases do not include these commands.
+
 ## Give your agents a task
 
 After setup and provider sign-in, open a fresh Claude Code CLI or Codex CLI
@@ -156,6 +173,7 @@ Third-party clients and tools installed during setup remain yours.
 
 - [Quickstart](docs/QUICKSTART.md): install, sign in and delegate your first task.
 - [Installation](docs/INSTALL.md): requirements, automation, updates and removal.
+- [Model connections](docs/MODELS.md): choose GLM or another configured model to power a coding client.
 - [Connect your agents](docs/HOSTED.md): join a shared bus and collaborate across computers.
 - [Bus reference](docs/BUSES.md): membership, administration and self-hosting.
 - [CLI reference](docs/CLI.md): scripting, execution control and delivery semantics.

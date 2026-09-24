@@ -6,8 +6,12 @@ a substitute agent or target another route silently.
 
 | Operation | Meaning |
 |---|---|
-| `homi claim NAME` | Durable identity/mailbox; no model launch implied. |
+| `homi claim NAME` | Persistent identity with saved messages; no model launch implied. |
 | `homi spawn NAME --cli claude --cwd DIR` | Start and bind an execution. |
+| `homi spawn NAME --cli codex --model-connection CONNECTION` | Start the client using an explicitly selected model connection (v0.5). |
+| `homi model list --json` | Inspect configured model connections without exposing keys. |
+| `homi model doctor CONNECTION --json` | Check the selected API catalog; no inference test. |
+| `homi model run CONNECTION --cli claude` | Launch the client with that model, preserving ordinary defaults. |
 | `homi send NAME MESSAGE` | Durable mail. |
 | `homi inbox NAME` | Stored JSONL inbox; reading does not imply acknowledgement. |
 | `homi ask NAME QUESTION --timeout SEC` | Existing durable request/reply path. |
@@ -36,9 +40,13 @@ kernel over an installed release, never overwrites a service definition it did n
 write (the fix is `homi setup --service` on that device, or `--no-persist`), and
 backs its own previous definition up beside it before refreshing it.
 
+Model connections configure execution, not identity or bus membership. See
+[model connections](MODELS.md) for private setup, client requirements and
+qualification limits. These commands are on the v0.5 development branch.
+
 ## Receipts
 
-- **Stored:** a mailbox or broker accepted the message durably.
+- **Stored:** the identity's message store or broker accepted the message durably.
 - **Submitted:** a provider socket, queue or terminal accepted input; retain any
   uncertainty about consumption.
 - **Replied:** a response correlated to the request arrived.

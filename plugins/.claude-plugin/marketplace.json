@@ -5,14 +5,14 @@
     "url": "https://github.com/aadarwal"
   },
   "metadata": {
-    "description": "HOMI identities, durable mail, native agent routes, explicit buses and terminal seats.",
-    "version": "0.3.0"
+    "description": "Stateful agent fleets with model selection, communication and terminal execution.",
+    "version": "0.5.0"
   },
   "plugins": [
     {
       "name": "communicate",
       "source": "./communicate",
-      "description": "HOMI identities, durable mail, native agent routes, explicit buses and terminal seats."
+      "description": "Stateful agent fleets with model selection, communication and terminal execution."
     }
   ]
 }

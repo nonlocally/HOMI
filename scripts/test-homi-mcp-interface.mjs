@@ -2,7 +2,7 @@
 // Actual MCP -> existing CLI -> isolated durable daemon. No real agent/model.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,10 +10,11 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const entry = process.env.HOMI_MCP_TEST_ENTRY || path.join(root, "packages/communicate/src/cli.mjs");
 const cli = process.env.HOMI_TEST_CLI || path.join(root, "bin/communicate");
-const temp = mkdtempSync(path.join(os.tmpdir(), "homi-mcp-core-"));
+const temp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "homi-mcp-core-")));
 const env = { ...process.env, HOME: temp, COMM_STATE: path.join(temp, "state"),
   COMMUNICATE_DATA: path.join(temp, "data"), HOMI_SOCK_DIR: path.join(temp, "sockets"),
-  HOMI_SESSIONS_DIR: path.join(temp, "sessions"), HOMI_SELF: "fixture", HOMI_TICK: "1" };
+  HOMI_SESSIONS_DIR: path.join(temp, "sessions"), HOMI_SELF: "fixture", HOMI_TICK: "1",
+  HOMI_MODEL_CONFIG: path.join(temp, "models") };
 for (const key of ["CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
   "CODEX_THREAD_ID", "CODEX_SESSION_ID", "COMMUNICATE_HOME", "HOMI_SOCK"]) delete env[key];
 mkdirSync(env.HOMI_SESSIONS_DIR);
@@ -49,8 +50,13 @@ try {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "core-fixture", version: "1" } });
   assert.equal(init.result.serverInfo.name, "communicate");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-  const names = (await rpc("tools/list", {})).result.tools.map((tool) => tool.name);
-  for (const name of ["bus_dashboard", "bus_reply", "route", "homi_claim", "homi_seat_bind"]) assert(names.includes(name));
+  const tools = (await rpc("tools/list", {})).result.tools;
+  const names = tools.map((tool) => tool.name);
+  for (const name of ["bus_dashboard", "bus_reply", "route", "homi_claim", "homi_seat_bind", "homi_model_list", "homi_model_doctor"]) assert(names.includes(name));
+  assert(tools.find((tool) => tool.name === "homi_spawn").inputSchema.properties.model_connection);
+  assert.deepEqual(JSON.parse(await call("homi_model_list")).connections, []);
+  const invalidModel = await rpc("tools/call", { name: "homi_spawn", arguments: { name: "never-created", cli: "codex", model_connection: "missing" } });
+  assert(invalidModel.result.isError, "missing model connection must fail before creation");
   for (const args of [{}, { hub: "https://bus.nonlocally.org" }]) {
     const status = JSON.parse(await call("bus_status", args));
     assert.equal(status.configured, false, "fresh status must not invent enrollment");
@@ -60,6 +66,7 @@ try {
     assert(!existsSync(path.join(env.COMM_STATE, "bus", file)), "status inspection must not start bus services");
   }
   await call("homi_start");
+  assert(!JSON.parse(await call("homi_agents")).agents.some((agent) => agent.name === "never-created"));
   await call("homi_claim", { name: "alice" });
   await call("homi_claim", { name: "bob" });
   await call("homi_send", { target: "bob", from: "alice", message: "--from" });

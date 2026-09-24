@@ -102,6 +102,7 @@ downloads. `update` remains the explicit release activation command.
 | `--no-clients` | Install the CLI only; register clients later with `homi setup --claude` or `--codex`. |
 | `--terminal`, `--mesh` | Select owned profiles and check their required tools. |
 | `--ghostty` | Explicitly select Ghostty, its configured font, and the terminal profile on macOS. |
+| `--model` | v0.5: configure a named model connection with a hidden key prompt. Requires a terminal; automation uses `homi model add --key-file` or `--key-stdin`. |
 | `--bus=local` | Select local bus operation without starting a broker; keep saved remote connections. |
 | `--bus=HTTPS_ORIGIN` | Select a shared hub this installation has already joined. Does not enroll a new device. |
 | `--bus-invite-file=/absolute/path` | Join using a private invitation file owned by you. Cannot be combined with `--bus`. |
@@ -111,6 +112,21 @@ downloads. `update` remains the explicit release activation command.
 | `--no-service` | Leave an existing managed service untouched during an update. |
 | `--service-inherit=NAME` | Add an allowed variable to the service environment, such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Repeat for each variable. |
 | `--dry-run` | Print the selected setup/dependency plan and change nothing. Use `homi profile preview` for the exact profile paths and conflicts. |
+
+### Choosing a model
+
+In v0.5, guided setup can add a model API connection, such as GLM, to power
+Claude Code or Codex directly. This is optional and does not change ordinary
+client defaults or subscription login. The service's canonical HTTPS `/v1`
+address, model ID and scoped key are needed; setup never guesses a public
+endpoint or uses a bus credential for inference. Use `homi setup --model` to
+configure it later. The key prompt is hidden; automated configuration uses a
+private file or stdin through `homi model add`.
+
+Setup saves the connection without making a model request. `homi model doctor`
+checks catalog access separately; an actual coding task establishes inference
+and tool use. See [model connections](MODELS.md). These commands are on the
+v0.5 development branch and are not included in the v0.4 archive above.
 
 ### Choosing a bus
 

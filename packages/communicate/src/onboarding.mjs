@@ -8,13 +8,14 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { pkgDir } from "./paths.mjs";
 import { applyBusChoice, busOrigin, busSummary, inspectBus, invitationOrigin, readPrivateInvitation } from "./bus-setup.mjs";
+import { addModelConnection, prepareModelChoice } from "./model-setup.mjs";
 
 export const INSTALLERS = Object.freeze({
   brew: "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
   claude: "https://claude.ai/install.sh",
   codex: "https://chatgpt.com/codex/install.sh",
 });
-const NEW_FLAGS = ["--guided", "--install-missing", "--terminal", "--mesh", "--ghostty", "--login-claude", "--login-codex"];
+const NEW_FLAGS = ["--guided", "--install-missing", "--terminal", "--mesh", "--ghostty", "--login-claude", "--login-codex", "--model"];
 const SERVICE_ENV = ["PATH", "HOMI_SOCK_DIR", "HOMI_SESSIONS_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOMI_TMUX_SOCKET"];
 export function shouldGuide(argv, { stdinTTY = process.stdin.isTTY, stdoutTTY = process.stdout.isTTY } = {}) {
   return (argv.length === 0 && !!stdinTTY && !!stdoutTTY) || argv.some((a) => NEW_FLAGS.includes(a) || a.startsWith("--bus=") || a.startsWith("--bus-invite-file="));
@@ -23,11 +24,11 @@ export function shouldGuide(argv, { stdinTTY = process.stdin.isTTY, stdoutTTY = 
 export function parseOnboardingArgs(argv) {
   const o = { guided: false, installMissing: false, claude: false, codex: false, noClients: false,
     terminal: false, mesh: false, ghostty: false, service: false, noService: false,
-    yes: false, dryRun: false, loginClaude: false, loginCodex: false, bus: null, busInviteFile: null, setupArgs: [] };
+    yes: false, dryRun: false, loginClaude: false, loginCodex: false, model: false, bus: null, busInviteFile: null, setupArgs: [] };
   const flags = { "--guided": "guided", "--install-missing": "installMissing", "--claude": "claude",
     "--codex": "codex", "--no-clients": "noClients", "--terminal": "terminal", "--mesh": "mesh",
     "--ghostty": "ghostty", "--service": "service", "--no-service": "noService", "--yes": "yes",
-    "-y": "yes", "--dry-run": "dryRun", "--login-claude": "loginClaude", "--login-codex": "loginCodex" };
+    "-y": "yes", "--dry-run": "dryRun", "--login-claude": "loginClaude", "--login-codex": "loginCodex", "--model": "model" };
   for (const a of argv) {
     if (flags[a]) o[flags[a]] = true;
     else if (a.startsWith("--bus=")) {
@@ -230,6 +231,7 @@ export async function executeOnboarding(plan, io) {
   if (plan.profileArgs.length) log(`  homi profile preview/install ${plan.profileArgs.join(" ")} (managed shell/tmux/Ghostty configuration; no live reload)`);
   if (plan.options.loginClaude) log("  Claude login after setup, only if not already signed in (credentials handled by Claude)");
   if (plan.options.loginCodex) log("  Codex login after setup, only if not already signed in (credentials handled by Codex)");
+  if (plan.options.model) log("  Add a private model connection for explicitly selected Claude Code/Codex launches; existing defaults and logins stay available.");
   if (plan.options.bus) log(plan.options.bus === "local" ? "  Select local bus use; registration starts its broker later." : `  Select the existing enrollment at ${plan.options.bus}.`);
   else if (plan.options.busInviteFile || plan.options.busInvitePrompt) log("  Join the hub in your private invitation (invitation contents are never printed).");
   else log("  Keep the current bus selection; no device enrollment or agent registration.");
@@ -244,6 +246,13 @@ export async function executeOnboarding(plan, io) {
     throw new Error("Choose --claude, --codex or --no-clients explicitly for guided/automated setup.");
   if (!stdinTTY && !plan.options.yes) throw new Error("Noninteractive guided setup requires --yes after reviewing --dry-run.");
   if ((plan.options.loginClaude || plan.options.loginCodex) && !stdinTTY) throw new Error("Provider login requires an interactive terminal; run the provider's own login separately.");
+  if (plan.options.model && !stdinTTY) throw new Error("Model setup needs a terminal for its hidden key prompt. For automation use homi model add with --key-file or --key-stdin.");
+  let modelChoice;
+  if (plan.options.model) {
+    modelChoice = await io.prepareModel();
+    if (!modelChoice) return { status: "cancelled", plan };
+    log(`  Model connection: ${modelChoice.description}`);
+  }
   let busChoice;
   if (plan.options.bus || plan.options.busInviteFile || plan.options.busInvitePrompt) {
     busChoice = await io.prepareBus(plan.options);
@@ -290,6 +299,14 @@ export async function executeOnboarding(plan, io) {
       throw new Error("HOMI core setup completed, but optional bus setup did not complete. The installation is retained. Inspect homi bus status --no-start --json, then retry setup with the intended existing hub or a fresh private invitation. No agent registration is claimed.");
     }
   }
+  if (modelChoice) {
+    try {
+      await modelChoice.apply();
+      log("Model connection saved. Ask your agent to select it when launching a worker. Catalog access and real inference can be checked separately.");
+    } catch {
+      throw new Error("HOMI core setup completed, but optional model setup did not complete. The installation is retained. Inspect homi model list and retry homi model add; no model connection success is claimed.");
+    }
+  }
   await io.doctor();
   for (const provider of ["claude", "codex"]) {
     const key = provider === "claude" ? "loginClaude" : "loginCodex";
@@ -307,6 +324,7 @@ export async function runOnboarding(argv, injected = {}) {
   const stdoutTTY = injected.stdoutTTY ?? !!process.stdout.isTTY;
   const options = parseOnboardingArgs(argv);
   if (!argv.length && stdinTTY && stdoutTTY) options.guided = true;
+  if (options.model && stdinTTY && !options.claude && !options.codex && !options.noClients) options.guided = true;
   if (options.guided) options.installMissing = true;
   const prompt = !options.dryRun && stdinTTY && !injected.confirm ? promptSession() : null;
   const confirm = injected.confirm || prompt?.confirm || (async () => false);
@@ -352,10 +370,11 @@ export async function runOnboarding(argv, injected = {}) {
         options.ghostty = await confirm("Install Ghostty and its configured Nerd Font with the terminal profile?");
       if (options.ghostty) options.terminal = true;
       if (!options.service && !options.noService) options.service = await confirm("Enable the per-user HOMI daemon service?");
+      if (!options.model && (options.claude || options.codex)) options.model = await confirm("Configure a model API connection, such as GLM, to power your coding agents?");
       if (prompt?.closed) return { status: "cancelled" };
       // Login is a separate choice, never implied by installing a provider CLI.
-      if (options.claude && !options.loginClaude) options.loginClaude = await confirm("After setup, offer Claude's own login if not already signed in?");
-      if (options.codex && !options.loginCodex) options.loginCodex = await confirm("After setup, offer Codex's own login if not already signed in?");
+      if (!options.model && options.claude && !options.loginClaude) options.loginClaude = await confirm("After setup, offer Claude's own login if not already signed in?");
+      if (!options.model && options.codex && !options.loginCodex) options.loginCodex = await confirm("After setup, offer Codex's own login if not already signed in?");
       if (prompt?.closed) return { status: "cancelled" };
       if (!options.bus && !options.busInviteFile) {
         (injected.log || console.log)(`Bus: ${busSummary(await busStatus())}`);
@@ -374,6 +393,11 @@ export async function runOnboarding(argv, injected = {}) {
         await withSelectedPath(async () => (await import("./setup.mjs")).runSetup(args));
       },
       profile,
+      prepareModel: () => prepareModelChoice({ ask, secret, add: async (args, key) => {
+        let result;
+        await withSelectedPath(async () => { result = await (injected.addModel || addModelConnection)(args, key, { env: environment() }); });
+        return result;
+      } }),
       prepareBus: async (selected) => {
         if (selected.bus) return { description: selected.bus === "local" ? "local, without starting a service" : `existing enrollment at ${selected.bus}`,
           apply: () => applySelectedBus(selected.bus === "local" ? { mode: "local" } : { mode: "existing", hub: selected.bus }) };

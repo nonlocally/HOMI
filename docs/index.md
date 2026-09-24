@@ -18,6 +18,8 @@ Start here:
   agent to create peers and coordinate work; CLI examples for debugging.
 - [Installation](INSTALL.md) — requirements, setup flags, the service, update,
   rollback, uninstall, private configuration, troubleshooting.
+- [Model connections](MODELS.md) — choose the model powering Claude Code or
+  Codex, with private credentials and explicit per-launch selection (v0.5).
 - [CLI and delivery semantics](CLI.md) — what each command means and what a
   receipt proves.
 

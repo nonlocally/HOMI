@@ -249,6 +249,13 @@ class Qualification:
             info = client.initialize()
             names = {tool["name"] for tool in client.rpc("tools/list", {})["tools"]}
             require({"homi_claim", "homi_send", "homi_inbox", "homi_status", "bus_status", "route"} <= names, "combined MCP tools missing")
+            if (root / "vendor/lib/model_connections.py").exists():
+                require({"homi_model_list", "homi_model_doctor"} <= names, "model MCP tools missing")
+                connections = json.loads(client.call("homi_model_list", {}))
+                require(connections.get("ok") is True, "model MCP discovery failed")
+                if (self.home / ".config/homi/models/qualification-model").exists():
+                    require([item["name"] for item in connections["connections"]] == ["qualification-model"], "model MCP roster differs from installed configuration")
+                    require("NOT_A_REAL_KEY" not in json.dumps(connections), "model MCP exposed fixture key")
             if mail:
                 for name in ["qualification-sender", "qualification-receiver"]:
                     client.call("homi_claim", {"name": name})
@@ -339,6 +346,8 @@ class Qualification:
     def execute(self, runtime, previous=None):
         with self.check("archive manifest and complete payload") as row:
             row.update(artifact(runtime))
+            if tuple(map(int, row["version"].split(".")[:2])) >= (0, 5):
+                require((runtime / "vendor/lib/model_connections.py").is_file(), "model connections missing from v0.5 payload")
         copy = self.base / "runtime with spaces"
         shutil.copytree(runtime, copy, symlinks=True)
         with self.check("artifact CLI and source resolution") as row:
@@ -356,6 +365,33 @@ class Qualification:
             require(self.installed() == installed, "same artifact update changed immutable release location")
             row["installed"] = str(installed)
             self.report["paths"]["installed"] = str(installed)
+        model_state = None
+        if (installed / "vendor/lib/model_connections.py").exists():
+            with self.check("installed private model configuration without inference") as row:
+                immutable_before = files(installed)
+                key_file = self.home / "qualification-model-key"
+                key_file.write_text("nlm_NOT_A_REAL_KEY_artifact_fixture\n")
+                key_file.chmod(0o600)
+                cli = self.data / "bin/homi"
+                args = ["model", "add", "qualification-model", "--base-url", "https://model-qualification.invalid/v1",
+                        "--anthropic-base-url", "https://model-qualification.invalid", "--model", "glm", "--key-file", str(key_file), "--json"]
+                before = files(self.home)
+                dry = json.loads(self.run(cli, *args, "--dry-run").stdout)
+                require(dry.get("credential_read") is False and files(self.home) == before, "model preview changed files or read key")
+                result = self.run(cli, *args)
+                require(json.loads(result.stdout).get("ok") is True, "model connection not created")
+                listing = self.run(cli, "model", "list", "--json").stdout
+                require("NOT_A_REAL_KEY" not in listing + result.stdout + result.stderr, "model output exposed fixture key")
+                require([x["name"] for x in json.loads(listing)["connections"]] == ["qualification-model"], "model connection absent from roster")
+                model_root = self.home / ".config/homi/models"
+                model_state = files(model_root)
+                for path in [model_root, model_root / "qualification-model", *(model_root / "qualification-model").iterdir()]:
+                    require(path.stat().st_mode & 0o077 == 0, "model configuration is not private")
+                duplicate = self.run(cli, *args, ok=False)
+                require(duplicate.returncode != 0 and files(model_root) == model_state, "duplicate model overwrote saved connection")
+                key_file.unlink()
+                require(files(installed) == immutable_before, "model configuration changed immutable payload")
+                row.update(configured=True, credentials_private=True, inference_tested=False)
         with self.check("installed daemon and actual MCP mailbox") as row:
             payload_before = files(installed)
             row["daemon"] = self.start(installed)
@@ -374,6 +410,8 @@ class Qualification:
             copy = hidden
         with self.check("core uninstall/reinstall preserves mailbox and profiles"):
             self.run(self.data / "bin/homi", "uninstall", "--no-clients", "--no-service")
+            if model_state:
+                require(files(model_root) == model_state, "uninstall changed model configuration, modes or inventory")
             require(not (self.data / "bin/homi").exists(), "uninstall retained owned executable")
             require(mail.read_bytes() == mail_before, "uninstall changed durable mailbox")
             self.run(self.home / ".local/bin/homi-mesh", "help")
@@ -382,6 +420,8 @@ class Qualification:
             installed = self.installed()
             require(mail.read_bytes() == mail_before, "reinstall changed durable mailbox")
             require("artifact-only mailbox proof" in self.run(self.data / "bin/homi", "inbox", "qualification-receiver").stdout, "reinstalled CLI cannot read prior mail")
+            if model_state:
+                require(files(model_root) == model_state, "uninstall/reinstall changed model connection")
         if previous:
             with self.check("real previous release upgrade and rollback") as row:
                 row["previous"] = artifact(previous)
@@ -428,6 +468,8 @@ class Qualification:
                     require(json.loads(identities.read_text()) == identities_before, f"{stage} changed saved identities")
                     require(not (bus / "worker.json").exists() and not (bus / "server.json").exists(),
                             f"{stage} unexpectedly started a bus worker or broker")
+                    if model_state:
+                        require(files(model_root) == model_state, f"{stage} changed model connection")
                 row["saved_state_sha256"] = {str(path.relative_to(self.state)): sha(path) for path in preserved}
                 self.cli(copy, "update", "--no-clients", "--no-service")
                 require(self.installed() == installed and old != installed, "upgrade did not select candidate release")
@@ -468,7 +510,7 @@ def main():
         "Service-manager activation, restart after reboot, and existing-installation cutover",
         "Ghostty rendering, tmux interactive behavior, VNC and remote/Tailscale access",
         "Package publication, Homebrew download/formula execution and npm registry installation"]}
-    base = Path(tempfile.mkdtemp(prefix="homi-q-", dir="/tmp"))
+    base = Path(tempfile.mkdtemp(prefix="homi-q-", dir="/tmp")).resolve()
     runner = None
     try:
         runner = Qualification(base, report)

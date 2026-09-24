@@ -119,6 +119,23 @@ It preserves the installed HOMI integration and leaves the usual client
 configuration in place. The selected API receives the conversation and tool
 results the client sends, so choose an endpoint you trust with that project.
 
+Model launches require **Codex CLI 0.156 or later**. HOMI launches it with
+`--no-daemon` so its selected credential reaches that execution without changing
+an existing shared server. To resume a GLM session, use its exact session ID
+through the same connection:
+
+```sh
+homi model run research-glm --cli codex -- resume SESSION_ID
+```
+
+The temporary launch profile is removed when the client exits. An ordinary
+shared-server resume or queued turn is not a qualified substitute for this
+launcher. Background, remote and cloud launch modes that bypass the selected
+local connection are refused. Claude's bare mode is also incompatible with
+this plugin-preserving bearer-authentication path. Existing subscription-account
+panes must use a fresh HOMI seat so account rotation cannot replace the selected
+model.
+
 For a collaborator, ask your agent:
 
 > Create a Codex collaborator called investigator using my research-glm
