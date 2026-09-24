@@ -287,6 +287,10 @@ LB="$(sched "$HOME_B" preview | jq_ 'print(d["label"])')"
 out="$(XDG_STATE_HOME="$T/xdg-state" python3 "$SCHED" preview --home "$ACCOUNT_HOME" --runtime "$HERE/profiles/runtime" --platform darwin 2>&1)"
 printf '%s' "$out" | jq_ 'assert d["scope"] == "scoped" and d["label"] != "com.communicate.homi.snapshots"' 2>/dev/null && ok "a nonstandard state root scopes even the account home" || bad "XDG scope (out: $out)"
 [ ! -s "$LOGF" ] && ok "preview called no service manager" || bad "preview called the manager"
+out="$(HOME="$HOME_A" python3 "$SCHED" preview --runtime "$HERE/profiles/runtime" --platform darwin 2>&1)"
+printf '%s' "$out" | jq_ "assert d['label'] == '$LA' and d['scope'] == 'scoped'" 2>/dev/null && ok "with no --home the selection follows \$HOME (the wrapper's case) and is scoped there" || bad "\$HOME default (out: $out)"
+out="$(env -u HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME python3 "$SCHED" preview --runtime "$HERE/profiles/runtime" --platform darwin 2>&1)"
+printf '%s' "$out" | jq_ 'assert d["label"] == "com.communicate.homi.snapshots" and d["scope"] == "default"' 2>/dev/null && ok "with no HOME at all the account home is selected (read-only preview)" || bad "no-HOME default (out: $out)"
 
 echo "-- install/uninstall across two homes leave each other alone"
 out="$(sched "$HOME_A" install)"; rc=$?

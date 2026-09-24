@@ -14,9 +14,11 @@ homi-snapshot schedule preview # the owned 03/09/15/21 schedule, before installi
 ```
 
 The module lives at `profiles/runtime/modules/snapshots/` (`homi-snapshot` and
-`schedule.py`), so an installed profile payload carries it. Until the profile
-installer wires a wrapper, run it from the payload or the source tree, or let
-`homi-snapshot schedule install` write the stable `~/.local/bin/homi-snapshot`.
+`schedule.py`), so an installed profile payload carries it. `homi profile
+install --snapshots` installs the stable wrapper `~/.local/bin/homi-snapshot`
+and nothing else: no job, no schedule. `homi-snapshot schedule install` writes
+that same wrapper when the profile did not, and treats a profile-installed one
+as shared.
 
 ## Format, naming, retention
 
@@ -127,11 +129,21 @@ Ownership boundaries:
 The files are owned through the profile ledger
 (`~/.local/state/homi/profiles/ownership.json`) using the installer's own
 conflict rules: an existing unowned file is never replaced, an owned file that
-was edited is never removed, and `homi profile status` lists them. Run
-`homi-snapshot schedule uninstall` before `homi profile uninstall`, which
-removes owned files but never talks to a service manager. The service manager
-is invoked only by these two verbs. `--home PATH --runtime PATH --platform`
-select an isolated home, a runtime payload, and a rendering for qualification.
+was edited is never removed, and `homi profile status` lists them.
+
+`homi profile uninstall` handles an installed schedule itself. When the ledger
+holds schedule-owned entries it first checks its own plan for conflicts, then
+delegates to `homi-snapshot schedule uninstall` outside its lock; that step
+verifies the job is loaded from the schedule's own file, unloads only that
+job, and removes only unedited schedule-owned files. The profile uninstall
+continues only when the schedule confirms the job unloaded and no
+schedule-owned entries remain, reloads the ledger, and removes the rest. If the
+schedule refuses (a foreign loaded path, an edited owned file, an unavailable
+service manager), the profile uninstall stops with every file preserved. The
+service manager is invoked only by the schedule's install and uninstall,
+whether run directly or through the profile uninstall. `--home PATH --runtime
+PATH --platform` select an isolated home, a runtime payload, and a rendering
+for qualification; `--home` defaults to `$HOME`.
 
 ## Qualification
 

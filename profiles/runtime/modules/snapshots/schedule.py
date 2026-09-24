@@ -60,8 +60,10 @@ class Conflict(Exception):
 
 
 def account_home():
-    """The account's real home, from the password database: $HOME is what a
-    shell, a test or a launchd job happens to carry."""
+    """The account's real home, from the password database — the reference a
+    selected home is measured against for the compatible label. $HOME is what
+    a shell, a test or a launchd job happens to carry, and stays the default
+    selection: an installation there gets its own scoped label."""
     try:
         return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
     except (KeyError, OSError):
@@ -478,8 +480,8 @@ def main(argv=None):
     ap.add_argument("command", choices=["preview", "install", "uninstall", "status"], nargs="?", default="preview")
     ap.add_argument("--platform", choices=["darwin", "linux"], default=NATIVE,
                     help="render for this platform; mutation needs the native host or --manager")
-    ap.add_argument("--home", default=str(account_home()),
-                    help="installation home; anything but the account home gets a scoped label")
+    ap.add_argument("--home", default=os.environ.get("HOME") or str(account_home()),
+                    help="installation home (default $HOME); anything but the account home gets a scoped label")
     ap.add_argument("--runtime", help="the installed profile runtime holding modules/snapshots (default: the ledger's payload)")
     ap.add_argument("--manage", help="explicit path to profiles/manage.py")
     ap.add_argument("--manager", help="explicit service-manager executable (a qualification fixture)")
