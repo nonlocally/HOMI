@@ -63,10 +63,11 @@ comm_ensure_socket_dir() {
   mkdir -p "$dir" 2>/dev/null || true
   [ -d "$dir" ] || die "socket dir $dir does not exist and could not be created"
   chmod 700 "$dir" 2>/dev/null || true
-  # BSD (macOS) vs GNU stat differ; try both.
+  # Keep each attempt separate: GNU stat -f can print filesystem data before
+  # failing, which must not be concatenated with the successful fallback.
   local owner mode
-  owner="$(stat -f '%u' "$dir" 2>/dev/null || stat -c '%u' "$dir" 2>/dev/null)"
-  mode="$(stat -f '%Lp' "$dir" 2>/dev/null || stat -c '%a' "$dir" 2>/dev/null)"
+  owner="$(stat -c '%u' "$dir" 2>/dev/null)" || owner="$(stat -f '%u' "$dir" 2>/dev/null)"
+  mode="$(stat -c '%a' "$dir" 2>/dev/null)" || mode="$(stat -f '%Lp' "$dir" 2>/dev/null)"
   [ "$owner" = "$(id -u)" ] || die "refusing socket dir $dir: not owned by us (owner uid=$owner)"
   case "$mode" in 700|0700) ;; *) die "refusing socket dir $dir: mode $mode is not 700";; esac
 }

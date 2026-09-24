@@ -3874,8 +3874,8 @@ def _cli_pair(args):
             # refuse to start (ensure_dir_0700 on a shared host).
             # Detect it once and bake a per-uid dir into whatever starts it.
             rc_s, sock_d = _pair_ssh(
-                addr, 'o=$(stat -f %u /tmp/cc-socks 2>/dev/null || '
-                      'stat -c %u /tmp/cc-socks 2>/dev/null); u=$(id -u); '
+                addr, 'o=$(stat -c %u /tmp/cc-socks 2>/dev/null) || '
+                      'o=$(stat -f %u /tmp/cc-socks 2>/dev/null); u=$(id -u); '
                       'if [ -n "$o" ] && [ "$o" != "$u" ]; then '
                       'mkdir -p "$HOME/.local/run/cc-socks" && '
                       'chmod 700 "$HOME/.local/run" 2>/dev/null; '

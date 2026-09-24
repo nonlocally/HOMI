@@ -315,7 +315,7 @@ _mesh_probe() {
   # Check cache freshness
   if [[ -f "$profile" ]]; then
     local mtime
-    mtime=$(stat -f %m "$profile" 2>/dev/null || stat -c %Y "$profile" 2>/dev/null)
+    mtime=$(stat -c %Y "$profile" 2>/dev/null) || mtime=$(stat -f %m "$profile" 2>/dev/null)
     local age=$(( $(date +%s) - mtime ))
     if (( age < max_age )); then
       cat "$profile"
