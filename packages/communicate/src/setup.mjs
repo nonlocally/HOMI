@@ -257,6 +257,10 @@ const sameLocalRoot = (a, b) => typeof a === "string" && typeof b === "string" &
 async function snapshotCodex({ preflight = true } = {}) {
   if (!executable("codex")) return null;
   assertManagedPath(path.join(codexHome(), "config.toml"));
+  // Codex rejects an explicit CODEX_HOME that does not exist, even for list.
+  // Do this only during selected client setup/restoration, after path checks;
+  // dry-run and doctor must not create a client home. Existing modes stay intact.
+  mkdirSync(codexHome(), { recursive: true, mode: 0o700 });
   const market = codexMarketplace(true), plugin = codexPlugin();
   if (market && market.marketplaceSource?.sourceType !== "local")
     throw new Error("Codex HOMI marketplace is not a verified local source; preserve/export it before switching installations");

@@ -24,6 +24,7 @@ const read=()=>JSON.parse(fs.readFileSync(p)), save=s=>fs.writeFileSync(p,JSON.s
 const flag=n=>path.join(h,n), json=v=>console.log(JSON.stringify(v));
 fs.appendFileSync(path.join(h,'calls'),JSON.stringify(a)+'\\n');
 if(a[0]==='--version'){console.log('codex-cli 0.156.1-fixture');process.exit(0);}
+if(process.env.CODEX_HOME&&!fs.existsSync(process.env.CODEX_HOME)){console.error('failed to resolve CODEX_HOME: path does not exist');process.exit(1);}
 if(a[0]==='app-server'){
  fs.appendFileSync(path.join(h,'api-pids'),process.pid+'\\n');
  readline.createInterface({input:process.stdin}).on('line',line=>{
@@ -76,15 +77,18 @@ async function state() {
   return { root: market?.marketplaceSource?.source || market?.root || null, installed: !!plugin,
     enabled: plugin?.enabled ?? false, settings: await readCodexSettings() };
 }
-function fixture(name) {
+function fixture(name, { createCodexHome = true } = {}) {
   const home = path.join(temp, name); fs.mkdirSync(home, { mode: 0o700 });
   process.env = Object.fromEntries(Object.entries(originalEnv).filter(([key]) => !/^(CODEX_|COMM|HOMI|ANU|CLAUDE|XDG|OPENAI)/.test(key) && !["TMUX", "TMUX_PANE"].includes(key)));
   Object.assign(process.env, { HOME: home, CODEX_HOME: path.join(home, ".codex"), CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
     COMMUNICATE_DATA: path.join(home, "data"), COMM_STATE: path.join(home, "state"), HOMI_SOCK_DIR: path.join(home, "sockets"), COMM_BUS_PORT: "0" });
-  fs.mkdirSync(process.env.CODEX_HOME, { mode: 0o700 });
+  if (createCodexHome) fs.mkdirSync(process.env.CODEX_HOME, { mode: 0o700 });
   if (!real) {
     fs.mkdirSync(path.join(home, "bin"));
     fs.writeFileSync(path.join(home, "bin/codex"), fake, { mode: 0o755 });
+    // Doctor inspects both installed clients; keep this fake-client suite from
+    // invoking a host Claude binary even when one is on the inherited PATH.
+    fs.writeFileSync(path.join(home, "bin/claude"), "#!/bin/sh\nprintf '[]\\n'\n", { mode: 0o755 });
     process.env.PATH = path.join(home, "bin") + path.delimiter + originalEnv.PATH;
     fs.writeFileSync(path.join(home, "client.json"), JSON.stringify({ market: null, installed: false, settings: null, version: 0, unrelated: "preserve" }));
   }
@@ -110,6 +114,31 @@ function nextArtifact() {
 
 try {
   const next = nextArtifact();
+  fixture("fresh-explicit-home", { createCodexHome: false });
+  run(cli, ["setup", "--codex", "--no-service", "--dry-run"]);
+  assert(!fs.existsSync(process.env.CODEX_HOME), "dry-run created the selected Codex home");
+  run(cli, ["doctor"]);
+  assert(!fs.existsSync(process.env.CODEX_HOME), "doctor created the selected Codex home");
+  run(cli, ["setup", "--codex", "--no-service"]);
+  assert.equal(fs.statSync(process.env.CODEX_HOME).mode & 0o777, 0o700, "fresh client home is not private");
+  assert((await state()).enabled, "fresh explicit Codex home did not install the plugin");
+  run(cli, ["uninstall", "--codex"]);
+  assert.equal((await state()).installed, false, "fresh client plugin survived uninstall");
+
+  fixture("existing-home-mode");
+  fs.chmodSync(process.env.CODEX_HOME, 0o750);
+  run(cli, ["setup", "--codex", "--no-service"]);
+  assert.equal(fs.statSync(process.env.CODEX_HOME).mode & 0o777, 0o750, "setup changed an existing client-home mode");
+  run(cli, ["uninstall", "--codex"]);
+
+  const linked = fixture("symlinked-client-home", { createCodexHome: false });
+  const outside = path.join(temp, "outside-client-home"); fs.mkdirSync(outside, { mode: 0o700 });
+  fs.writeFileSync(path.join(outside, "sentinel"), "preserve");
+  fs.symlinkSync(outside, process.env.CODEX_HOME);
+  assert.match(run(cli, ["setup", "--codex", "--no-service"], false).stderr, /Refusing symlinked managed path/);
+  assert.deepEqual(fs.readdirSync(outside), ["sentinel"], "setup followed a client-home symlink");
+  assert(!fs.existsSync(path.join(linked.home, "calls")), "symlink refusal invoked the client");
+
   for (const variant of ["enabled", "disabled-custom", "marketplace-only", "none"]) {
     const f = fixture(variant);
     if (variant !== "none") codex(["plugin", "marketplace", "add", f.market]);
@@ -167,5 +196,5 @@ try {
       }
     }
   }
-  console.log(`PASS (${real ? "actual unauthenticated Codex CLI" : "isolated fake client"}): original installed/enabled/settings restoration, first-original lineage, upgrade/rollback, changed-user-settings refusal, doctor state${real ? "" : ", activation/API failure recovery and process cleanup"}`);
+  console.log(`PASS (${real ? "actual unauthenticated Codex CLI" : "isolated fake client"}): fresh explicit client home, dry-run/doctor read-only, existing modes and symlinks, original installed/enabled/settings restoration, first-original lineage, upgrade/rollback, changed-user-settings refusal, doctor state${real ? "" : ", activation/API failure recovery and process cleanup"}`);
 } finally { process.env = originalEnv; fs.rmSync(temp, { recursive: true, force: true }); }
