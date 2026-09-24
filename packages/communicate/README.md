@@ -23,7 +23,8 @@ seats; an authenticated Claude Code or Codex CLI for agent sessions. `setup`
 stages an immutable copy of the release at
 `~/.local/share/communicate/0.3.0-<manifest-hash>/`, points `current` at it, and
 registers the plugin with the clients you named. Start a fresh client session
-afterwards. The full flag reference, service, update, rollback, uninstall,
+afterwards. Keep a copy of the archive for recovery and purge if an installed
+payload becomes damaged. The full flag reference, service, update, rollback, uninstall,
 and troubleshooting are in [docs/INSTALL.md](../../docs/INSTALL.md).
 
 ```sh

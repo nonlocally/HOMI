@@ -45,9 +45,9 @@ export PATH="$HOME/.local/share/communicate/bin:$PATH"   # put this in your shel
 
 `setup` copies the release into an immutable directory under
 `~/.local/share/communicate/`, points the stable `current` link at it, and
-registers the plugin with the clients you named. The extracted archive can be
-deleted afterwards. Nothing else changes: no shell rc, editor, Git, or client
-settings beyond that plugin registration. Full details, flags, and the
+registers the plugin with the clients you named. Keep a copy of the archive for
+recovery. Core setup leaves your shell rc, editor, and Git configuration alone;
+client changes are limited to the selected plugin registration. Full details, flags, and the
 lifecycle are in [INSTALL.md](docs/INSTALL.md).
 
 Homebrew (`brew install nonlocally/tap/homi`) is the planned channel once the tap
@@ -126,8 +126,8 @@ explicit, so a failed lookup never silently targets a different agent. See
 
 ## Optional: terminal, mesh, snapshots, containers
 
-None of this is installed by default, and none of it touches your editor, shell,
-or Git setup:
+Profiles are optional. Preview the managed includes and configuration files
+before adding terminal, shell, or mesh helpers:
 
 ```sh
 homi profile preview --terminal --mesh        # shows exactly which files would change
