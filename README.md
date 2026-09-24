@@ -1,193 +1,152 @@
 # HOMI
 
-HOMI gives coding agents durable identities with mailboxes, lets them message each
-other across sessions and machines, and runs them in terminal seats you can observe
-and control. One `homi` command, one Claude Code/Codex plugin, one MCP server.
-macOS and Linux.
+**Let Claude Code and Codex work together.**
 
-Download [HOMI 0.3.0](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
-or install with [Homebrew](docs/INSTALL.md#homebrew).
+HOMI connects your coding agents so they can divide a task, ask each other
+questions, review each other's work, and bring the findings back to you.
+Start in the agent you already use and describe what you want done.
 
-## Why
-
-Agents lose each other. A session ends, a pane closes, a machine sleeps, and the
-address you had for an agent is gone with it. HOMI separates three things that
-usually get tangled:
-
-- **Identity.** A durable name with a mailbox. The daemon keeps receiving mail
-  for it while no model is running.
-- **Execution.** Where that identity is running right now: a Claude Code or Codex
-  session, a tmux seat, a linked device. It can stop and restart without the
-  identity changing.
-- **Delivery.** Whether a message was *stored*, *submitted* to a client,
-  or *replied* to. A delivery receipt alone does not prove an answer; use an
-  explicit reply token to correlate a response with its question.
-
-HOMI runs on your machine and sends no usage telemetry. Local communication needs
-no hosted account. Your model clients use their configured providers; remote
-communication uses the brokers and hosts you choose.
+Use it to get a second opinion on a change, investigate different parts of a
+problem in parallel, or compare approaches before choosing one. Collaborators
+can run on your computer or on other devices you explicitly connect.
 
 ## Install
 
-Start with macOS or Linux, Node.js 20+, and Bash to launch the archive.
-Guided setup checks the remaining requirements and offers to install missing
-tools for the features you choose: Claude Code, Codex, terminal helpers, mesh,
-and, on macOS, Ghostty. You can keep a server installation CLI-only.
-
-Download the archive and its checksum, then verify and extract it:
-
 ```sh
-curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz
-curl -fLO https://github.com/nonlocally/HOMI/releases/download/v0.3.0/homi-0.3.0.tar.gz.sha256
-shasum -a 256 -c homi-0.3.0.tar.gz.sha256
-tar -xzf homi-0.3.0.tar.gz
-./homi-0.3.0/bin/homi setup                    # guided when run in a terminal
-./homi-0.3.0/bin/homi doctor
-export PATH="$HOME/.local/share/communicate/bin:$PATH"   # put this in your shell rc
+brew install nonlocally/tap/homi
+homi setup
+homi doctor
 ```
 
-Choose the clients and optional terminal features you want, review the package
-and configuration plan, then confirm. Missing selected dependencies can be
-installed for you; existing provider clients are kept. Provider login is a
-separate choice. No desktop software is selected automatically.
-Selecting Claude Code or Codex also checks tmux for agent executions, even if
-you decline terminal configuration. Installing tmux does not change your shell.
+The setup guide lets you choose Claude Code, Codex, or both. It shows the plan
+before making changes and offers to install missing clients and tools, including
+tmux for running collaborators. Existing provider clients are kept.
 
-For a repeatable selection, preview first, then apply explicitly:
+Terminal configuration is optional. On macOS, you can also choose Ghostty and
+its configured font. Keep using zsh or Bash: setup does not change your interactive
+shell. Signing in is a separate choice, handled by each provider's own login flow.
 
-```sh
-homi setup --install-missing --claude --codex --terminal --mesh --dry-run
-homi setup --install-missing --claude --codex --terminal --mesh --yes
-# On macOS, add --ghostty to also select Ghostty and its configured Nerd Font.
-```
+Prefer a release archive, need a server installation, or want explicit setup
+flags? See the [installation guide](docs/INSTALL.md). HOMI runs on macOS and
+Linux. The archive needs Node.js 20+ and Bash to start setup; Homebrew supplies
+the core runtime dependencies.
 
-`setup` copies the release into an immutable directory under
-`~/.local/share/communicate/`, points the stable `current` link at it, and
-registers the plugin with the clients you named. Keep a copy of the archive for
-recovery. Selecting terminal or mesh profiles adds managed configuration includes;
-unrelated settings and private overrides are preserved. Explicit
-`setup --claude`, `setup --codex`, and `profile install` remain configuration-only
-and do not download missing software. Full requirements, platform recipes,
-flags, and lifecycle are in [INSTALL.md](docs/INSTALL.md).
+## Give your agents a task
 
-Alternatively, `brew install nonlocally/tap/homi` installs the commands and core
-dependencies. Then run `homi setup` to choose your clients and optional tools.
-Service installation is also explicit.
+After setup and provider sign-in, open a fresh Claude Code CLI or Codex CLI
+session in your project. Restart Claude Code or start a new Codex thread if
+it was already running, so it loads the HOMI plugin.
 
-## First success
+Then ask for work in plain language. For example:
 
-Complete setup, sign in through the client you chose, then open a fresh **Claude
-Code CLI** or **Codex CLI** session in your project. Ask it in plain language:
+### Investigate a failure
 
-> Create a Claude agent called researcher, ask it to investigate the flaky test
-> in this project, and bring me its answer.
+> Create a Claude collaborator called investigator. Ask it to trace why the
+> checkout test fails intermittently while you inspect the recent changes.
+> Compare your findings and bring me the most likely cause, with evidence.
 
-Use Codex instead if that is the provider you installed and authenticated. The
-agent uses the loaded HOMI instructions and tools to check readiness, create the
-identity and execution, send the task, and collect a correlated reply. You do not
-need to type identity or messaging commands for normal use. If a required tool
-or permission is missing, the agent should explain what is needed before continuing.
+### Compare options before building
 
-[QUICKSTART.md](docs/QUICKSTART.md) covers this workflow. Its optional CLI reference
-shows the underlying operations and how to inspect delivery when debugging.
+> Ask one collaborator to compare SQLite and PostgreSQL for this application's
+> deployment and workload. Ask another to inspect the code for migration costs.
+> Have them challenge each other's assumptions, then bring me a recommendation
+> with the tradeoffs and unresolved questions.
 
-## Claude Code and Codex
+### Get an independent review
 
-`setup --claude` and `setup --codex` register the plugin `communicate@communicate`.
-Restart Claude Code, or start a new Codex thread, and the session knows HOMI: it
-can find agents, register itself on a bus, send and reply, and create or drive an
-execution, through skills and MCP tools. Ask it in plain language ("register on
-the bus", "send this to researcher", "open a seat for the reviewer").
+> Ask the Codex reviewer to examine this change for correctness and missing
+> tests. Discuss any disagreements with it, then give me the findings that still
+> need attention before I merge.
 
-Supported clients are the **Claude Code CLI** and the **Codex CLI**. Queued Codex
-delivery requires `codex queue`; plugin setup checks additional client
-capabilities ([requirements](docs/INSTALL.md#clients)). Desktop apps are not supported
-clients: a message queued for a session does not wake a desktop application, and
-HOMI does not promise it will.
+Choose collaborators whose clients you have installed and authenticated. You
+can use one provider or combine Claude Code and Codex. HOMI supplies the
+communication and execution tools; the models do the investigation and review.
 
-## Talk across sessions and machines
+Your agent handles finding or creating collaborators, sending the work,
+checking progress, and collecting replies. You do not need to learn identity
+or messaging commands to use it. The [quickstart](docs/QUICKSTART.md) walks
+through setup and your first collaboration.
 
-Ask your agent to register this session on the configured bus, list the agents
-it can reach, or send a task to a named peer. A **bus** is the session directory
-and message gateway; local use needs no hosted account. The graph, roster, and
-human inbox are available when you ask to open the bus dashboard.
+## What you can do
 
-Joining someone else's bus requires a scoped invitation from its owner. Installing
-HOMI grants no access to a hosted bus. For durable mail between your own machines,
-ask the agent to link the specified daemons over SSH; that is a separate,
-explicit operation. Native routes to local and remote sessions remain available.
-Each address space is explicit, so a failed lookup never silently targets a
-different agent. See [BUSES.md](docs/BUSES.md) and the [CLI reference](docs/CLI.md).
+- **Divide work.** Give collaborators separate questions or parts of a project,
+  then ask your coordinating agent to combine the results.
+- **Get another perspective.** Send an existing agent a question, request a
+  review, or have two agents compare their conclusions.
+- **Keep named collaborators.** HOMI retains agent identities and messages
+  independently of a running model session. Stopping an execution does not
+  erase them.
+- **See what is happening.** Inspect an agent's terminal or ask to open the
+  communication dashboard to see registered agents and conversations.
+- **Use another machine.** Connect a device you control or join a shared bus
+  through its owner's invitation, then work with the agents you can reach.
 
-## Optional: terminal, mesh, snapshots, containers
+A stored message or queued request is not a completed task. Your agent should
+bring back an actual reply or explain what prevented it. Saved identities and
+messages do not preserve a model process's memory or automatically resume every
+client; see [delivery behavior](docs/CLI.md) when diagnosing a stalled task.
 
-Profiles are optional. Preview the managed includes and configuration files
-before adding terminal, shell, or mesh helpers:
+## Make the terminal comfortable
 
-```sh
-homi profile preview --terminal --mesh        # shows exactly which files would change
-homi profile install --terminal --mesh
-```
+The optional terminal profile adds navigation, tiling and familiar launch
+shortcuts: `cx` / `cxx` for Claude Code and `cdx` / `cdxx` for Codex.
+The `cxx` and `cdxx` shortcuts retain their full-auto permission settings.
+They work from zsh or Bash; Bash runs their implementation internally.
 
-- `--terminal`: tmux navigation, tiling, an agent launch picker, `cx`/`cxx` and
-  `cdx`/`cdxx` commands, and Ghostty settings. Shortcuts work from zsh or Bash;
-  Bash runs their implementation without replacing your interactive shell.
-- `--mesh`: manual and Tailscale host discovery, SSH helpers.
-- `--snapshots`: opt-in workspace save/restore (`tss`/`tsr`) and snapshots mirrored
-  to an archive volume, with a separately selected, reversible schedule
-  ([SNAPSHOTS.md](docs/SNAPSHOTS.md)).
-- `--box`: a contained execution adapter ([CONTAINED-EXECUTION.md](docs/CONTAINED-EXECUTION.md)).
-- `--accounts`: account selection and rotation using services you configure
-  ([account setup](docs/PROFILES.md#user-configuration-and-optional-accounts)).
-
-Every file the profile writes is recorded, backed up, and removed only if it is
-still what HOMI wrote. [PROFILES.md](docs/PROFILES.md) has the details.
-
-## Keep it running, update, roll back, remove
+You can choose the profile during setup or preview it later:
 
 ```sh
-homi setup --service                          # per-user launchd or systemd service
-/path/to/homi-0.3.1/bin/homi update           # activate a newer release
-homi rollback                                 # back to the retained previous release
-homi uninstall                                # remove owned integrations; keep identities and mail
-homi uninstall --purge                        # also remove retained release payloads
+homi profile preview --terminal --mesh
 ```
 
-Releases are never replaced in place. A failed activation restores the previous
-one. Uninstall keeps identities, mail, credentials, and configuration under
-`~/.local/state/communicate/`.
+The mesh profile adds device discovery and SSH helpers. Snapshots, account
+helpers and contained execution are separate optional modules; they are not
+part of the initial terminal setup. See [profiles](docs/PROFILES.md) for the
+managed files, configuration and removal instructions.
 
-## Where things live
+## Connect devices when you need them
 
-| What | Where | Override |
-|---|---|---|
-| Installed releases, `current`, `bin/` | `~/.local/share/communicate/` | `COMMUNICATE_DATA` |
-| Identities, mail, daemon state, bus state | `~/.local/state/communicate/` | `COMM_STATE` |
-| Optional profile configuration and private overrides | `~/.config/homi/profiles/` | |
-| Python used by the daemon | `python3` on PATH | `HOMI_PYTHON` |
+Start locally; HOMI needs no hosted account to coordinate agents on your own
+computer. Your clients use the model providers you have configured.
 
-Private settings, hosts, and credentials never live in the package or the
-release; they stay in your state and configuration directories. `homi doctor`
-reports the executable in use, the installed release, the running daemon, client
-registration, and missing optional dependencies, without printing credentials.
+For another machine, explicitly configure its SSH connection or join a shared
+bus with an invitation. Installing HOMI does not connect devices or grant access
+to someone else's agents. [Connecting agents](docs/BUSES.md) covers local buses,
+invitations and self-hosting.
 
-## Documentation
+The supported clients are the **Claude Code CLI** and **Codex CLI**. Setup checks
+the required client capabilities. Desktop applications are not supported clients,
+and queued messages do not promise desktop wake. See the
+[client requirements](docs/INSTALL.md#clients) for details.
 
-- [QUICKSTART.md](docs/QUICKSTART.md) — the first ten minutes.
-- [INSTALL.md](docs/INSTALL.md) — requirements, setup flags, service, lifecycle,
-  private configuration, troubleshooting.
-- [CLI.md](docs/CLI.md) — command semantics and what a receipt means.
-- [BUSES.md](docs/BUSES.md) — buses, invitations, self-hosting, browser access.
-- [PROFILES.md](docs/PROFILES.md), [SNAPSHOTS.md](docs/SNAPSHOTS.md),
-  [CONTAINED-EXECUTION.md](docs/CONTAINED-EXECUTION.md) — optional modules.
-- [RELEASING.md](docs/RELEASING.md) — how a release is built and qualified.
-- [docs/index.md](docs/index.md) — everything else, including qualification harnesses.
+## Keep it working
 
-## Compatibility and license
+Run `homi doctor` to check the installed release, client registrations and
+optional dependencies. A persistent background service is an optional setup
+choice; otherwise your agent can start HOMI when the task needs it.
 
-HOMI continues Communicate. The `communicate` command, the npm package name
-`@aadarwal/communicate`, the plugin identity `communicate@communicate`, and the
-state directory are kept on purpose, so an existing installation upgrades in
-place. Contributors: see [AGENTS.md](AGENTS.md).
+For Homebrew upgrades, make the new release available and activate it:
 
-[MIT](LICENSE), with bundled third-party notices retained.
+```sh
+brew upgrade nonlocally/tap/homi
+"$(brew --prefix nonlocally/tap/homi)/bin/homi" update
+homi doctor
+```
+
+[Installation and maintenance](docs/INSTALL.md) covers rollback, configuration,
+and removing HOMI while preserving identities, messages and credentials.
+Third-party clients and tools installed during setup remain yours.
+
+## Learn more
+
+- [Quickstart](docs/QUICKSTART.md): install, sign in and delegate your first task.
+- [Installation](docs/INSTALL.md): requirements, automation, updates and removal.
+- [Connecting agents](docs/BUSES.md): shared buses and other devices.
+- [CLI reference](docs/CLI.md): scripting, execution control and delivery semantics.
+- [All documentation](docs/index.md): optional modules and contributor references.
+
+HOMI continues Communicate. Existing installations keep the `communicate`
+command, `communicate@communicate` plugin identity and state directories.
+It sends no usage telemetry; model requests go through your configured providers.
+
+Released under the [MIT license](LICENSE), with bundled third-party notices.

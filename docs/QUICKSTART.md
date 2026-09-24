@@ -1,210 +1,105 @@
 # Quickstart
 
-Install HOMI once, open your chosen coding agent, then describe the work you
-want it to coordinate. The agent handles identities, communication and execution
-through its loaded HOMI tools. Download the release archive and its checksum
-from [installation](INSTALL.md#get-the-archive).
+Install HOMI, sign in to the coding clients you want to use, and give your agent
+a task to coordinate. Start with a review or a research comparison so you can
+see collaborators exchange findings and bring back an answer.
 
-## 1. Install and check
+## 1. Install and choose your tools
 
 ```sh
-shasum -a 256 -c homi-0.3.0.tar.gz.sha256
-tar -xzf homi-0.3.0.tar.gz
-./homi-0.3.0/bin/homi setup                  # guided choices in an interactive terminal
-export PATH="$HOME/.local/share/communicate/bin:$PATH"
+brew install nonlocally/tap/homi
+homi setup
 homi doctor
 ```
 
-Start with Node.js 20+ and Bash. Choose the clients and optional terminal tools
-you want; setup offers missing selected dependencies and shows its plan before
-applying it. Ghostty and provider login are separate choices. The managed service
-is optional; your agent can start the daemon when needed.
-Selecting either client includes tmux for agent seats, even if you decline the
-terminal profile. This dependency does not change your interactive shell.
+Choose Claude Code, Codex, or both. Setup shows its plan and offers missing
+selected clients and dependencies before asking you to apply it. Selecting a
+client includes tmux for running collaborators; terminal configuration remains
+optional.
 
-The terminal profile keeps `cx`/`cxx` and `cdx`/`cdxx` as commands usable from
-zsh or Bash. Bash is an internal dependency; your interactive shell, Ghostty's
-shell choice, tmux's default shell, and provider settings are preserved. Bulk
-launching and session restore are not loaded by the initial setup.
+On macOS, Ghostty is a separate choice. The optional terminal shortcuts work
+from zsh or Bash without changing your interactive shell. The background service
+is optional too; your agent can start HOMI when a task needs it.
 
-For a CLI-only walkthrough with prerequisites already present, use
-`setup --no-clients --no-service` instead. For an explicit dependency plan, use
-`setup --install-missing --claude --terminal --dry-run`, then replace `--dry-run`
-with `--yes` to apply it. Substitute `--codex` if that is your client.
+For Linux, an archive installation, or explicit noninteractive selections, use
+the [installation guide](INSTALL.md). An archive needs Node.js 20+ and Bash to
+start setup. Keep the downloaded archive for recovery.
 
-`doctor` should show the payload as `ok` and `homi on PATH` resolving under
-`~/.local/share/communicate/`. The daemon is stopped unless you selected the
-service. Unselected optional tools are listed as unavailable, not as errors.
+`doctor` reports the installed release and client registrations. Unselected
+optional tools may be unavailable; that does not make the installation broken.
 
-## 2. Sign in and open your agent
+## 2. Sign in and open a fresh session
 
 If you selected provider login during setup, complete that provider's own flow.
-Otherwise, sign in through Claude Code or Codex normally. Login is separate from
-installation; `--yes` alone never starts it. You can explicitly request
-`homi setup --guided --claude --login-claude` in a terminal, or use the corresponding
-`--codex --login-codex` flags.
+Otherwise, sign in through Claude Code or Codex normally. Installing the clients
+does not sign you in, and HOMI does not collect your provider credentials.
 
-Open a fresh Claude Code CLI or Codex CLI session in your project. If it was
-running before setup, restart Claude Code or start a new Codex thread so it loads
-the installed plugin. With the optional terminal profile, `cx` and `cdx` are
-convenient launch commands; `cxx` and `cdxx` retain their full-auto behavior.
+Open a fresh Claude Code CLI or Codex CLI session in your project. Restart
+Claude Code or start a new Codex thread if it was running during setup, so it
+loads the plugin.
 
-To add a client later, preview with `homi setup --install-missing --claude --dry-run`,
-then replace `--dry-run` with `--yes`; substitute `--codex` as needed. An existing
-client only needs `homi setup --claude` or `--codex` for registration.
+With the terminal profile, `cx` and `cdx` are convenient launch commands;
+`cxx` and `cdxx` retain their full-auto permission settings. You can also
+launch the clients directly.
 
-Supported clients are the Claude Code CLI and the Codex CLI. Desktop apps are not
-supported clients, and a queued message does not wake one. Client capabilities
-are checked during setup; see [INSTALL.md](INSTALL.md#clients).
+To add a client later, run `homi setup --guided` and select it. See
+[client requirements](INSTALL.md#clients) if setup reports an unsupported
+version or capability.
 
-## 3. Ask for the work
+## 3. Delegate a concrete task
 
 In your agent conversation, try:
 
-> Create a Claude agent called researcher, ask it to investigate the flaky test
-> in this project, and bring me its answer.
+> Create a Claude collaborator called investigator. Ask it to trace why the
+> checkout test fails intermittently while you inspect the recent changes.
+> Compare your findings and bring me the most likely cause, with evidence.
 
-Use the provider you have installed and authenticated. The agent checks the daemon
-and execution prerequisites, creates the identity and running agent when needed,
-sends the task, and waits for a correlated reply. Normal use does not require you
-to type `claim`, `spawn`, `send`, or `ask` commands yourself.
+Use a client you have installed and authenticated. Your agent handles checking
+readiness, finding or creating collaborators, sending the task, and collecting
+the answer. You do not need to type the underlying communication commands.
 
-For existing peers, ask: *"Register this session on the configured bus and show me
-who is reachable."* Then name the intended peer and the task you want to send.
-The agent uses the exact session and supplied reply identity; it should distinguish
-stored mail from an actual answer. If readiness or authorization is missing, it
-should explain that condition rather than claim success.
+For a research comparison:
 
-## 4. Optional: keep the daemon running
+> Have one collaborator compare SQLite and PostgreSQL for this application's
+> deployment and workload. Have another inspect the code for migration costs.
+> Ask them to challenge each other's assumptions and bring me a recommendation
+> with the tradeoffs and unresolved questions.
 
-Choose the per-user service during setup, or run `homi setup --service` later.
-It uses launchd on macOS or the systemd user manager on Linux. `homi doctor`
-shows the running source and release parity. Updates restart an owned service
-on the new release; a failed activation restores the previous definition.
+For an existing reviewer:
 
-## Advanced CLI reference
+> Ask the Codex reviewer to check this change for correctness and missing tests.
+> Discuss any disagreements with it and bring me the findings that still matter.
 
-These commands explain the operations your agent normally performs. Use them
-when integrating HOMI into scripts or debugging a route; they are not required
-steps in the everyday agent workflow.
+HOMI connects the agents; their models and available tools perform the work.
+The coordinating agent should bring back an actual response. If a client needs
+login, a route is unavailable, or a worker has not answered, it should explain
+that condition. A saved message or queued request alone is not an answer.
 
-### Start the daemon
+## 4. Work with existing agents or another device
 
-```sh
-homi start
-homi status
-```
+Ask your agent to show which collaborators it can reach, then name the intended
+peer and task. If you use a shared bus, ask it to register this session on that
+configured bus first.
 
-This is an unmanaged background daemon. For a managed daemon that starts with
-your user session, use `homi setup --service`. Either way, stopping it never loses
-mail: identities and mailboxes are files under `~/.local/state/communicate/homi/`.
+Other machines must be connected explicitly. A shared bus needs its owner's
+invitation; access to your own machines can use a configured SSH connection.
+Installing HOMI alone grants neither. See [connecting agents](BUSES.md).
 
-### Two identities, one message
+Supported clients are the Claude Code CLI and Codex CLI. A Codex request must
+target the correct thread; creating a named execution does not automatically
+attach that name to every client conversation. Desktop applications are not
+supported clients, and queued messages do not wake them.
 
-```sh
-homi claim researcher
-homi claim reviewer
-homi send reviewer 'The experiment log is in runs/2026-09-24. Please review.' --from researcher
-homi inbox reviewer
-```
+## When you need more control
 
-`inbox` prints the stored mail as JSON lines without consuming or acknowledging
-it. `homi agents --json` shows both identities, their undelivered mail, and that
-neither is bound to a seat: an identity is an address, not a process.
+- [Installation](INSTALL.md): setup flags, background service, updates, rollback
+  and removal.
+- [Profiles](PROFILES.md): terminal and mesh helpers, with a preview of the files
+  they change. Account helpers, snapshots and contained execution are separate
+  options.
+- [CLI reference](CLI.md): direct identity, message and terminal operations for
+  scripts or debugging, including what delivery receipts prove.
 
-### A correlated question and answer
-
-Open a second terminal. Start this wait before sending the question:
-
-```sh
-homi wait reviewer --timeout 300 --json
-```
-
-`wait` watches for mail arriving after it starts. It skips the earlier review
-message even though that message remains in the inbox. If you send the question
-before starting `wait`, use `homi inbox reviewer` to find it instead.
-
-In the first terminal, ask and block for the answer:
-
-```sh
-homi ask reviewer 'Which run had the regression?' --from researcher --timeout 300
-```
-
-The second terminal prints the question together with its reply token. Answer
-with that token:
-
-```sh
-homi reply TOKEN 'Run 3. The seed changed.' --from reviewer
-```
-
-The `ask` in the first terminal returns `Run 3. The seed changed.` That answer is
-correlated to your question by the token; a storage or delivery receipt alone
-does not establish that answer. [CLI.md](CLI.md) defines the three levels: stored, submitted,
-replied.
-
-### Run a model as an identity, in a seat
-
-With tmux installed and a client authenticated:
-
-```sh
-homi spawn researcher --cli claude --cwd "$PWD" --json
-homi agents                  # researcher is now bound to a running seat
-homi seat ls
-homi seat read SEAT --lines 40
-```
-
-With Claude, `"adopted": true` confirms native mail delivery to the named session.
-A Codex seat or an unadopted session can read its durable inbox through the plugin;
-typing mail into a seat requires a separate, explicit relay permission.
-
-A seat is a tmux pane HOMI drives: read its screen, send it input, interrupt it,
-kill it. Screen text is observation, not an agent reply, and a pane is not a
-container. For isolation, see [CONTAINED-EXECUTION.md](CONTAINED-EXECUTION.md).
-
-Once the Claude session reports adoption, an explicit question waits for its
-correlated answer:
-
-```sh
-homi ask researcher 'Which test is flaky, and why?' --timeout 120
-```
-
-The agent replies with the supplied token through `homi reply TOKEN ...`.
-Unadopted sessions retain mail in their inbox; a delivery receipt is not a reply.
-
-### Reach other sessions and machines
-
-Locally, a bus needs no account:
-
-```sh
-homi bus status --no-start --json
-homi bus register
-homi bus agents --json
-homi bus dashboard --open
-```
-
-To join a bus someone else runs, redeem the invitation they give you privately,
-then register the session you want to expose:
-
-```sh
-homi bus connect INVITE_CODE --device my-laptop
-homi bus register --bus project
-```
-
-For durable mail between your own machines, link their daemons over SSH:
-
-```sh
-homi daemon pair user@other-host
-```
-
-[BUSES.md](BUSES.md) covers invitations, self-hosting, and browser access.
-
-## Where to go next
-
-- Optional terminal and mesh helpers: `homi profile preview --terminal --mesh`
-  shows exactly what would change before you install anything
-  ([PROFILES.md](PROFILES.md)).
-- Scheduled workspace snapshots with an archive volume:
-  [SNAPSHOTS.md](SNAPSHOTS.md).
-- Optional account selection and rotation, using services you configure:
-  [PROFILES.md](PROFILES.md#user-configuration-and-optional-accounts).
-- Updating, rolling back, and removing: [INSTALL.md](INSTALL.md).
+HOMI retains identities and messages when an execution stops. It does not
+preserve arbitrary process memory. Keep your project files and normal
+provider session history as you ordinarily would.
