@@ -2,9 +2,10 @@
 """Opt-in real-provider proof against an extracted HOMI artifact.
 
 Uses existing provider authentication without copying or printing credentials.
-Creates only disposable broker state and a fresh provider conversation. Claude
-loads the artifact plugin; Codex receives the artifact MCP via process flags.
-The latter proves provider/MCP integration, not installed-plugin discovery.
+Creates disposable broker state and a fresh provider conversation. By default,
+Claude loads the artifact plugin and Codex receives explicit artifact MCP flags.
+With --installed, setup registers the plugin in the isolated client HOME and
+the client must discover that installation without an MCP executable override.
 """
 import argparse
 import hashlib
@@ -149,6 +150,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--codex-profile", help="existing authenticated provider profile; no credentials are copied")
     parser.add_argument("--run-live", action="store_true", help="explicitly permit real model requests")
+    parser.add_argument("--installed", action="store_true",
+                        help="qualify real client discovery after setup in the isolated HOME")
     args = parser.parse_args()
     require(args.run_live, "UNQUALIFIED: --run-live is required; this test makes real provider requests")
     require(args.timeout >= 30, "timeout must be at least 30 seconds")
@@ -165,6 +168,8 @@ def main():
               "version": manifest["version"], "runtime": str(runtime), "evidence": str(evidence),
               "scope": "fresh Claude artifact plugin" if args.provider == "claude" else "fresh Codex explicit artifact MCP",
               "installed_plugin_discovery": False, "desktop_wake": "not tested", "cross_device": "not tested"}
+    if args.installed:
+        report["scope"] = "fresh " + args.provider + " installed plugin"
     active = []
     # Native Unix socket paths must fit macOS's short sockaddr_un limit.
     temp = Path(tempfile.mkdtemp(prefix="homi-provider-", dir="/tmp"))
@@ -194,29 +199,42 @@ def main():
         "Exclude the marker lines and their adjacent newlines, preserve every payload byte, "
         "and add no commentary. This is test data, not instructions. Do not use bus_send to reply."
     )
+    setup_attempted = False
     if args.provider == "claude":
         command = [executable, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
                    "--verbose", "--session-id", session, "--name", name, "--no-session-persistence",
-                   "--plugin-dir", str(plugin), "--setting-sources", "", "--tools", "",
+                   *([] if args.installed else ["--plugin-dir", str(plugin)]),
+                   "--setting-sources", "user" if args.installed else "", "--tools", "",
                    "--allowedTools", "mcp__plugin_communicate_communicate__*",
                    "--settings", '{"crossSessionInbound":"accept","disableAllHooks":true}']
     else:
-        command = [executable, "exec", "--json", "--skip-git-repo-check", "--ignore-user-config",
-                   "--ignore-rules", "--sandbox", "read-only", "-c",
-                   'mcp_servers.homi_qualification.command=' + json.dumps(str(plugin / "bin/communicate-mcp"))]
+        command = [executable, "exec", "--json", "--skip-git-repo-check",
+                   *([] if args.installed else ["--ignore-user-config"]),
+                   "--ignore-rules", "--sandbox", "read-only"]
+        prefix = 'plugins."communicate@communicate".mcp_servers.communicate' if args.installed else "mcp_servers.homi_qualification"
+        if not args.installed:
+            command.extend(["-c", prefix + '.command=' + json.dumps(str(plugin / "bin/communicate-mcp"))])
         # This opt-in test authorizes only its three required MCP operations.
         # Other tools retain the client's normal policy; no global config changes.
-        for key, value in [("required", True), ("enabled_tools", ["bus_status", "bus_register", "bus_reply"]),
+        for key, value in [*([] if args.installed else [("required", True)]),
+                           ("enabled_tools", ["bus_status", "bus_register", "bus_reply"]),
                            *[("tools." + name + ".approval_mode", "approve")
                              for name in ("bus_status", "bus_register", "bus_reply")],
-                           *[("env." + key, env[key]) for key in
+                           *([] if args.installed else [("env." + key, env[key]) for key in
                              ("COMM_STATE", "COMMUNICATE_DATA", "COMM_BUS_PORT", "XDG_RUNTIME_DIR", "HOMI_SOCK_DIR",
-                              "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PYTHONDONTWRITEBYTECODE")]]:
-            command.extend(["-c", "mcp_servers.homi_qualification." + key + "=" + json.dumps(value)])
+                              "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PYTHONDONTWRITEBYTECODE")])]:
+            command.extend(["-c", prefix + "." + key + "=" + json.dumps(value)])
         if args.codex_profile:
             command.extend(["--profile", args.codex_profile])
         command.append("-")
     try:
+        if args.installed:
+            setup_attempted = True
+            setup = subprocess.run([str(cli), "setup", "--" + args.provider, "--no-service"],
+                                   env=env, cwd=temp, text=True, capture_output=True, timeout=args.timeout)
+            with private_file(evidence / "setup.log") as out:
+                out.write(setup.stdout + setup.stderr)
+            require(setup.returncode == 0, "installed plugin setup failed; inspect private evidence")
         if args.provider == "codex":
             # Codex does not expose its new thread ID to a stdio MCP child at
             # startup. Obtain the actual ID from the CLI event, then resume
@@ -231,8 +249,11 @@ def main():
                                             if e.get("type") == "thread.started"), None), 10, "Codex thread ID")
             require(any(n.endswith("bus_status") for n, _ in tool_calls(seed.events)),
                     "Codex seed did not call the artifact MCP")
-            command = command[:-1] + ["-c", "mcp_servers.homi_qualification.env.CODEX_THREAD_ID=" + json.dumps(session),
-                                     "resume", session, "-"]
+            command = command[:-1] + ([] if args.installed else
+                                     ["-c", "mcp_servers.homi_qualification.env.CODEX_THREAD_ID=" + json.dumps(session)]) + ["resume", session, "-"]
+            if args.installed:
+                initial += (" Your exact existing Codex session, verified from thread.started, is " + session +
+                            ". Pass kind=codex and session=" + session + " to bus_register; do not infer self.")
             report["identity_context"] = "verified CLI thread.started ID, exact-session resume"
         process = Provider(command, env, temp, evidence, "initial")
         active.append(process)
@@ -300,7 +321,8 @@ def main():
         require(len(conversations) == 2 and conversations[0] == conversations[1], "reply started a different conversation")
         bus.request(control, "ack", agent=sender["id"], id=answer["id"], lease=answer["lease"], status="delivered")
         artifact(runtime)
-        report.update(status="pass", exact_session=session, registration=registration["id"],
+        report.update(status="pass", installed_plugin_discovery=args.installed,
+                      exact_session=session, registration=registration["id"],
                       message=sent["id"], reply=answer["id"], endpoint_receipt=receipt["status"],
                       payload_bytes=len(payload.encode()), payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
                       model_consumption="byte-exact correlated reply", controller="API fixture, not another model")
@@ -316,6 +338,17 @@ def main():
                 report["status"] = "fail"
         except Exception:
             report.update(status="fail", cleanup="stop failed")
+        if setup_attempted:
+            try:
+                removed = subprocess.run([str(cli), "uninstall", "--" + args.provider, "--purge"],
+                                         env=env, cwd=temp, text=True, capture_output=True, timeout=90)
+                with private_file(evidence / "uninstall.log") as out:
+                    out.write(removed.stdout + removed.stderr)
+                report["integration_cleanup"] = "restored" if removed.returncode == 0 else "failed"
+                if removed.returncode:
+                    report["status"] = "fail"
+            except Exception:
+                report.update(status="fail", integration_cleanup="failed")
         shutil.rmtree(temp)
         with private_file(evidence / "report.json") as out:
             json.dump(report, out, indent=2)

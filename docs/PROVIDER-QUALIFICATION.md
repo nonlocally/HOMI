@@ -54,6 +54,25 @@ with mode 0700 and files with mode 0600; publish only reviewed status summaries.
 
 ## Fresh installed-plugin acceptance
 
+The same harness can exercise normal setup and real client discovery in the
+prepared isolated client home:
+
+```sh
+python3 scripts/qualify-provider.py /path/to/homi-0.3.0 \
+  --provider codex --client-home /private/fresh-test-client-home \
+  --evidence /private/new-installed-evidence --installed --run-live
+```
+
+Use `--provider claude` for Claude Code. This mode runs `setup --no-service`,
+starts the client without an MCP executable override or `--plugin-dir`, and
+requires the same exact-session registration and correlated reply evidence.
+It uninstalls its integration on exit. Use a dedicated authenticated client home
+because its registry and plugin cache are exercised. For Codex, the verified
+thread ID is supplied in the registration prompt and checked against the existing
+local session; the harness does not override the installed MCP environment.
+This check covers installed messaging. The durable operations, visual directory,
+human inbox and desktop acceptance checks below remain separate.
+
 On each supported client, install the same checksum-qualified artifact using
 the normal `homi setup` path, then completely restart the client. Preserve the
 original configuration backup and record all commands resolved by the client.
