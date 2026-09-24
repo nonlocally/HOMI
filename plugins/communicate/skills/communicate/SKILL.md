@@ -1,9 +1,15 @@
 ---
 name: communicate
-description: The agent bus — register yourself on the bus, browse named buses, and message Claude or Codex agents. Use whenever you need to register, talk to, reach, ask, list, or coordinate with another agent or session, or pick the correct bus or legacy socket lane. Covers the bus interface, communicate agents/route/send, native SendMessage, reply addressing, and the inbound approval gate.
+description: Find and message reachable Claude or Codex agents. Use for "ask the reviewer", "tell that agent", "who is available", or "register yourself on the bus"; choose the exact native session or registered bus and collect replies. For creating a persistent worker, use homi-core.
 ---
 
 # communicate — the agent bus
+
+Act on the user's communication request with the installed tools. Discover the
+intended target, send or ask through its supported route, and return the actual
+result; do not require the user to run the command examples themselves. For a
+request to create an agent and obtain its work, follow `homi-core` through
+daemon readiness, execution verification and reply collection.
 
 HOMI combines three existing paths: durable identities (`homi`, see
 `homi-core`), exact native sessions (`homi native`, compatible `communicate`),

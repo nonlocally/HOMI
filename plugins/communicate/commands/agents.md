@@ -4,6 +4,7 @@ allowed-tools: Bash
 ---
 Run `communicate agents` (if not on PATH, fall back to
 `~/.local/share/communicate/current/vendor/bin/communicate agents`) and render
-the table for the user. Then add one line of guidance: any row can be messaged
-with `communicate route <name> "<msg>"`, or — from inside Claude Code — by
-sending to the name with the native SendMessage tool.
+the table for the user. If the user also asked you to contact a listed agent,
+carry out that request through its exact supported route and report the result.
+Use `communicate route <name> "<msg>"`, or — inside Claude Code for a Claude
+peer — the native SendMessage tool; the user need not run it manually.

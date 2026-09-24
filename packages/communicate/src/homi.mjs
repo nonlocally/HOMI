@@ -13,7 +13,16 @@ try {
     // The selected release supplied the result and exit status.
   } else {
   switch (command) {
-    case "setup": case "update":
+    case "setup": {
+      const onboarding = await import("./onboarding.mjs");
+      if (onboarding.shouldGuide(args)) {
+        const result = await onboarding.runOnboarding(args);
+        if (result.status === "cancelled") { console.log("Setup cancelled."); process.exitCode = 130; }
+      }
+      else await (await import("./setup.mjs")).runSetup(args);
+      break;
+    }
+    case "update":
       await (await import("./setup.mjs")).runSetup(args);
       break;
     case "uninstall":

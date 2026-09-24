@@ -2,7 +2,7 @@
 # homi-snapshot — automatic, logged, permanently-archived tmux-workspace backups.
 # The optional HOMI snapshot module; adapted from Anu (see profiles/NOTICE.md).
 #
-# Wraps `tss` (profiles/runtime/fns/tmux) for UNATTENDED use. The owned schedule
+# Wraps `tss` (profiles/runtime/fns/snapshots) for UNATTENDED use. The owned schedule
 # (`homi-snapshot schedule install`) runs `homi-snapshot run` every 6 hours
 # (03:00, 09:00, 15:00, 21:00). Each run:
 #   1. snapshots the whole tmux workspace to $HOMI_SNAPSHOT_DIR/snap-YYYY-MM-DD-HHMM
@@ -72,7 +72,7 @@ HOMI_PROFILE_CONFIG="${HOMI_PROFILE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ho
 # Private configuration is trusted shell, the same file every profile tool loads.
 [ ! -f "$HOMI_PROFILE_CONFIG/local.sh" ] || . "$HOMI_PROFILE_CONFIG/local.sh"
 HOMI_PROFILE_STATE="${HOMI_PROFILE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/homi/workstation}"
-FNS="${HOMI_SNAPSHOT_FNS:-$_HS_HERE/../../fns/tmux}"        # defines tss/tsr and their helpers
+FNS="${HOMI_SNAPSHOT_FNS:-$_HS_HERE/../../fns/snapshots}"   # defines tss/tsr and their helpers
 SESS_DIR="${HOMI_SNAPSHOT_DIR:-$HOMI_PROFILE_STATE/sessions}" # tss writes here; tsr reads here
 LOG="${HOMI_SNAPSHOT_LOG:-$HOMI_PROFILE_STATE/snapshots.log}"
 # Local fast-access window, counted in SNAPSHOTS (not days): 56 = 14 days at the

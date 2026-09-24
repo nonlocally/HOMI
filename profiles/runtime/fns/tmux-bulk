@@ -1,0 +1,109 @@
+# Optional bulk helpers retained for future opt-in; not loaded by the default profile.
+# Adapted from Anu 80d3c86; see profiles/NOTICE.md.
+# Swarm Layout: N tiled panes all running the same command
+# Usage: tsl <pane_count> <command>
+tsl() {
+  [[ -z $1 || -z $2 ]] && { echo "Usage: tsl <pane_count> <command>"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use tsl."; return 1; }
+
+  local count="$1"
+  local cmd="$2"
+  local current_dir="${PWD}"
+  local -a panes
+
+  tmux rename-window -t "$TMUX_PANE" "$(basename "$current_dir")"
+
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < count )); do
+    local new_pane
+    local split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  for pane in "${panes[@]}"; do
+    tmux send-keys -t "$pane" "$cmd" C-m
+  done
+
+  tmux select-pane -t "${panes[0]}"
+}
+
+# Mixed Swarm Layout: tiled panes with different commands
+# Usage: tslm <count1> <cmd1> [count2] [cmd2] ...
+# Example: tslm 4 cx 4 codex   (4 claude + 4 codex = 8 panes)
+tslm() {
+  (( $# < 2 )) && { echo "Usage: tslm <count1> <cmd1> [count2] [cmd2] ..."; return 1; }
+  (( $# % 2 != 0 )) && { echo "Args must be count/command pairs: tslm 4 cx 4 codex"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use tslm."; return 1; }
+
+  local current_dir="${PWD}"
+  local -a counts cmds
+
+  # Parse count/command pairs
+  while (( $# >= 2 )); do
+    counts+=("$1")
+    cmds+=("$2")
+    shift 2
+  done
+
+  # Calculate total panes
+  local total=0
+  for c in "${counts[@]}"; do
+    (( total += c ))
+  done
+
+  # Create all panes
+  local -a panes
+  tmux rename-window -t "$TMUX_PANE" "$(basename "$current_dir")"
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < total )); do
+    local new_pane
+    local split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  # Assign commands in groups
+  local idx=0
+  for ((g=0; g<${#cmds[@]}; g++)); do
+    for ((i=0; i<${counts[$g]}; i++)); do
+      tmux send-keys -t "${panes[$idx]}" "${cmds[$g]}" C-m
+      (( idx++ ))
+    done
+  done
+
+  tmux select-pane -t "${panes[0]}"
+}
+
+# Monitor Layout: main pane left + stacked command panes on right
+# Usage: tml <cmd1> [cmd2] [cmd3] ...
+tml() {
+  [[ $# -eq 0 ]] && { echo "Usage: tml <cmd1> [cmd2] [cmd3] ..."; return 1; }
+  [[ -z $TMUX ]] && { echo "tml requires tmux."; return 1; }
+
+  local dir="$PWD"
+  local main_pane="$TMUX_PANE"
+
+  tmux rename-window -t "$main_pane" "$(basename "$dir")"
+
+  # First command gets a right pane at 30%
+  local side_pane
+  side_pane=$(tmux split-window -h -p 30 -t "$main_pane" -c "$dir" -P -F '#{pane_id}')
+  tmux send-keys -t "$side_pane" "$1" C-m
+  shift
+
+  # Remaining commands stack vertically in the right column
+  local prev="$side_pane"
+  for cmd in "$@"; do
+    local new_pane
+    new_pane=$(tmux split-window -v -t "$prev" -c "$dir" -P -F '#{pane_id}')
+    tmux send-keys -t "$new_pane" "$cmd" C-m
+    prev="$new_pane"
+  done
+
+  tmux select-pane -t "$main_pane"
+}

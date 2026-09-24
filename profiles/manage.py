@@ -136,35 +136,48 @@ class Profile:
                        '. "$HOMI_PROFILE_RUNTIME/init.sh"\n')
         out = [(active, active_text, "file", 0o600)]
         # env bash works with the normal user PATH; a guarded re-exec handles macOS.
-        wrapper = ('#!/usr/bin/env bash\n'
+        bash_guard = ('#!/usr/bin/env bash\n'
                    'if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then\n'
                    '  for b in /opt/homebrew/bin/bash /usr/local/bin/bash; do\n'
                    '    [ ! -x "$b" ] || exec "$b" "$0" "$@"\n'
                    '  done\n'
                    '  echo "HOMI workstation needs Bash 4+" >&2; exit 1\n'
                    'fi\n'
-                   f'. {quote(active)}\n')
+                   'case ":$PATH:" in *":${BASH%/*}:"*) ;; *) export PATH="$PATH:${BASH%/*}" ;; esac\n')
+        wrapper = bash_guard + f'. {quote(active)}\n'
         for name, command in [("homi-workstation", '"$HOMI_PROFILE_RUNTIME/command.sh" "$@"'),
                               ("homi-agent", '"$HOMI_PROFILE_RUNTIME/agent.sh" "$@"'),
                               ("homi-mesh", '"$HOMI_PROFILE_RUNTIME/command.sh" shell mesh "$@"'),
+                              ("mesh", '"$HOMI_PROFILE_RUNTIME/command.sh" shell mesh "$@"'),
                               ("homi-account", '"$HOMI_PROFILE_RUNTIME/accounts/account" "$@"'),
                               ("homi-account-pane", '"$HOMI_PROFILE_RUNTIME/accounts/pane" "$@"'),
                               ("homi-account-secrets", '"$HOMI_PROFILE_RUNTIME/accounts/secrets-client" "$@"'),
                               ("homi-box", 'python3 "$HOMI_PROFILE_RUNTIME/box/box.py" "$@"')]:
             if name == "homi-agent" and "terminal" not in modules:
                 continue
-            if name == "homi-mesh" and "mesh" not in modules:
+            if name in ["homi-mesh", "mesh"] and "mesh" not in modules:
                 continue
             if name == "homi-box" and "box" not in modules:
                 continue
             if name.startswith("homi-account") and "accounts" not in modules:
                 continue
             out.append((self.home / ".local/bin" / name, wrapper + ('exec ' if name == 'homi-box' else '. ') + command + '\n', "file", 0o755))
+        if "terminal" in modules:
+            for alias in ["cx", "cxx", "cxc", "cdx", "cdxx", "cdxxs"]:
+                out.append((self.home / ".local/bin" / alias,
+                            wrapper + '. "$HOMI_PROFILE_RUNTIME/agent.sh" ' + alias + ' "$@"\n', "file", 0o755))
+            for helper in ["t", "tn", "tk", "tl", "tp", "tj", "tw", "twp", "to", "tws", "twg", "al", "alw"]:
+                out.append((self.home / ".local/bin" / helper,
+                            wrapper + '. "$HOMI_PROFILE_RUNTIME/command.sh" shell ' + helper + ' "$@"\n', "file", 0o755))
         if "snapshots" in modules:
             out.append((self.home / ".local/bin/homi-snapshot",
                         self.snapshot_schedule(runtime).wrapper_text(), "file", 0o755))
         shell_block = f'{BEGIN}\n[[ $- != *i* ]] || . {quote(active)}\n{END}\n'
         out.extend((self.home / p, shell_block, "block", 0o600) for p in [".bashrc", ".bash_profile"])
+        zsh_block = (f'{BEGIN}\n'
+                     'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac\n'
+                     f'{END}\n')
+        out.append((self.home / ".zshrc", zsh_block, "block", 0o600))
         if "terminal" in modules:
             # The option expands at command execution, after tmux parses its
             # configuration. Shell quoting therefore survives spaces in HOME.
@@ -427,7 +440,11 @@ def main(argv=None):
                       "dependencies": {b: shutil.which(b) for b in ["bash", "tmux", "fzf", "jq", "ssh", "tailscale", "ghostty", "claude", "codex"]}}
         else:
             result = {"read_only": True, "modules": modules, "actions": [{k: v for k, v in p.items() if k not in ["next", "content"]} for p in profile.plan(modules)],
-                      "no_automatic_actions": ["package installation", "network", "shell change", "service start", "tmux reload", "legacy uninstall"]}
+                      "no_automatic_actions": ["package installation", "network", "system login shell change", "service start", "tmux reload", "legacy uninstall"]}
+            if "terminal" in modules:
+                result["terminal_commands"] = {"directory": str(profile.home / ".local/bin"),
+                    "zsh_path_include": str(profile.home / ".zshrc"),
+                    "system_login_shell_changed": False, "interactive_shell_changed": False}
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok", True) else 1
     except (Conflict, OSError, ValueError) as e:

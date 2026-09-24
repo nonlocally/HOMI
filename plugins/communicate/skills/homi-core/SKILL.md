@@ -1,9 +1,14 @@
 ---
 name: homi-core
-description: Create or use durable HOMI identities and mailboxes, spawn or bind agents, send and receive durable messages, and explicitly control terminal seats. Use for persistent agents, dormant mail, agent creation, or terminal compute; native session messaging and registered buses remain separate supported paths.
+description: Create persistent HOMI agents, give them work and collect their answers. Use for requests such as "create a Claude researcher", "ask my worker to investigate this", persistent mailboxes, or explicit terminal-seat control. Existing native sessions and registered buses use their own supported routes.
 ---
 
 # HOMI identities, mail and execution
+
+The user states the outcome; you perform the HOMI operations with MCP tools or
+the installed CLI. For example, "Create a Claude agent called researcher,
+investigate the flaky test, and bring me its answer" is a request to complete
+that workflow, not to hand the user a list of claim/start/send commands.
 
 HOMI keeps existing mechanisms behind three explicit command paths. Select the
 path that owns the target; a matching label in another path is not a substitute.
@@ -24,8 +29,49 @@ do not alter shell or desktop settings to satisfy a messaging request.
 ## Start with the intended identity
 
 Inspect `homi status --json` before assuming the local daemon is available.
-`homi start` starts it when requested; neither action joins a remote bus.
+If a requested local identity or agent operation needs it, start the daemon
+with `homi_start` / `homi start`; no separate user command is needed. Inspection
+alone does not start it, and neither action joins a remote bus.
 `homi agents --json` lists durable identities and their observed bindings.
+
+## Complete an agent task
+
+1. Inspect daemon status and the durable roster. Reuse an intended existing
+   identity when appropriate; do not overwrite an unrelated agent with the same
+   name. Start the local daemon if needed for the requested work.
+2. Use `homi_spawn` with the requested name, provider and project directory.
+   The seat driver creates its session when needed, on the daemon's configured
+   tmux server (default: named server `homi`, session `homi-seats`). It does not
+   require the human to start tmux or put their current terminal into a pane.
+   Keep that server selection; do not replace it with the caller's ambient pane.
+   Missing tmux/provider tools or provider sign-in are setup issues to report,
+   not reasons to claim a model is running.
+3. For Claude, inspect the spawn result's `adopted` flag and the identity's
+   reported `route`, `seat` and `surface`. A usable native route is live and
+   unambiguous; `ok:true` from spawning alone is insufficient. If adoption is
+   incomplete, inspect that returned seat for startup, trust or login prompts.
+   Resolve only actions already authorized; do not substitute another session
+   or automatically enable terminal mail relay. Codex spawning does not bind
+   its durable name to a queue. Establish the exact thread belonging to the
+   returned seat, then use its verified native or bus queue and reply mechanism.
+   Do not guess from the newest transcript or shared cwd; report the blocker if
+   that exact thread cannot be established.
+4. For a verified durable recipient, claim an unused per-task sender name with
+   `homi_claim` when a reply destination is needed. Use `homi_ask` with that
+   sender, the actual task and a bounded timeout. Tell the worker to answer using
+   the supplied exact reply token (`homi_reply` / `homi reply`), which is included
+   in the delivered request. For a native or bus target, use that route's own
+   reply mechanism; do not use a spawned Codex agent's durable name as though
+   it were automatically bound to the Codex queue.
+5. Bring the returned answer to the user. A stored request, queued turn or idle
+   screen is not a completed investigation. If blocked or timed out, report the
+   measured state and what remains; do not invent an answer or repeatedly send
+   the same task. Leave identities and executions intact unless cleanup was
+   requested.
+
+The command examples below are for you to execute as needed. The user's normal
+workflow is setup, provider sign-in, and a natural-language request in a fresh
+client session.
 
 ```sh
 homi claim reviewer

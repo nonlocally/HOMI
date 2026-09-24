@@ -25,7 +25,7 @@ esac
 [ ! -f "$HOMI_PROFILE_CONFIG/local.sh" ] || . "$HOMI_PROFILE_CONFIG/local.sh"
 case " ${HOMI_PROFILE_MODULES:-} " in
   *" terminal "*)
-    for _homi_module in tmux agentlaunch dynlayout; do
+    for _homi_module in tmux agentlaunch; do
       . "$HOMI_PROFILE_RUNTIME/fns/$_homi_module"
     done
     unset _homi_module
@@ -37,6 +37,9 @@ case " ${HOMI_PROFILE_MODULES:-} " in
     cdxxs() { homi-agent cdxxs "$@"; }
     tile() { if [ "$#" -eq 0 ]; then homi-workstation tile status; else homi-workstation tile "$@"; fi; }
     ;;
+esac
+case " ${HOMI_PROFILE_MODULES:-} " in
+  *" snapshots "*) . "$HOMI_PROFILE_RUNTIME/fns/snapshots" ;;
 esac
 case " ${HOMI_PROFILE_MODULES:-} " in
   *" mesh "*) . "$HOMI_PROFILE_RUNTIME/fns/mesh" ;;

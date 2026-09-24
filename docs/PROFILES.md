@@ -1,8 +1,20 @@
 # Optional workstation profiles
 
 HOMI works without a terminal profile. These profiles retain selected, proven
-Anu shell/tmux/Ghostty and mesh helpers. They are not installed by core setup and
-do not replace your editor, Git configuration, or model-client settings.
+Anu shell/tmux/Ghostty and mesh helpers. Guided `homi setup` can select them and
+offer their missing dependencies; they are not required for core installation.
+They do not replace your editor, Git configuration, or model-client settings.
+Guided client setup also checks tmux for agent seats when no terminal profile is
+selected; installing that dependency alone does not apply these profiles.
+
+For a new workstation, run `homi setup` in a terminal, or preview an explicit
+selection with `homi setup --install-missing --no-clients --terminal --mesh --dry-run`.
+Replace `--dry-run` with `--yes` to apply it. Add `--claude` or `--codex` instead
+of `--no-clients` if you want those clients too. On macOS, `--ghostty` selects
+the application, its configured font, and the terminal profile. No desktop application is chosen
+automatically. See [guided installation](INSTALL.md#run-setup).
+
+When the tools are already installed, use the configuration-only commands:
 
 ```sh
 homi profile preview --terminal --mesh
@@ -14,22 +26,27 @@ homi profile uninstall
 The standalone equivalent is `python3 profiles/manage.py ...` in a source tree.
 `preview` is the default action. All commands return JSON; `--home PATH` selects
 an isolated home for testing. Profile installation never runs a package manager,
-changes the login shell, reloads tmux, starts services, connects to a device, or
-installs model runtimes. Open a new Bash shell after installation. Load the
-generated tmux configuration deliberately in the server you intend to configure.
+changes the system login shell, reloads tmux, starts services, connects to a device, or
+installs model runtimes. Open a fresh zsh or Bash terminal to pick up the owned
+commands. The interactive shell stays yours: Bash 4+ runs the helpers internally.
+Load the generated tmux configuration deliberately in the server you intend to configure.
 If you separately installed an owned snapshot schedule, profile uninstall asks
 its service manager to unload that job before removing the owned files. It
 refuses removal when ownership or unloading cannot be verified.
 
 The terminal module uses Bash 4+, tmux, and fzf for pickers. The mesh module uses
 Bash 4+, jq, SSH, and fzf for its hub. Tailscale is optional for manual hosts.
-Ghostty and the configured JetBrainsMono Nerd Font are optional, separately
-installed software. Clipboard integration selects pbcopy, wl-copy, or xclip.
+Ghostty and the configured JetBrainsMono Nerd Font are optional; guided setup
+offers them on macOS only when explicitly selected. Missing Ghostty on Linux
+requires manual installation. Clipboard integration selects pbcopy, wl-copy, or xclip.
 The profile is written for macOS/Linux; automated macOS checks do not establish
 full Linux runtime coverage. On a nonstandard Bash installation, put its bin
-directory on PATH. No default-shell changes are made for you.
-Fresh zsh sessions do not load these Bash helpers; run Bash explicitly or configure
-your terminal's command deliberately. The installer does not write zsh startup files.
+directory on PATH. The profile leaves Ghostty's shell command, tmux's
+`default-shell`, and your account's login shell unchanged. It adds an owned PATH
+include to `.zshrc` so interactive zsh can find the executable shortcuts under
+`~/.local/bin`; it does not source Bash functions into zsh. Bash retains its
+managed `.bashrc`/`.bash_profile` includes. A custom `ZDOTDIR` can add that PATH
+entry in its own startup file. Private Ghostty/tmux overrides load last.
 
 The account module uses Bash 4+, Python 3, jq, curl, and `column` for tables;
 Codex account hooks also require `shasum`. Its optional credential client needs
@@ -49,10 +66,10 @@ of authentication, service access, or a compatible installed version.
   nested-session mode, and an agent launcher picker.
 - `t`, `tn`, `tk`, `tl`, `tp`, `tj`, `tw`, `twp`, `to`, `tws`, `twg`;
   linked session views preserve independent current windows for each client.
-- `al`, `alw`, `taa`, `tra`, `tap`, `tscale`, `tsl`, `tslm`, and `tml`.
-- `tss NAME` / `tsr [-n] NAME` workspace snapshots, with state under
-  `~/.local/state/homi/workstation/sessions`. Names are restricted to tokens;
-  save refuses to overwrite an existing snapshot. `tsr -n` previews restoration.
+- `cx`, `cxx`, `cxc`, `cdx`, `cdxx`, and `cdxxs`, plus the `al` / `alw`
+  agent launcher. These and the basic `t`/`tn`/`tk`/`tl`/`tp`/`tj`/`tw`/`twp`/
+  `to`/`tws`/`twg` helpers have executable wrappers for zsh and Bash. Existing
+  provider settings stay with the provider.
 - `mesh` / `homi-mesh` for manual and Tailscale host discovery, SSH, VNC,
   explicit remote commands, host metadata, and remote terminal helpers.
 
@@ -60,6 +77,16 @@ Browser, chat, research, wall, phone, project-task dispatch, and dashboard
 shortcuts are removed from this profile. It does not source every shell module,
 start a landing UI, or introduce another terminal-message implementation.
 Agent messaging and explicit execution control remain HOMI's existing APIs.
+
+Bulk launch/scaling helpers (`tsl`, `tslm`, `tml`, `taa`, `tra`, `tap`, `tscale`)
+are not loaded by the default profile. The initial setup does not select
+snapshots, accounts, or containers. To opt into workspace save/restore later,
+use `homi profile install --snapshots`; only that module loads the Bash helpers
+`tss NAME` and `tsr [-n] NAME`. From any shell, their explicit equivalents are
+`homi-workstation shell tss NAME` and `homi-workstation shell tsr -n NAME`.
+State lives under `~/.local/state/homi/workstation/sessions`.
+Names are restricted to tokens; saving refuses to overwrite an existing snapshot.
+`tsr -n` previews restoration. Scheduling remains a separate explicit action.
 
 Snapshots rebuild topology and saved resume commands, not arbitrary process
 memory. The inherited Claude inference chooses an unclaimed transcript for a

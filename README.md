@@ -5,10 +5,9 @@ other across sessions and machines, and runs them in terminal seats you can obse
 and control. One `homi` command, one Claude Code/Codex plugin, one MCP server.
 macOS and Linux.
 
-> **HOMI 0.3.0 release.** The [release archive and checksum](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
-> require repository access while public distribution is pending. Install from
-> the archive below; Homebrew availability awaits public launch.
-> See [release qualification](docs/RELEASING.md).
+> **Release access.** Archives currently require repository access; public
+> distribution is deferred. Use a matching maintainer-provided archive. See
+> [RELEASING.md](docs/RELEASING.md) for the validation process.
 
 ## Why
 
@@ -31,65 +30,68 @@ communication uses the brokers and hosts you choose.
 
 ## Install
 
-Requirements: macOS or Linux, Node.js 20+, Python 3.9+, Bash. Optional:
-tmux for terminal seats; Claude Code and/or Codex CLI, authenticated by you,
-for agent sessions; SSH (and optionally Tailscale) for other devices.
+Start with macOS or Linux, Node.js 20+, and Bash to launch the archive.
+Guided setup checks the remaining requirements and offers to install missing
+tools for the features you choose: Claude Code, Codex, terminal helpers, mesh,
+and, on macOS, Ghostty. You can keep a server installation CLI-only.
 
-With GitHub CLI authenticated to an account that has repository access:
+Obtain the matching archive from the maintainer. Once the private release is
+activated, an account with repository access can download it with GitHub CLI:
 
 ```sh
 gh release download v0.3.0 --repo nonlocally/HOMI --pattern 'homi-0.3.0.tar.gz*'
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
 tar -xzf homi-0.3.0.tar.gz
-./homi-0.3.0/bin/homi setup --claude --codex     # enable only the clients you use
+./homi-0.3.0/bin/homi setup                    # guided when run in a terminal
 ./homi-0.3.0/bin/homi doctor
 export PATH="$HOME/.local/share/communicate/bin:$PATH"   # put this in your shell rc
+```
+
+Choose the clients and optional terminal features you want, review the package
+and configuration plan, then confirm. Missing selected dependencies can be
+installed for you; existing provider clients are kept. Provider login is a
+separate choice. No desktop software is selected automatically.
+Selecting Claude Code or Codex also checks tmux for agent executions, even if
+you decline terminal configuration. Installing tmux does not change your shell.
+
+For a repeatable selection, preview first, then apply explicitly:
+
+```sh
+homi setup --install-missing --claude --codex --terminal --mesh --dry-run
+homi setup --install-missing --claude --codex --terminal --mesh --yes
+# On macOS, add --ghostty to also select Ghostty and its configured Nerd Font.
 ```
 
 `setup` copies the release into an immutable directory under
 `~/.local/share/communicate/`, points the stable `current` link at it, and
 registers the plugin with the clients you named. Keep a copy of the archive for
-recovery. Core setup leaves your shell rc, editor, and Git configuration alone;
-client changes are limited to the selected plugin registration. Full details, flags, and the
-lifecycle are in [INSTALL.md](docs/INSTALL.md).
+recovery. Selecting terminal or mesh profiles adds managed configuration includes;
+unrelated settings and private overrides are preserved. Explicit
+`setup --claude`, `setup --codex`, and `profile install` remain configuration-only
+and do not download missing software. Full requirements, platform recipes,
+flags, and lifecycle are in [INSTALL.md](docs/INSTALL.md).
 
 The Homebrew tap is being staged privately for public launch; use the archive
 for now. Once public, `brew install nonlocally/tap/homi` installs the commands;
-then run `homi setup --claude --codex`
-yourself to enable the clients you use. Service installation is also explicit.
+then run `homi setup` to choose your clients and optional tools.
+Service installation is also explicit.
 
 ## First success
 
-```sh
-homi start                                    # the local daemon (or: homi setup --service)
-homi claim researcher                         # a durable identity with a mailbox
-homi send researcher 'Review the experiment when you resume.'
-homi inbox researcher                         # the stored mail, one JSON line each
-```
+Complete setup, sign in through the client you chose, then open a fresh **Claude
+Code CLI** or **Codex CLI** session in your project. Ask it in plain language:
 
-Claiming creates an address and a mailbox; it does not start a model. To run a
-model *as* that identity, in a tmux seat:
+> Create a Claude agent called researcher, ask it to investigate the flaky test
+> in this project, and bring me its answer.
 
-```sh
-homi spawn researcher --cli claude --cwd "$PWD" --json
-homi agents                                   # identities, mail, current execution
-homi seat ls                                  # the terminal seats HOMI is driving
-```
+Use Codex instead if that is the provider you installed and authenticated. The
+agent uses the loaded HOMI instructions and tools to check readiness, create the
+identity and execution, send the task, and collect a correlated reply. You do not
+need to type identity or messaging commands for normal use. If a required tool
+or permission is missing, the agent should explain what is needed before continuing.
 
-For Claude, `"adopted": true` confirms that the running session is associated
-with this name and can receive its mail natively. Once adopted, ask for an answer
-correlated to your question:
-
-```sh
-homi ask researcher 'Which test is flaky, and why?' --timeout 120
-```
-
-The identity receives the question with a reply token and answers with
-`homi reply TOKEN 'the answer'`; `ask` returns when that reply arrives.
-If adoption did not complete, mail stays in the inbox until the agent reads it.
-Typing mail into a seat is a separate, explicit [relay permission](docs/CLI.md).
-[QUICKSTART.md](docs/QUICKSTART.md) walks through this end to end, including a
-second identity that waits for mail and replies.
+[QUICKSTART.md](docs/QUICKSTART.md) covers this workflow. Its optional CLI reference
+shows the underlying operations and how to inspect delivery when debugging.
 
 ## Claude Code and Codex
 
@@ -107,30 +109,17 @@ HOMI does not promise it will.
 
 ## Talk across sessions and machines
 
-A **bus** is a directory and message gateway for sessions that explicitly
-register. It works locally with no account:
+Ask your agent to register this session on the configured bus, list the agents
+it can reach, or send a task to a named peer. A **bus** is the session directory
+and message gateway; local use needs no hosted account. The graph, roster, and
+human inbox are available when you ask to open the bus dashboard.
 
-```sh
-homi bus status --no-start --json             # what is configured, without starting anything
-homi bus register                             # publish this exact session on "general"
-homi bus agents --json
-homi bus send AGENT_ID 'Can you take the frontend half?'
-homi bus dashboard --open                     # the graph, roster, and human inbox
-```
-
-To join someone else's bus, its owner gives you a scoped invitation privately:
-
-```sh
-homi bus connect INVITE_CODE --device my-laptop
-homi bus register --bus project
-```
-
-Installing HOMI grants no access to any hosted bus; membership is always an
-explicit invitation. For durable mail between your own machines, HOMI links
-daemons over SSH (`homi daemon pair user@host`). Native routes to sessions on this
-machine and over SSH remain available as `homi native ...`. Each address space is
-explicit, so a failed lookup never silently targets a different agent. See
-[BUSES.md](docs/BUSES.md) and [CLI.md](docs/CLI.md).
+Joining someone else's bus requires a scoped invitation from its owner. Installing
+HOMI grants no access to a hosted bus. For durable mail between your own machines,
+ask the agent to link the specified daemons over SSH; that is a separate,
+explicit operation. Native routes to local and remote sessions remain available.
+Each address space is explicit, so a failed lookup never silently targets a
+different agent. See [BUSES.md](docs/BUSES.md) and the [CLI reference](docs/CLI.md).
 
 ## Optional: terminal, mesh, snapshots, containers
 
@@ -142,11 +131,13 @@ homi profile preview --terminal --mesh        # shows exactly which files would 
 homi profile install --terminal --mesh
 ```
 
-- `--terminal`: tmux navigation, tiling, an agent launch picker, workspace
-  snapshots (`tss`/`tsr`), Ghostty settings.
+- `--terminal`: tmux navigation, tiling, an agent launch picker, `cx`/`cxx` and
+  `cdx`/`cdxx` commands, and Ghostty settings. Shortcuts work from zsh or Bash;
+  Bash runs their implementation without replacing your interactive shell.
 - `--mesh`: manual and Tailscale host discovery, SSH helpers.
-- `--snapshots`: scheduled workspace snapshots mirrored to an archive volume,
-  with an explicit, reversible schedule ([SNAPSHOTS.md](docs/SNAPSHOTS.md)).
+- `--snapshots`: opt-in workspace save/restore (`tss`/`tsr`) and snapshots mirrored
+  to an archive volume, with a separately selected, reversible schedule
+  ([SNAPSHOTS.md](docs/SNAPSHOTS.md)).
 - `--box`: a contained execution adapter ([CONTAINED-EXECUTION.md](docs/CONTAINED-EXECUTION.md)).
 - `--accounts`: account selection and rotation using services you configure
   ([account setup](docs/PROFILES.md#user-configuration-and-optional-accounts)).

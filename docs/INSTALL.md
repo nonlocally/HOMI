@@ -1,27 +1,30 @@
 # Installation
 
-> **HOMI 0.3.0 release.** The [release archive and checksum](https://github.com/nonlocally/HOMI/releases/tag/v0.3.0)
-> require repository access while public distribution is pending. Use the
-> authenticated archive download below; Homebrew availability awaits public launch.
+> **Release access.** Archives currently require repository access; public
+> distribution is deferred. Use a matching maintainer-provided archive. See
+> [RELEASING.md](RELEASING.md) for the validation process.
 
 ## Requirements
 
 | Needed for | Requirement |
 |---|---|
-| Everything | macOS or Linux; Node.js 20 or later; Python 3.9 or later; Bash |
-| Terminal seats and spawned executions | tmux |
-| Agent sessions | Claude Code CLI and/or Codex CLI, installed and authenticated by you; see [Clients](#clients) |
+| Launch the archive | macOS or Linux; Node.js 20 or later; Bash |
+| HOMI runtime | Python 3.9 or later; guided setup can install it when missing |
+| Terminal seats and spawned executions | tmux; included in guided dependency checks when either client is selected, even without a terminal profile |
+| Agent sessions | Claude Code CLI and/or Codex CLI; guided setup offers missing clients, with login separately selected; see [Clients](#clients) |
 | Other devices | SSH; Tailscale optional |
-| Optional profiles | Bash 4+, fzf, jq for the terminal and mesh modules; see [PROFILES.md](PROFILES.md) |
+| Optional profiles | Bash 4+ and fzf; tmux for terminal, jq and SSH for mesh; see [PROFILES.md](PROFILES.md) |
 
-Setup does not install a model client, obtain credentials, or enroll you in a
-hosted service.
+Guided setup can install missing dependencies and clients for selected features.
+It does not obtain provider credentials for you or enroll you in a hosted bus.
+Node.js must already be available to start the archive's installer; the HOMI
+Homebrew formula supplies Node when that distribution channel is available.
 
 ## Get the archive
 
-The release is `homi-VERSION.tar.gz` with a `.sha256` beside it. With GitHub CLI
-authenticated to an account that has repository access, download both files,
-then verify before extracting:
+The archive is `homi-VERSION.tar.gz` with a `.sha256` beside it. Obtain the matching
+build from the maintainer. Once the private release is activated, an account with
+repository access can download both files with GitHub CLI, then verify them:
 
 ```sh
 gh release download v0.3.0 --repo nonlocally/HOMI --pattern 'homi-0.3.0.tar.gz*'
@@ -30,26 +33,95 @@ tar -xzf homi-0.3.0.tar.gz
 ```
 
 The archive contains the CLI, the MCP server, the plugin, the daemon, and its
-production Node dependencies. It needs no Git checkout, npm account, or registry
-access. An archive copied to a machine over SSH installs exactly like a
-downloaded one.
+production Node dependencies. HOMI itself needs no Git checkout, npm account, or
+registry access to install from the archive. Installing missing third-party
+tools does need network access to their installation sources. An archive copied
+to a machine over SSH installs exactly like a downloaded one.
 
 ## Run setup
 
 ```sh
-./homi-0.3.0/bin/homi setup --claude --codex
+./homi-0.3.0/bin/homi setup
 ```
+
+With no flags in an interactive terminal, `setup` guides you through the clients,
+terminal/mesh tools, optional Ghostty, and service choices. It shows the selected
+package and configuration actions before asking you to apply them. Use
+`--guided` to request that flow explicitly. Declining or reaching end-of-input
+at confirmation does not authorize installation.
+
+For automation or a selection you already know, use explicit flags:
+
+```sh
+# Preview only: no downloads, login, package installation or configuration writes.
+./homi-0.3.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --dry-run
+
+# Apply that selection; omit either client or profile you do not want.
+./homi-0.3.0/bin/homi setup --install-missing --claude --codex --terminal --mesh --yes
+
+# CLI-only configuration, including on a server:
+./homi-0.3.0/bin/homi setup --no-clients --no-service
+```
+
+Add `--ghostty` on macOS to select the application, the configured Nerd Font,
+and the terminal profile. It is never inferred from a server or terminal selection. `--terminal` and
+`--mesh` select the corresponding owned profiles. Without `--install-missing`,
+these selections require their dependencies to be present and report any missing
+ones. New noninteractive selections require `--yes` and an explicit client choice
+(`--claude`, `--codex`, or `--no-clients`). `--guided --dry-run` does not prompt;
+it plans only the explicitly selected features and core requirements.
+Selecting a client includes tmux for agent seats; it does not select terminal
+configuration. `--no-clients` without terminal/Ghostty selection can omit tmux
+for messaging-only use.
+
+Existing explicit commands such as `setup --claude`, `setup --no-clients`, and
+`profile install` retain their configuration-only behavior. Bare setup without a
+terminal also retains its prior behavior; it does not silently authorize package
+downloads. `update` remains the explicit release activation command.
 
 | Flag | Effect |
 |---|---|
-| `--claude`, `--codex` | Register the plugin with that client. With neither flag, both are attempted when their CLIs are present. |
+| `--guided` | Choose features interactively and review the installation plan. |
+| `--install-missing` | Permit installation of missing dependencies for the selected features after confirmation, or with `--yes`. |
+| `--claude`, `--codex` | Select clients for plugin registration. In configuration-only setup, neither flag means attempt both existing CLIs. |
 | `--no-clients` | Install the CLI only; register clients later with `homi setup --claude` or `--codex`. |
+| `--terminal`, `--mesh` | Select owned profiles and check their required tools. |
+| `--ghostty` | Explicitly select Ghostty, its configured font, and the terminal profile on macOS. |
+| `--yes` | Confirm the explicit installation selection; does not authorize provider login. |
+| `--login-claude`, `--login-codex` | Request the selected provider's interactive login separately; skip it if already logged in. Requires a terminal. |
 | `--service` | Also install the per-user daemon service (launchd or systemd `--user`). |
 | `--no-service` | Leave an existing managed service untouched during an update. |
 | `--service-inherit=NAME` | Add an allowed variable to the service environment, such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Repeat for each variable. |
-| `--dry-run` | Print every path, setting, and command setup would touch, and change nothing. |
+| `--dry-run` | Print the selected setup/dependency plan and change nothing. Use `homi profile preview` for the exact profile paths and conflicts. |
 
-What setup does, in order: verifies the archive against its manifest; copies the
+### Installing missing tools
+
+On macOS, guided setup uses Homebrew and includes Homebrew bootstrap in the
+reviewed plan if it is needed. Selected clients require tmux for agent seats.
+Terminal selection additionally requires Bash 4+ and fzf;
+mesh adds jq and SSH. Selected Claude Code and Codex use their Homebrew casks;
+Ghostty and the font are installed only when selected.
+
+On Linux, system-tool recipes use `apt-get` where available. Provider clients use
+their official native installers. Missing Ghostty on Linux requires manual
+installation; the plan reports it before applying changes. A system without a
+supported recipe receives a manual prerequisite instruction. HOMI does not add
+a new package manager or a substitute container backend for that system.
+
+Existing provider executables are not implicitly upgraded. If an installed
+client lacks HOMI's required capabilities, setup reports that failure so you can
+choose how to update it. Installing software and signing into it are separate:
+`--yes` alone never starts login. Login uses the provider's own interactive CLI;
+HOMI does not collect your password or create a hosted account.
+
+Third-party package installation is not part of HOMI's configuration rollback.
+If a later step fails, installed packages remain available; HOMI does not remove
+them during a retry, rollback or uninstall. Core setup and profile installation
+have their own ownership and recovery boundaries, and report any recovery needed.
+
+### Installed configuration
+
+Core setup verifies the archive against its manifest; copies the
 release to `~/.local/share/communicate/<version>-<hash>/`, which is never modified
 again; points the stable link `~/.local/share/communicate/current` at it; creates
 `~/.local/share/communicate/bin/homi` and `bin/communicate`; registers the plugin
@@ -165,9 +237,14 @@ homi profile status
 homi profile uninstall
 ```
 
-Modules: `--terminal`, `--mesh`, `--snapshots`, `--box`, `--accounts`. Profile
-installation starts no service, runs no package manager, changes no login shell,
-and reloads no tmux server. It records every file it writes with a backup and
+Modules: `--terminal`, `--mesh`, `--snapshots`, `--box`, `--accounts`. Guided setup
+offers only terminal/mesh and optional Ghostty; the other modules are explicit
+later choices. Terminal configuration retains the `cx`/`cxx` and `cdx`/`cdxx`
+agent shortcuts as commands callable from zsh or Bash. It uses Bash internally,
+leaves the interactive shell choice unchanged, and adds only a managed PATH
+include to `.zshrc` alongside its existing Bash startup includes.
+Profile installation starts no service, runs no package manager, and reloads
+no tmux server. It records every file it writes with a backup and
 removes only what is still exactly what it wrote. See [PROFILES.md](PROFILES.md),
 [SNAPSHOTS.md](SNAPSHOTS.md), and [CONTAINED-EXECUTION.md](CONTAINED-EXECUTION.md).
 

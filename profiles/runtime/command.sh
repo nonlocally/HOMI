@@ -5,7 +5,7 @@ case "$op" in
   shell)
     fn="${1:-}"; [ $# -eq 0 ] || shift
     case "$fn" in
-      t|tn|tk|tl|tp|tj|tw|twp|to|tws|twg|tsl|tslm|tml|tss|tsr|_t_cycle|al|alw|taa|tra|tscale|tap|mesh)
+      t|tn|tk|tl|tp|tj|tw|twp|to|tws|twg|tss|tsr|_t_cycle|al|alw|mesh)
         declare -F "$fn" >/dev/null || { echo "HOMI profile module for $fn is not enabled" >&2; exit 1; }
         "$fn" "$@" ;;
       *) echo 'homi-workstation: unknown shell helper' >&2; exit 2 ;;

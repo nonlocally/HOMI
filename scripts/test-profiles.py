@@ -25,7 +25,7 @@ class Profiles(unittest.TestCase):
         self.home.mkdir()
         self.profile = mod.Profile(self.home)
         self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.home / ".local/bin") + ":" + os.environ["PATH"])
-        for key in ["TMUX", "TMUX_PANE", "HOMI_PROFILE_CONFIG", "HOMI_PROFILE_STATE", "HOMI_PROFILE_RUNTIME", "HOMI_PROFILE_MODULES", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "BASH_ENV"]:
+        for key in ["TMUX", "TMUX_PANE", "HOMI_PROFILE_CONFIG", "HOMI_PROFILE_STATE", "HOMI_PROFILE_RUNTIME", "HOMI_PROFILE_MODULES", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "BASH_ENV", "ZDOTDIR", "HOMI_ACCOUNT_LAUNCHER", "HOMI_BOX_LAUNCHER", "HOMI_PANE_WATCHER", "HOMI_PROFILE_WATCH"]:
             self.env.pop(key, None)
 
     def tearDown(self):
@@ -150,10 +150,100 @@ class Profiles(unittest.TestCase):
         result = self.run_tool(str(self.home / ".local/bin/homi-mesh"), "help")
         self.assertIn("HOMI mesh", result.stdout)
         active = self.profile.config / "active.sh"
-        result = self.run_tool(BASH, "--noprofile", "--norc", "-c", '. "$1"; declare -F t _t_switch tss tsr al mesh; declare -F anu_landing chat browser || true', "test", str(active))
-        self.assertIn("_t_switch", result.stdout)
-        self.assertNotIn("anu_landing", result.stdout)
+        expected = ["t", "_t_switch", "al", "alw", "mesh", "cx", "cxx", "cxc", "cdx", "cdxx", "cdxxs"]
+        result = self.run_tool(BASH, "--noprofile", "--norc", "-c",
+                               '. "$1"; declare -F ' + " ".join(expected)
+                               + '; declare -F tss tsr tsl tslm tml taa tra tap tscale anu_landing chat browser || true',
+                               "test", str(active))
+        self.assertEqual(result.stdout.splitlines(), expected)
+        absent = self.run_tool(str(self.home / ".local/bin/homi-workstation"), "shell", "tss", "proof", check=False)
+        self.assertNotEqual(absent.returncode, 0)
+        self.assertIn("not enabled", absent.stderr)
         self.assertNotIn(".local/share/anu", active.read_text())
+
+    @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
+    def test_fresh_zsh_executes_shortcuts_without_changing_shell(self):
+        zsh = self.home / ".zshrc"
+        zsh.write_text("# existing zsh settings\n")
+        self.install(["terminal"])
+        commands = self.home / ".local/bin"
+        for name in ["claude", "codex"]:
+            stub = commands / name
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            stub.chmod(0o755)
+        tmux = commands / "tmux"
+        tmux.write_text('#!/bin/sh\n[ "$1" = list-sessions ] || exit 2\nprintf "fixture: 1 windows\\n"\n')
+        tmux.chmod(0o755)
+        # Fail before agent.sh if an implementation regression shadows a stub;
+        # this fixture must never execute a real installed provider.
+        (self.profile.config / "local.sh").write_text(
+            '[[ $(command -v claude) == ' + mod.quote(commands / "claude")
+            + ' && $(command -v codex) == ' + mod.quote(commands / "codex")
+            + ' ]] || exit 73\n')
+        # A fresh GUI shell can omit Homebrew entirely. Only the managed zsh
+        # PATH block loads here; each executable uses Bash internally.
+        shell = shutil.which("zsh")
+        env = dict(self.env, SHELL=shell, ZDOTDIR=str(self.home), PATH="/usr/bin:/bin")
+        argument = "literal 'quotes' $value\nsecond line"
+        result = self.run_tool(shell, "-i", "-c",
+                               '[[ -n $ZSH_VERSION ]] || exit 1; '
+                               'command -v cx cxx cdx cdxx al alw t; '
+                               'cxx "$1"; cdxx "$1"; tl; printf "shell=%s\\n" "$SHELL"',
+                               "fixture", argument, env=env)
+        expected = "".join(str(commands / name) + "\n" for name in ["cx", "cxx", "cdx", "cdxx", "al", "alw", "t"])
+        self.assertEqual(result.stdout, expected + "--dangerously-skip-permissions\n" + argument
+                         + "\n--yolo\n" + argument + "\nfixture: 1 windows\nshell=" + shell + "\n")
+        self.assertNotIn("HOMI_PROFILE_RUNTIME", zsh.read_text())
+        self.assertIn("# existing zsh settings", zsh.read_text())
+        ghostty = (self.profile.config / "ghostty.conf").read_text()
+        self.assertNotIn("command =", ghostty)
+        tmux_config = (self.profile.config / "tmux.conf").read_text()
+        self.assertNotIn("default-shell", tmux_config)
+        self.assertFalse((commands / "homi-shell").exists())
+        self.assertTrue(self.profile.uninstall()["ok"])
+        self.assertFalse((commands / "cxx").exists())
+        self.assertEqual(zsh.read_text(), "# existing zsh settings\n")
+        self.assertTrue((commands / "claude").exists())
+
+    def test_shortcut_collision_refuses_install_without_overwrite(self):
+        shortcut = self.home / ".local/bin/cxx"
+        shortcut.parent.mkdir(parents=True)
+        shortcut.write_text("# my existing shortcut\n")
+        plan = self.profile.plan(["terminal"])
+        self.assertTrue(any(row["path"] == str(shortcut) and row["action"] == "conflict" for row in plan))
+        with self.assertRaises(mod.Conflict):
+            self.install(["terminal"])
+        self.assertEqual(shortcut.read_text(), "# my existing shortcut\n")
+        self.assertFalse((self.home / ".zshrc").exists())
+        self.assertFalse((self.home / ".local/bin/cdxx").exists())
+
+    @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
+    def test_fresh_zsh_mesh_help_is_owned_and_offline(self):
+        self.install(["terminal"])
+        commands = self.home / ".local/bin"
+        mesh = commands / "mesh"
+        self.assertFalse(mesh.exists())
+        mesh.write_text("# existing unowned mesh\n")
+        with self.assertRaises(mod.Conflict):
+            self.install(["mesh"])
+        self.assertEqual(mesh.read_text(), "# existing unowned mesh\n")
+        mesh.unlink()  # Only the fixture just created above.
+        self.install(["mesh"])
+        network = self.home / "unexpected-network-call"
+        for name in ["ssh", "tailscale", "curl"]:
+            stub = commands / name
+            stub.write_text("#!/bin/sh\nprintf called > " + mod.quote(network) + "\nexit 99\n")
+            stub.chmod(0o755)
+        shell = shutil.which("zsh")
+        env = dict(self.env, SHELL=shell, ZDOTDIR=str(self.home), PATH="/usr/bin:/bin")
+        result = self.run_tool(shell, "-i", "-c",
+                               '[[ -n $ZSH_VERSION && ${+functions[mesh]} = 0 ]] || exit 1; '
+                               'command -v mesh; mesh help', env=env)
+        self.assertEqual(result.stdout.splitlines()[0], str(mesh))
+        self.assertIn("HOMI mesh", result.stdout)
+        self.assertFalse(network.exists())
+        self.assertTrue(self.profile.uninstall()["ok"])
+        self.assertFalse(mesh.exists())
 
     def test_failed_uninstall_restores_earlier_targets_and_ownership(self):
         from unittest.mock import patch
@@ -196,6 +286,10 @@ class Profiles(unittest.TestCase):
         wrapper = self.home / ".local/bin/homi-snapshot"
         self.assertEqual(wrapper.read_text(), self.profile.snapshot_schedule(runtime).wrapper_text())
         self.assertIn("homi-snapshot", self.run_tool(str(wrapper), "help").stdout)
+        functions = self.run_tool(BASH, "--noprofile", "--norc", "-c",
+                                 '. "$1"; declare -F tss tsr; declare -F t tsl tslm tscale || true',
+                                 "test", str(self.profile.config / "active.sh"))
+        self.assertEqual(functions.stdout.splitlines(), ["tss", "tsr"])
         self.assertEqual((runtime.parent / "manage.py").read_bytes(), (ROOT / "profiles/manage.py").read_bytes())
         env = dict(self.env, COMMUNICATE_DATA=str(self.home / "no-core-install"))
         preview = self.run_tool(str(wrapper), "schedule", "preview", env=env)

@@ -157,3 +157,15 @@ jobs:
           name: homi-homebrew-qualification
           path: ${{ runner.temp }}/homi-brew-evidence
           if-no-files-found: warn
+      - name: Qualify TTY cancellation and fresh automated dependency setup on the disposable runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/homi-onboarding-artifact"
+          tar -xzf "dist/homi-$(cat VERSION).tar.gz" -C "$RUNNER_TEMP/homi-onboarding-artifact"
+          python3 scripts/qualify-onboarding.py "$RUNNER_TEMP/homi-onboarding-artifact/homi-$(cat VERSION)" \
+            --work "$RUNNER_TEMP/homi-onboarding-evidence" --disposable-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: homi-onboarding-qualification
+          path: ${{ runner.temp }}/homi-onboarding-evidence
+          if-no-files-found: warn

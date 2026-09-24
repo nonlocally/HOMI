@@ -25,13 +25,22 @@ if (!["setup", "update", "uninstall", "rollback", "doctor"].includes(cmd) &&
   case "--help":
     version();
     console.log("verbs: setup/update [--claude|--codex|--no-clients] [--service|--no-service] [--dry-run] | rollback | uninstall [--purge] | doctor | serve | version");
+    console.log("       setup --guided | setup --install-missing [--claude|--codex|--no-clients] [--terminal] [--mesh] [--ghostty] [--yes] [--dry-run]");
     console.log("       any communicate CLI verb (bus ..., agents, route, send, codex ..., claude ..., wake ...)");
     break;
   case "version":
   case "--version":
     version();
     break;
-  case "setup":
+  case "setup": {
+    const onboarding = await import("./onboarding.mjs");
+    if (onboarding.shouldGuide(rest)) {
+      const result = await onboarding.runOnboarding(rest);
+      if (result.status === "cancelled") { console.log("Setup cancelled."); process.exitCode = 130; }
+    }
+    else await (await import("./setup.mjs")).runSetup(rest);
+    break;
+  }
   case "update":
     await (await import("./setup.mjs")).runSetup(rest);
     break;

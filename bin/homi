@@ -31,6 +31,10 @@ case "$cmd" in
 HOMI — persistent agent identities, communication, and execution
 
   homi setup [--claude|--codex|--no-clients] [--service] [--dry-run]
+  homi setup --guided              choose clients, dependencies and profiles
+  homi setup --install-missing [--claude|--codex|--no-clients]
+             [--terminal] [--mesh] [--ghostty] [--service|--no-service]
+             [--yes] [--dry-run]
   homi doctor | version | update | rollback | uninstall
 
   homi start | status | agents
@@ -48,6 +52,8 @@ HOMI — persistent agent identities, communication, and execution
 An identity can retain mail while its execution is stopped. Bus registration
 and native sessions retain their own addresses and delivery capabilities.
 The communicate command remains compatible. See docs/CLI.md for examples.
+Bare setup in a terminal starts the guide. Dependencies are installed only
+after a reviewed plan; noninteractive dependency setup requires --yes.
 EOF
     ;;
   setup|update|rollback|uninstall|doctor|serve)

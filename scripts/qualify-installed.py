@@ -303,12 +303,19 @@ class Qualification:
                 observations[label] = {"runtime": lines[2], "launcher": lines[3]}
             row["shells"] = observations
         if Path("/bin/zsh").exists():
-            with self.check("fresh zsh remains unchanged; Bash helpers are explicit") as row:
-                command = 'for fn in t cx mesh; do (( $+functions[$fn] )) && exit 9; done; print -r -- "$HOME"'
+            with self.check("fresh zsh discovers executable shortcuts without loading Bash functions") as row:
+                command = ('[[ -n $ZSH_VERSION ]] || exit 8; '
+                           'for fn in t cx mesh; do (( $+functions[$fn] )) && exit 9; done; '
+                           'print -r -- "$HOME"; command -v t cx cxx cdx cdxx mesh')
                 result = self.run("/bin/zsh", "-d", "-lic", command)
-                require(result.stdout.strip() == str(self.home), "zsh did not use its temporary home")
-                require(not (self.home / ".zshrc").exists() and not (self.home / ".zprofile").exists(), "profile unexpectedly modified zsh startup")
-                row["support"] = "Interactive helpers require Bash 4+; zsh is not automatically integrated or replaced."
+                expected = [str(self.home)] + [str(self.home / ".local/bin" / name)
+                                              for name in ("t", "cx", "cxx", "cdx", "cdxx", "mesh")]
+                require(result.stdout.splitlines() == expected, "zsh did not discover the installed executable shortcuts")
+                rc = (self.home / ".zshrc").read_text()
+                require("# >>> HOMI profile" in rc and "HOMI_PROFILE_RUNTIME" not in rc,
+                        "zsh startup does not contain the intended PATH-only include")
+                require(not (self.home / ".zprofile").exists(), "profile unexpectedly replaced zsh login configuration")
+                row["support"] = "zsh keeps its interpreter and uses executable shortcuts; Bash functions stay inside their wrappers."
 
     def profile_helpers(self):
         record = json.loads((self.home / ".local/state/homi/profiles/ownership.json").read_text())

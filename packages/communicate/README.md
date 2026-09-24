@@ -5,30 +5,60 @@ This package is HOMI's installable unit: the `homi` command, the compatible
 durable daemon, with production Node dependencies included in the release
 archive. The npm name `@aadarwal/communicate`, the plugin identity
 `communicate@communicate`, and the state directory are kept for compatibility
-with earlier Communicate installations. Version 0.3.0 is distributed as a release
-archive; the npm name is not a claim that 0.3.0 is published to npm.
+with earlier Communicate installations. Version 0.3.0 uses a release archive;
+the npm name is not a claim that 0.3.0 is published to npm. Archives currently
+require repository access; public distribution is deferred. Use a matching
+maintainer-provided archive. See
+[RELEASING.md](https://github.com/nonlocally/HOMI/blob/main/docs/RELEASING.md)
+for the validation process.
 
 ## Install
 
 ```sh
 shasum -a 256 -c homi-0.3.0.tar.gz.sha256
 tar -xzf homi-0.3.0.tar.gz
-./homi-0.3.0/bin/homi setup --claude --codex
+./homi-0.3.0/bin/homi setup                   # guided in an interactive terminal
 ./homi-0.3.0/bin/homi doctor
 export PATH="$HOME/.local/share/communicate/bin:$PATH"
 ```
 
-Requires macOS or Linux, Node.js 20+, Python 3.9+, and Bash. tmux is needed for
-seats; an authenticated Claude Code or Codex CLI for agent sessions. `setup`
-stages an immutable copy of the release at
+Requires macOS or Linux, Node.js 20+, and Bash to launch the archive. Guided setup
+checks Python and lets you select clients, terminal/mesh tools, optional Ghostty
+on macOS, and service setup. It offers missing selected software and asks you to
+review the plan before applying it. Provider login is a separate explicit choice;
+existing provider clients are not implicitly upgraded. A server needs no GUI.
+Selecting either client also checks tmux for agent seats, without requiring the
+optional terminal profile or changing your interactive shell.
+
+For an explicit selection, preview the plan:
+
+```sh
+homi setup --install-missing --claude --codex --terminal --mesh --dry-run
+```
+
+Replace `--dry-run` with `--yes` to apply it.
+Use `--no-clients` for CLI-only operation. Existing `setup --claude` and
+`profile install` commands remain configuration-only. Third-party packages are
+not removed by HOMI's rollback or uninstall.
+
+`setup` stages an immutable copy of the release at
 `~/.local/share/communicate/0.3.0-<manifest-hash>/`, points `current` at it, and
 registers the plugin with the clients you named. Start a fresh client session
 afterwards. Keep a copy of the archive for recovery and purge if an installed
 payload becomes damaged. The full flag reference, service, update, rollback, uninstall,
 and troubleshooting are in [docs/INSTALL.md](https://github.com/nonlocally/HOMI/blob/v0.3.0/docs/INSTALL.md).
 
+After setup and provider login, open a fresh Claude Code CLI or Codex CLI session
+and ask for the work: *"Create a Claude agent called researcher, investigate the
+flaky test in this project, and bring me its answer."* Use the provider you
+configured. The agent handles readiness, identity creation, messaging and replies
+through its installed HOMI tools; normal use does not require typing those CLI
+commands. The optional terminal shortcuts work from zsh or Bash without changing
+the interactive shell.
+
 ```sh
-homi setup --claude                             # or --codex; --no-clients for CLI only
+homi setup --guided                             # choose clients and optional dependencies
+homi setup --claude                             # register an existing client only
 homi setup --service                             # per-user launchd or systemd --user service
 homi setup --dry-run                             # show every change without making it
 /path/to/new-release/bin/homi update             # activate a newer release
@@ -37,7 +67,10 @@ homi uninstall --claude                         # restore this client's previous
 homi uninstall --purge                          # remove owned integrations/payloads; state preserved
 ```
 
-## Commands
+## CLI reference
+
+These are the operations the agent can perform for you, also available directly
+for scripts and debugging:
 
 ```sh
 homi start | status | agents                     # daemon and durable roster
