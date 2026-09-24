@@ -33,6 +33,8 @@ MAX_AGENTS = 128
 MAX_TOTAL_AGENTS = 4096
 MAX_PRINCIPALS = 1024
 MAX_BUSES = 256
+MAX_ACCOUNT_BUSES = 32
+MAX_ACCOUNT_INVITES = 128
 MAX_INVITES = 4096
 MAX_RECORDS = 20000
 MAX_SSO_REPLAYS = 4096
@@ -55,6 +57,7 @@ DEVICE_FIELDS = {"hostname": 253, "platform": 64, "tailscale_hostname": 253, "ta
 ACTIVE = ("accepted", "leased")
 TERMINAL = ("delivered", "queued", "failed", "expired", "cancelled")
 CHAT_OPS = frozenset(("chat_open", "chat_list", "chat_messages", "chat_send", "chat_read"))
+ACCOUNT_OPS = frozenset(("create", "member_add", "member_remove", "invite", "invite_revoke"))
 CHAT_FIELDS = {"chat_open": {"bus", "agent"}, "chat_list": set(), "chat_messages": {"chat", "after", "limit"},
                "chat_send": {"chat", "request_id", "message"}, "chat_read": {"chat", "through"}}
 
@@ -210,6 +213,9 @@ class Broker:
                 CREATE TABLE IF NOT EXISTS sso_replays(jti TEXT PRIMARY KEY, expires_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS sso_replay_expiry ON sso_replays(expires_at);
                 CREATE TABLE IF NOT EXISTS buses(name TEXT PRIMARY KEY, visibility TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS account_memberships(
+                  user TEXT NOT NULL, bus TEXT NOT NULL REFERENCES buses(name),
+                  PRIMARY KEY(user,bus));
                 CREATE TABLE IF NOT EXISTS grants(
                   principal TEXT NOT NULL REFERENCES principals(id),
                   bus TEXT NOT NULL REFERENCES buses(name), PRIMARY KEY(principal,bus));
@@ -262,6 +268,8 @@ class Broker:
             for table, name, declaration in (("principals", "user", "TEXT"),
                                               ("principals", "device_metadata", "TEXT NOT NULL DEFAULT '{}'"),
                                               ("invites", "user", "TEXT"),
+                                              ("invites", "issuer_user", "TEXT"),
+                                              ("buses", "owner_user", "TEXT"),
                                               ("messages", "conversation", "TEXT REFERENCES conversations(id)")):
                 columns = {row[1] for row in db.execute("PRAGMA table_info(%s)" % table)}
                 if name not in columns:
@@ -280,7 +288,9 @@ class Broker:
             local_user = getpass.getuser().lower()
             db.execute("UPDATE principals SET user=COALESCE(user,?) WHERE id='admin'",
                        (local_user if USER_RE.fullmatch(local_user) else "local",))
-            db.execute("INSERT OR IGNORE INTO buses VALUES('general','open')")
+            # Existing private buses stay operator-owned (NULL). Never infer
+            # account ownership from names, past invitations or device labels.
+            db.execute("INSERT OR IGNORE INTO buses(name,visibility) VALUES('general','open')")
             db.execute("INSERT OR IGNORE INTO tokens VALUES(?,'admin')", (_digest(self.admin_token),))
             self.server_id = db.execute("SELECT value FROM meta WHERE key='server_id'").fetchone()[0]
         db.close()
@@ -457,6 +467,49 @@ class Broker:
         if not p["is_admin"]:
             raise BusError("administrator access required", "forbidden")
 
+    def _account_user(self, p):
+        """Only a currently gateway-authenticated mapped browser is an account.
+
+        A device's user is invitation attribution, not evidence of a login:
+        someone holding an invitation can enroll that device. Never elevate it.
+        OpenWebUI group views remain separate, read-only directory authority.
+        """
+        reader = p.get("browser_reader")
+        if (reader and not reader.startswith("owui.") and reader in self.reader_users
+                and self.reader_users[reader] == p.get("user")):
+            return p["user"]
+        return None
+
+    @staticmethod
+    def _account_member(db, bus, user):
+        return bool(user and db.execute("""SELECT 1 FROM buses b WHERE b.name=? AND
+          (b.owner_user=? OR EXISTS(SELECT 1 FROM account_memberships m WHERE m.bus=b.name AND m.user=?))""",
+                                       (bus, user, user)).fetchone())
+
+    def _bus_role(self, db, p, bus):
+        if p["is_admin"]:
+            return "admin"
+        user = self._account_user(p)
+        if user and bus["owner_user"] == user:
+            return "owner"
+        if user and bus["owner_user"] is not None and self._account_member(db, bus["name"], user):
+            return "member"
+        return "viewer"
+
+    def _visible_buses(self, db, p):
+        if "view_buses" in p:
+            return sorted(p["view_buses"])
+        user = self._account_user(p)
+        return [row[0] for row in db.execute("SELECT name FROM buses ORDER BY name")
+                if self._granted(db, p["id"], row[0]) or self._account_member(db, row[0], user)]
+
+    def _managed_bus(self, db, p, name, *, member=False):
+        bus = db.execute("SELECT * FROM buses WHERE name=?", (name,)).fetchone()
+        roles = ("admin", "owner", "member") if member else ("admin", "owner")
+        if bus is None or self._bus_role(db, p, bus) not in roles:
+            raise BusError("bus management access required", "forbidden")
+        return bus
+
     @staticmethod
     def _granted(db, principal, bus):
         return db.execute("""SELECT 1 FROM principals p WHERE p.id=? AND p.revoked=0
@@ -558,7 +611,8 @@ class Broker:
                     db.execute("SAVEPOINT requested_operation")
                     observed = True
                     if (p is not None and p["browser_reader"] is not None and not p["is_admin"]
-                            and request["op"] != "snapshot" and request["op"] not in CHAT_OPS):
+                            and request["op"] != "snapshot" and request["op"] not in CHAT_OPS
+                            and not (request["op"] in ACCOUNT_OPS and self._account_user(p))):
                         raise BusError("this browser reader has read-only directory access", "forbidden")
                     if request["op"] == "redeem":
                         result = self._redeem(db, p, token, request, now)
@@ -592,41 +646,95 @@ class Broker:
             return {"ok": False, "error": "invalid request", "code": "invalid_request"}
 
     def _op_create(self, db, p, r, now):
-        self._admin(p)
+        user = self._account_user(p)
+        if not p["is_admin"] and user is None:
+            raise BusError("authenticated account access required", "forbidden")
         bus = _bus(r.get("bus"))
-        if (not db.execute("SELECT 1 FROM buses WHERE name=?", (bus,)).fetchone()
-                and db.execute("SELECT COUNT(*) FROM buses").fetchone()[0] >= MAX_BUSES):
+        existing = db.execute("SELECT * FROM buses WHERE name=?", (bus,)).fetchone()
+        if existing is not None:
+            if not p["is_admin"] and (bus == "general" or existing["owner_user"] != user):
+                raise BusError("bus name is already in use", "conflict")
+            return {"bus": bus, "owner_user": existing["owner_user"]}
+        if db.execute("SELECT COUNT(*) FROM buses").fetchone()[0] >= MAX_BUSES:
             raise BusError("bus limit reached", "limit")
-        db.execute("INSERT OR IGNORE INTO buses VALUES(?,'private')", (bus,))
-        return {"bus": bus}
+        # Operator-created buses retain the existing operator-owned behavior.
+        owner = None if p["is_admin"] else user
+        if owner and db.execute("SELECT COUNT(*) FROM buses WHERE owner_user=?", (owner,)).fetchone()[0] >= MAX_ACCOUNT_BUSES:
+            raise BusError("account bus limit reached", "limit")
+        db.execute("INSERT INTO buses(name,visibility,owner_user) VALUES(?,'private',?)", (bus, owner))
+        return {"bus": bus, "owner_user": owner}
+
+    def _op_member_add(self, db, p, r, now):
+        bus = self._managed_bus(db, p, _bus(r.get("bus")))
+        if bus["owner_user"] is None or bus["name"] == "general":
+            raise BusError("account membership requires an account-owned private bus", "forbidden")
+        user = _user(r.get("user"))
+        if user not in self.users:
+            raise BusError("unknown account", "forbidden")
+        role = "owner" if user == bus["owner_user"] else "member"
+        if role == "member":
+            db.execute("INSERT OR IGNORE INTO account_memberships VALUES(?,?)", (user, bus["name"]))
+        return {"bus": bus["name"], "user": user, "role": role, "added": True}
+
+    def _op_member_remove(self, db, p, r, now):
+        bus = self._managed_bus(db, p, _bus(r.get("bus")), member=True)
+        user = _user(r.get("user"))
+        if bus["owner_user"] is None or bus["name"] == "general" or user == bus["owner_user"]:
+            raise BusError("the bus owner or operator-managed membership cannot be removed", "forbidden")
+        if self._bus_role(db, p, bus) == "member" and user != self._account_user(p):
+            raise BusError("members may only leave for their own account", "forbidden")
+        name = bus["name"]
+        db.execute("DELETE FROM account_memberships WHERE bus=? AND user=?", (name, user))
+        # Remove this bus only. The same devices and agents can belong elsewhere.
+        db.execute("DELETE FROM grants WHERE bus=? AND principal IN (SELECT id FROM principals WHERE user=?)", (name, user))
+        db.execute("""DELETE FROM memberships WHERE bus=? AND agent IN (
+                      SELECT a.id FROM agents a JOIN principals p ON p.id=a.principal WHERE p.user=?)""", (name, user))
+        db.execute("UPDATE invites SET expires_at=MIN(expires_at,?) WHERE bus=? AND user=? AND redeemed_at IS NULL", (now, name, user))
+        # Account access can also underpin an explicitly configured human chat.
+        # Close it immediately; a later re-add must not resurrect a reply window.
+        for reader, account in self.reader_users.items():
+            if account == user:
+                for row in db.execute("""SELECT m.id FROM human_chat_messages m JOIN human_chats c ON c.id=m.chat
+                                         WHERE c.bus=? AND m.sender_reader=? AND m.closed=0""", (name, reader)).fetchall():
+                    self._chat_close(db, row["id"], now)
+        self._cancel_invalid(db, now)
+        return {"bus": name, "user": user, "removed": True}
 
     def _op_invite(self, db, p, r, now):
-        self._admin(p)
         bus = _bus(r.get("bus", "general"))
-        if not db.execute("SELECT 1 FROM buses WHERE name=?", (bus,)).fetchone():
-            raise BusError("unknown bus", "not_found")
+        managed = self._managed_bus(db, p, bus, member=True)
         ttl = r.get("ttl", 3600)
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 60 <= ttl <= 604800:
             raise BusError("invite ttl must be 60 to 604800 seconds")
         if db.execute("SELECT COUNT(*) FROM invites WHERE redeemed_at IS NULL AND expires_at>?", (now,)).fetchone()[0] >= MAX_INVITES:
             raise BusError("outstanding invitation limit reached", "limit")
-        user = r.get("user", None if self.users else p["user"])
+        account = self._account_user(p)
+        user = r.get("user", account if not p["is_admin"] else (None if self.users else p["user"]))
         if user is None:
             raise BusError("select the user who will own this device")
         user = _user(user)
         if self.users and user not in self.users:
             raise BusError("unknown invitation user", "forbidden")
+        if managed["owner_user"] is not None and not self._account_member(db, bus, user):
+            raise BusError("add the account to this bus before enrolling its device", "forbidden")
+        if self._bus_role(db, p, managed) == "member" and user != account:
+            raise BusError("members may only enroll their own devices", "forbidden")
+        if (not p["is_admin"] and db.execute("""SELECT COUNT(*) FROM invites WHERE issuer_user=?
+              AND redeemed_at IS NULL AND expires_at>?""", (account, now)).fetchone()[0] >= MAX_ACCOUNT_INVITES):
+            raise BusError("account invitation limit reached", "limit")
         secret = secrets.token_urlsafe(32)
-        db.execute("INSERT INTO invites(digest,bus,expires_at,user) VALUES(?,?,?,?)",
-                   (_digest(secret), bus, now + ttl, user))
+        db.execute("INSERT INTO invites(digest,bus,expires_at,user,issuer_user) VALUES(?,?,?,?,?)",
+                   (_digest(secret), bus, now + ttl, user, account))
         return {"invite": secret, "bus": bus, "user": user, "expires_at": now + ttl}
 
     def _op_invite_revoke(self, db, p, r, now):
-        self._admin(p)
         secret = _text(r.get("invite"), "invite", 512)
         invitation = db.execute("SELECT * FROM invites WHERE digest=?", (_digest(secret),)).fetchone()
         if invitation is None or invitation["redeemed_at"] is not None:
             raise BusError("unknown or already redeemed invitation", "not_found")
+        bus = self._managed_bus(db, p, invitation["bus"], member=True)
+        if self._bus_role(db, p, bus) == "member" and invitation["user"] != self._account_user(p):
+            raise BusError("members may only revoke invitations for their own devices", "forbidden")
         db.execute("UPDATE invites SET expires_at=MIN(expires_at,?) WHERE digest=?", (now, _digest(secret)))
         return {"revoked": True, "bus": invitation["bus"]}
 
@@ -640,6 +748,9 @@ class Broker:
             raise BusError("this older invitation has no user; request a new invitation", "forbidden")
         if self.users and invite["user"] not in self.users:
             raise BusError("invitation user is no longer configured", "forbidden")
+        bus = db.execute("SELECT * FROM buses WHERE name=?", (invite["bus"],)).fetchone()
+        if bus["owner_user"] is not None and not self._account_member(db, bus["name"], invite["user"]):
+            raise BusError("invitation account is no longer a bus member", "forbidden")
         device = _text(r.get("device", "device"), "device", 128)
         metadata = _device_metadata(r.get("device_metadata", {}))
         if p is None:
@@ -738,11 +849,10 @@ class Broker:
         return {"updated": len(rows), "ts": now}
 
     def _op_snapshot(self, db, p, r, now):
-        allowed = (sorted(p["view_buses"]) if "view_buses" in p else
-                   [b[0] for b in db.execute("SELECT name FROM buses ORDER BY name") if self._granted(db, p["id"], b[0])])
+        allowed = self._visible_buses(db, p)
         buses = []
         for bus in allowed:
-            visibility = db.execute("SELECT visibility FROM buses WHERE name=?", (bus,)).fetchone()[0]
+            definition = db.execute("SELECT * FROM buses WHERE name=?", (bus,)).fetchone()
             agents = []
             for a in db.execute("""SELECT a.*,p.device,p.user,p.device_metadata FROM agents a JOIN memberships m ON m.agent=a.id
                                    JOIN principals p ON p.id=a.principal WHERE m.bus=? AND p.revoked=0
@@ -758,16 +868,28 @@ class Broker:
                 if p["is_admin"]:
                     row["principal"] = a["principal"]
                 agents.append(row)
-            buses.append({"name": bus, "visibility": visibility, "agents": agents})
+            role = self._bus_role(db, p, definition)
+            account_owned = definition["owner_user"] is not None and bus != "general"
+            manage_members = account_owned and role in ("admin", "owner")
+            row = {"name": bus, "visibility": definition["visibility"], "agents": agents,
+                   "owner_user": definition["owner_user"], "role": role,
+                   "capabilities": {"invite": role == "admin" or (account_owned and role in ("owner", "member")),
+                                    "manage_members": manage_members, "leave": account_owned and role == "member"}}
+            if manage_members:
+                row["members"] = [{"user": definition["owner_user"], "role": "owner"}] + [
+                    {"user": member[0], "role": "member"} for member in db.execute(
+                        "SELECT user FROM account_memberships WHERE bus=? ORDER BY user", (bus,))]
+            buses.append(row)
         self._snapshot_graphs(db, buses)
         result = {"server_id": self.server_id, "is_admin": bool(p["is_admin"]),
+                  "can_create_bus": bool(p["is_admin"] or self._account_user(p)),
                   "principal": p["id"], "buses": buses, "ts": now, **self._device_info(p)}
         chat_buses = self._chat_buses(db, p)
         result["chat"] = {"enabled": bool(chat_buses), "buses": chat_buses,
                           "openwebui": [{"bus": bus, "agent": agent} for bus, agent in self.chat_openwebui_targets
                                         if bus in chat_buses and self._member(db, agent, bus)]}
         if p.get("browser_reader") is not None:
-            result.update(browser_session=True, read_only=not p["is_admin"], logout_url="/_gateway/logout")
+            result.update(browser_session=True, read_only=not result["can_create_bus"], logout_url="/_gateway/logout")
             if "display_name" in p:
                 result["display_name"] = p["display_name"]
         if p["is_admin"]:
@@ -783,8 +905,10 @@ class Broker:
                     "SELECT bus FROM grants WHERE principal=? ORDER BY bus", (ent["id"],))]
                 principals.append(row)
             result["principals"] = principals
-            if self.users:
-                result["users"] = [{"id": user} for user in self.users]
+        if self.users and result["can_create_bus"]:
+            # Account IDs only for explicit collaborator selection. Device and
+            # cross-bus membership records remain restricted to administrators.
+            result["users"] = [{"id": user} for user in self.users]
         return result
 
     @staticmethod
@@ -832,8 +956,7 @@ class Broker:
         grant = self.chat_readers.get(reader)
         if not reader or not grant:
             return []
-        visible = (set(p["view_buses"]) if "view_buses" in p else
-                   {row[0] for row in db.execute("SELECT name FROM buses") if self._granted(db, p["id"], row[0])})
+        visible = set(self._visible_buses(db, p))
         return sorted(visible.intersection(grant["buses"]))
 
     def _chat_access(self, db, p):

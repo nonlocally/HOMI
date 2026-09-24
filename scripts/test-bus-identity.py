@@ -146,8 +146,10 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual(self.b.handle(current_token, {"op": "snapshot"})["code"], "unauthorized")
                 if not is_admin:
                     self.assertEqual([bus["name"] for bus in current["buses"]], ["general"])
-                    self.assertEqual(self.b.handle(current_token, {"op": "create", "bus": "forbidden"},
-                                                  reader=reader, reader_hash=current_hash)["code"], "forbidden")
+                    created = self.b.handle(current_token, {"op": "create", "bus": "account-private"},
+                                            reader=reader, reader_hash=current_hash)
+                    self.assertTrue(created["ok"], created)
+                    self.assertEqual(created["owner_user"], user)
 
                 # Existing machine credentials still work without web context;
                 # GitHub identity changes cannot transfer or erase enrollment.
