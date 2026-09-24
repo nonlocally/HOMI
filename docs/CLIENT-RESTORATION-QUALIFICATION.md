@@ -22,7 +22,9 @@ socket or session environment is supplied. The original plugin is an inert local
 version 0.0.7 fixture with no hooks, MCP servers or skills. Commands inspect and
 modify plugin registries only; they do not create model requests, threads, or
 services. Service, SSH and terminal tools are blocked. Temporary homes are always
-removed after each completed case; evidence directories are mode 0700 and files
+removed after each completed case. Each command owns a separate process group;
+its remaining children are stopped on completion or timeout before HOME cleanup.
+Evidence directories are mode 0700 and files
 are mode 0600. An interrupted/killed process may require removing its reported
 temporary directory explicitly.
 
@@ -38,9 +40,10 @@ its original registry/configuration state, and exercises:
 Claude disabled state is set through its CLI. Codex has no disable command, so
 the test writes a small fixture-only user configuration using supported `enabled`
 and per-tool `approval_mode` fields, then checks effective enabled state through
-the CLI. It does not hand-edit a client-owned registry. Comparisons ignore empty
-parent configuration tables and installation timestamps, which do not represent
-plugin ownership or effective settings.
+the CLI. It does not hand-edit a client-owned registry. Comparisons ignore only
+empty root `enabledPlugins`, `extraKnownMarketplaces`, `plugins` and `marketplaces`
+tables, plus installation timestamps. Explicit empty lists and nested dictionaries
+remain significant, and both clients' fixtures include an unrelated empty list.
 
 `report.json` records the source commit, runtime path, CLI versions, cases and
 pass/fail/unqualified status. Each case file contains command results and before/

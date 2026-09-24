@@ -2,8 +2,8 @@
 """Opt-in actual-client registry restoration checks for an extracted HOMI artifact.
 
 Requires Python 3.11+, Node, and selected client CLIs. Uses fresh private homes,
-local inert plugins and metadata/configuration commands only: no authentication,
-models, threads, services, or existing client configuration.
+local inert plugins and metadata/configuration commands only. No credentials or
+existing client configuration are supplied; no model, thread or service requests.
 """
 import argparse
 import hashlib
@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,14 +37,47 @@ def private_json(file, value):
 
 
 def normalized(value):
-    # CLIs may leave empty parent tables when a plugin key is removed. Empty
-    # containers and registry timestamps are not plugin ownership or settings.
-    if isinstance(value, dict):
-        return {key: item for key, raw in value.items()
-                if (item := normalized(raw)) not in ({}, [])}
-    if isinstance(value, list):
-        return [normalized(item) for item in value]
-    return value
+    # Only these root registry-parent tables are optional when empty. Preserve
+    # every semantic leaf, including explicit empty lists and nested dictionaries.
+    parents = {"enabledPlugins", "extraKnownMarketplaces", "plugins", "marketplaces"}
+    return {key: raw for key, raw in value.items() if not (key in parents and raw == {})}
+
+
+def run_owned(arguments, *, env, cwd, timeout):
+    """Reap this command and stop its owned process group before HOME cleanup."""
+    process = subprocess.Popen(arguments, cwd=cwd, env=env, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+
+    def group_signal(value):
+        try:
+            os.killpg(process.pid, value)
+            return True
+        except ProcessLookupError:
+            return False
+
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            group_signal(signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                group_signal(signal.SIGKILL)
+                stdout, stderr = process.communicate(timeout=2)
+            raise subprocess.TimeoutExpired(arguments, timeout, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+    finally:
+        # A CLI can exit before its configuration helper. Never leave that child
+        # running against a temporary HOME about to be removed.
+        if group_signal(signal.SIGTERM):
+            deadline = time.monotonic() + 0.5
+            while group_signal(0) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            group_signal(signal.SIGKILL)
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=2)
 
 
 def artifact(root):
@@ -114,9 +148,10 @@ class Scenario:
         for folder in (root / "run", root / "tmp", self.home / ".claude", self.home / ".codex", self.home / "state"):
             folder.mkdir(mode=0o700)
         self.claude_settings = self.home / ".claude/settings.json"
-        private_json(self.claude_settings, {"env": {"HOMI_RESTORATION_SENTINEL": "preserve-unrelated"}})
+        private_json(self.claude_settings, {"env": {"HOMI_RESTORATION_SENTINEL": "preserve-unrelated"},
+                                            "permissions": {"allow": []}})
         self.codex_config = self.home / ".codex/config.toml"
-        self.codex_base = '# fixture-only unrelated setting\n[profiles.restoration_sentinel]\nmodel_reasoning_effort = "low"\n'
+        self.codex_base = '# fixture-only unrelated settings\n[sandbox_workspace_write]\nwritable_roots = []\n\n[profiles.restoration_sentinel]\nmodel_reasoning_effort = "low"\n'
         self.codex_config.write_text(self.codex_base)
         self.codex_config.chmod(0o600)
         self.sentinel = self.home / "state/literal-preserved-state"
@@ -124,8 +159,12 @@ class Scenario:
 
     def run(self, label, args):
         started = time.monotonic()
-        result = subprocess.run([str(item) for item in args], cwd=self.root, env=self.env,
-                                text=True, capture_output=True, timeout=self.timeout)
+        try:
+            result = run_owned([str(item) for item in args], cwd=self.root, env=self.env, timeout=self.timeout)
+        except subprocess.TimeoutExpired as error:
+            self.commands.append({"label": label, "argv": [str(item) for item in args], "timeout": self.timeout,
+                                  "stdout": error.output, "stderr": error.stderr, "owned_process_group_stopped": True})
+            raise
         self.commands.append({"label": label, "argv": [str(item) for item in args],
                               "exit": result.returncode, "seconds": round(time.monotonic() - started, 3),
                               "stdout": result.stdout, "stderr": result.stderr})
