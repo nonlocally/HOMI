@@ -462,7 +462,9 @@ case "${1:-run}" in
   log)            shift; cmd_log "$@" ;;
   list|ls)        cmd_list ;;
   prune)          shift; cmd_prune "$@" ;;
-  schedule)       shift; exec python3 "$_HS_HERE/schedule.py" "$@" ;;
+  # The invocation's HOME is the selected installation (an isolated wrapper
+  # stays scoped); a later --home from the caller still wins.
+  schedule)       shift; exec python3 "$_HS_HERE/schedule.py" --home "$HOME" "$@" ;;
   -h|--help|help) sed -n '2,48p' "$0" | sed 's/^#\{0,1\} \{0,1\}//' ;;
   *) echo "homi-snapshot: unknown command '${1}' (try: run archive restore verify status log list prune schedule)" >&2; exit 2 ;;
 esac

@@ -13,14 +13,24 @@ manager. Ownership boundaries:
 - The label is the compatible default only for the actual account home (from
   the password database, not $HOME) with standard config/state roots; any
   other home or root gets a stable scoped label, so an isolated or test
-  installation can never reach the account's real job.
+  installation can never reach the account's real job. The selected home
+  itself defaults to $HOME.
 - Nothing is loaded, unloaded or stopped unless the manager reports the job
   loaded from this schedule's own file; a job of our label loaded from
-  elsewhere is a collision, and every mutation refuses.
+  elsewhere is a collision, and every mutation refuses. A manager that cannot
+  be asked, or answers with an error, is unknown — never "absent".
+- Uninstall confirms the job is really unloaded (Linux: disabled and inactive)
+  before it deletes a file or a ledger entry; until then every file and entry
+  stays and the answer is not ok, so a retry can finish the job.
 - An uninstall with no schedule-owned ledger entries is inert: no manager call.
-- An update that fails to activate restores the previous files and, when the
-  previous schedule was loaded, loads it again; an identical owned schedule
-  that is already loaded is neither rewritten nor restarted.
+- An update that fails to activate restores the previous files and the
+  previous activation: the previous job loaded again on macOS, enablement and
+  activity restored separately on Linux. An identical owned schedule that is
+  already loaded is neither rewritten nor restarted.
+- The rendered environment carries the selected HOME and the supplied
+  XDG_CONFIG_HOME/XDG_STATE_HOME (validated absolute paths, the same roots
+  that scope the label) plus PATH, TMUX_TMPDIR and the UTF-8 locale — nothing
+  else from the ambient environment.
 - --platform selects a manager for mutation only on its native host or with
   an explicit --manager fixture; rendering (preview) is free.
 - A wrapper the profile installer owns is used as shared, never retagged and
@@ -53,6 +63,7 @@ HOURS = [3, 9, 15, 21]
 OWNER = "snapshots-schedule"
 HERE = Path(__file__).resolve().parent
 NATIVE = "darwin" if sys.platform == "darwin" else "linux"
+XDG_ROOTS = ("XDG_CONFIG_HOME", "XDG_STATE_HOME")
 
 
 class Conflict(Exception):
@@ -70,10 +81,20 @@ def account_home():
         return Path(os.path.expanduser("~")).resolve()
 
 
+def validated_path(name, value):
+    """A path fit to be baked into a job's environment: absolute, no control
+    characters. Anything else is refused rather than rendered."""
+    if value is None:
+        return None
+    if not os.path.isabs(value) or any(c in value for c in "\n\r\0"):
+        raise Conflict(f"{name} must be an absolute path without control characters to be baked into a schedule")
+    return value
+
+
 def load_manage(explicit=None):
     """The profile installer, imported for its ownership machinery: beside this
-    module in a source tree, the installed HOMI release's copy, or an explicit
-    path. Never a second installer, and never bytecode beside it."""
+    module in a source tree or payload, the installed HOMI release's copy, or
+    an explicit path. Never a second installer, and never bytecode beside it."""
     candidates = [Path(p) for p in [explicit, os.environ.get("HOMI_PROFILES_MANAGE")] if p]
     candidates.append(HERE.parents[2] / "manage.py")
     data = Path(os.environ.get("COMMUNICATE_DATA") or Path.home() / ".local/share/communicate")
@@ -92,8 +113,9 @@ def quote_unit(value):
 
 
 class Manager:
-    """The service manager, addressed only by our own label/unit, and asked
-    which file it loaded that from before anything is loaded or unloaded."""
+    """The service manager, addressed only by our own label/unit. Its answers
+    are three-valued: loaded, absent, or unknown — an error or an unreadable
+    answer is never mistaken for an absent job."""
 
     def __init__(self, platform, command=None):
         self.platform = platform
@@ -115,26 +137,42 @@ class Manager:
                                                    (result.stderr or result.stdout).strip()[:300]))
         return result
 
+    @staticmethod
+    def unknown(detail):
+        return {"loaded": None, "path": None, "enabled": None, "active": None, "detail": detail}
+
     def state(self, name):
-        """loaded (None when the manager cannot be asked), the file the job was
-        loaded from (None when unreported), and on Linux enablement and
-        activity separately."""
+        """loaded True/False/None(unknown), the file the job was loaded from
+        (None when unreported), and on Linux enablement and activity."""
         if not self.available():
-            return {"loaded": None, "path": None}
+            return self.unknown(f"{self.command} is not available")
         if self.platform == "darwin":
             result = self._run(["print", f"gui/{os.getuid()}/{name}"], tolerate=True)
-            if result is None or result.returncode != 0:
+            if result is None:
+                return self.unknown("launchctl could not be run")
+            if result.returncode == 0:
+                match = re.search(r"^\s*path = (.+?)\s*$", result.stdout, re.M)
+                return {"loaded": True, "path": match.group(1) if match else None}
+            text = ((result.stderr or "") + (result.stdout or "")).strip()
+            if result.returncode == 113 or "Could not find service" in text:
                 return {"loaded": False, "path": None}
-            match = re.search(r"^\s*path = (.+?)\s*$", result.stdout, re.M)
-            return {"loaded": True, "path": match.group(1) if match else None}
-        result = self._run(["--user", "show", "-p", "FragmentPath", "-p", "ActiveState", "-p", "UnitFileState", name],
-                           tolerate=True)
-        props = dict(line.split("=", 1) for line in (result.stdout if result else "").splitlines() if "=" in line)
+            return self.unknown(f"launchctl print exited {result.returncode}: {text[:200]}")
+        result = self._run(["--user", "show", "-p", "LoadState", "-p", "FragmentPath", "-p", "ActiveState",
+                            "-p", "UnitFileState", name], tolerate=True)
+        if result is None or result.returncode != 0:
+            text = ((result.stderr or "") + (result.stdout or "")).strip() if result else "systemctl could not be run"
+            return self.unknown(f"systemctl show failed: {text[:200]}")
+        props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if "LoadState" not in props:
+            return self.unknown("systemctl show answered without a LoadState")
+        if props["LoadState"] == "not-found" and not props.get("FragmentPath"):
+            return {"loaded": False, "path": None, "enabled": False, "active": False}
         enabled = props.get("UnitFileState", "") in ("enabled", "enabled-runtime")
-        active = props.get("ActiveState", "") in ("active", "activating")
+        active = props.get("ActiveState", "") in ("active", "activating", "reloading")
         return {"loaded": enabled or active, "path": props.get("FragmentPath") or None,
                 "enabled": enabled, "active": active}
 
+    # -- mutations, each one unit, each verified by the caller afterwards --
     def load(self, name, path):
         if self.platform == "darwin":
             self._run(["bootstrap", f"gui/{os.getuid()}", str(path)])
@@ -144,12 +182,23 @@ class Manager:
             self._run(["--user", "enable", "--now", name])
 
     def unload(self, name):
-        # Only ever our own label/unit, and only after state() said its file is ours.
+        # Tolerated here on purpose: the caller reads state() afterwards and
+        # treats anything but a confirmed unload as failure.
         if self.platform == "darwin":
             self._run(["bootout", f"gui/{os.getuid()}/{name}"], tolerate=True)
         else:
             self._run(["--user", "disable", "--now", name], tolerate=True)
             self._run(["--user", "daemon-reload"], tolerate=True)
+
+    def reload(self, tolerate=True):
+        if self.platform == "linux":
+            self._run(["--user", "daemon-reload"], tolerate=tolerate)
+
+    def set_linux(self, name, enabled, active):
+        """Enablement and activity restored separately, never collapsed into
+        `enable --now`."""
+        self._run(["--user", "enable" if enabled else "disable", name], tolerate=True)
+        self._run(["--user", "start" if active else "stop", name], tolerate=True)
 
 
 class Schedule:
@@ -162,6 +211,8 @@ class Schedule:
         self._runtime = Path(runtime).resolve() if runtime else None
         self.wrapper = self.home / ".local/bin/homi-snapshot"
         self.log_dir = self.home / "Library/Logs"
+        self.env_home = validated_path("HOME", str(self.home))
+        self.xdg = {name: validated_path(name, os.environ.get(name)) for name in XDG_ROOTS if os.environ.get(name)}
         self.scope, tag = self.compute_scope()
         self.label = BASE_LABEL if self.scope == "default" else f"{BASE_LABEL}.{tag}"
         self.unit = BASE_UNIT if self.scope == "default" else f"{BASE_UNIT}-{tag}"
@@ -170,8 +221,7 @@ class Schedule:
     def compute_scope(self):
         """"default" only for the actual account home with standard roots;
         otherwise a stable tag from the resolved home and roots."""
-        xdg_config = os.environ.get("XDG_CONFIG_HOME")
-        xdg_state = os.environ.get("XDG_STATE_HOME")
+        xdg_config, xdg_state = self.xdg.get("XDG_CONFIG_HOME"), self.xdg.get("XDG_STATE_HOME")
         standard = (self.home.resolve() == account_home()
                     and (not xdg_config or Path(xdg_config).resolve() == (self.home / ".config").resolve())
                     and (not xdg_state or Path(xdg_state).resolve() == (self.home / ".local/state").resolve()))
@@ -209,7 +259,7 @@ class Schedule:
     def unit_paths(self):
         if self.platform == "darwin":
             return {"job": self.home / "Library/LaunchAgents" / f"{self.label}.plist"}
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or self.home / ".config") / "systemd/user"
+        base = Path(self.xdg.get("XDG_CONFIG_HOME") or self.home / ".config") / "systemd/user"
         return {"service": base / f"{self.unit}.service", "timer": base / f"{self.unit}.timer"}
 
     @property
@@ -217,22 +267,26 @@ class Schedule:
         paths = self.unit_paths()
         return paths["job"] if self.platform == "darwin" else paths["timer"]
 
+    def environment(self):
+        """What the job runs with: the selected HOME and supplied XDG roots (the
+        roots that scoped the label, so the run snapshots the selected state),
+        a fixed PATH, the tmux socket dir, and the UTF-8 locale tss needs for
+        tab-separated tmux formats. Nothing else from the ambient environment."""
+        env = {"HOME": self.env_home}
+        env.update(self.xdg)
+        env.update({"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                    "TMUX_TMPDIR": "/tmp", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"})
+        return env
+
     def render(self):
         out = self.unit_paths()
         files = {self.wrapper: (self.wrapper_text(), 0o755)}
+        env = self.environment()
         if self.platform == "darwin":
             plist = {
                 "Label": self.label,
                 "ProgramArguments": [str(self.wrapper), "run"],
-                "EnvironmentVariables": {
-                    "HOME": str(self.home),
-                    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                    # The interactive tmux server's default socket dir, and the
-                    # UTF-8 locale tss needs for tab-separated tmux formats.
-                    "TMUX_TMPDIR": "/tmp",
-                    "LANG": "en_US.UTF-8",
-                    "LC_ALL": "en_US.UTF-8",
-                },
+                "EnvironmentVariables": env,
                 # Calendar firings are wall-clock anchored (no drift across
                 # sleeps and reloads); a missed one runs once on the next wake.
                 # A one-shot backup, not a daemon: no KeepAlive, no RunAtLoad.
@@ -243,10 +297,10 @@ class Schedule:
             }
             files[out["job"]] = (plistlib.dumps(plist, sort_keys=False).decode(), 0o644)
         else:
+            lines = "".join(f"Environment={quote_unit(k + '=' + v)}\n" for k, v in env.items())
             files[out["service"]] = (
                 "[Unit]\nDescription=HOMI workspace snapshot\n\n[Service]\nType=oneshot\n"
-                f"ExecStart={quote_unit(self.wrapper)} run\n"
-                "Environment=LANG=en_US.UTF-8\nEnvironment=LC_ALL=en_US.UTF-8\nEnvironment=TMUX_TMPDIR=/tmp\n", 0o644)
+                f"ExecStart={quote_unit(self.wrapper)} run\n" + lines, 0o644)
             hours = ",".join("%02d" % h for h in HOURS)
             files[out["timer"]] = (
                 "[Unit]\nDescription=HOMI workspace snapshot every 6 hours\n\n[Timer]\n"
@@ -292,6 +346,15 @@ class Schedule:
         state["ours"] = ours
         return state
 
+    def confirmed_unloaded(self, state):
+        """True only on a positive answer: absent on macOS; neither enabled nor
+        active on Linux. Unknown is never confirmation."""
+        if state["loaded"] is None:
+            return False
+        if self.platform == "darwin":
+            return state["loaded"] is False
+        return state.get("enabled") is False and state.get("active") is False
+
     def require_mutable(self):
         if self.platform != NATIVE and not self.manager.explicit:
             raise Conflict(f"--platform {self.platform} names a service manager that is not this host's ({NATIVE}); "
@@ -301,8 +364,8 @@ class Schedule:
 
     def refuse_foreign(self, state, verb):
         if state["loaded"] is None:
-            raise Conflict(f"{verb}: the service manager could not be asked which file {self.name} is loaded from; "
-                           "refusing to touch it")
+            raise Conflict(f"{verb}: the service manager could not say whether {self.name} is loaded "
+                           f"({state.get('detail', 'no answer')}); refusing to touch it")
         if state["loaded"] and not state["ours"]:
             raise Conflict(f"{verb}: {self.name} is loaded from {state['path'] or 'an unreported path'}, not this "
                            f"schedule's file {self.job_path}; refusing to touch it")
@@ -313,7 +376,7 @@ class Schedule:
 
     def describe(self):
         out = {"label": self.label, "scope": self.scope, "platform": self.platform, "hours": HOURS,
-               "job": str(self.job_path)}
+               "job": str(self.job_path), "environment": self.environment()}
         if self.platform == "linux":
             out["unit"] = self.unit
         return out
@@ -329,6 +392,24 @@ class Schedule:
         record["entries"] = entries
         record["updated_at"] = time.time()
         self.manage.atomic(self.profile.ledger, (json.dumps(record, indent=2) + "\n").encode())
+
+    def restore_activation(self, previous):
+        """After a failed activation, put the previous activation back exactly:
+        the previous job loaded again on macOS; on Linux enablement and
+        activity each restored to what they were. Returns whether the manager
+        now reports that state."""
+        try:
+            if self.platform == "darwin":
+                self.manager.load(self.name, self.job_path)
+                back = self.loaded_state()
+                return bool(back["loaded"] and back["ours"])
+            self.manager.reload()
+            self.manager.set_linux(self.name, bool(previous.get("enabled")), bool(previous.get("active")))
+            back = self.loaded_state()
+            return (back["enabled"] == bool(previous.get("enabled")) and back["active"] == bool(previous.get("active"))
+                    and (not back["loaded"] or back["ours"]))
+        except Exception:
+            return False
 
     def install(self):
         with self.profile.lock():
@@ -380,7 +461,7 @@ class Schedule:
             # The service manager, explicitly and only here: unload our own
             # previous job (verified ours above), load the new file, and check
             # the manager now reports our file. A failure puts the previous
-            # files back and, when a previous job was loaded, loads it again.
+            # files back and restores the previous activation exactly.
             try:
                 if previously_loaded:
                     self.manager.unload(self.name)
@@ -395,16 +476,12 @@ class Schedule:
                 restore_files()
                 self._write_ledger(record, entries_before)
                 if previously_loaded:
-                    try:
-                        self.manager.load(self.name, self.job_path)
-                        back = self.loaded_state()
-                        restored = bool(back["loaded"] and back["ours"])
-                    except Exception:
-                        restored = False
-                    note = ("previous files restored and the previous schedule loaded again" if restored
-                            else "previous files restored but the previous schedule could NOT be loaded again; "
+                    restored = self.restore_activation(state)
+                    note = ("previous files restored and the previous activation restored" if restored
+                            else "previous files restored but the previous activation could NOT be restored; "
                                  "run install again or check the service manager")
                 else:
+                    self.manager.reload()
                     note = "nothing left installed"
                 raise Conflict(f"activation failed: {error}; {note}")
         return {"ok": True, "action": "updated" if previously_loaded else "installed", **self.describe(),
@@ -435,8 +512,17 @@ class Schedule:
                     actions.append((path, now))
             if conflicts:
                 return {"ok": False, "conflicts": conflicts, "changed": 0, "unloaded": False}
+            # Unload, then CONFIRM before a single file or entry goes: a job the
+            # manager still reports loaded keeps everything, and the answer is
+            # not ok, so a later retry can finish the job.
             if state["loaded"] and state["ours"]:
                 self.manager.unload(self.name)
+                after = self.loaded_state()
+                if not self.confirmed_unloaded(after):
+                    return {"ok": False, "unloaded": False, "changed": 0, **self.describe(), "state": after,
+                            "error": f"{self.name} is still loaded after the unload was requested "
+                                     f"({after.get('detail') or 'the manager still reports it'}); every file and "
+                                     "ledger entry is kept — retry once the manager can unload it"}
             removed = []
             for path, before in actions:
                 if before["kind"] != "absent":
@@ -446,10 +532,11 @@ class Schedule:
                 entries.pop(str(path), None)
                 removed.append(str(path))
             self._write_ledger(record, entries)
+            self.manager.reload()          # Linux: forget the removed units
             shared = [str(self.wrapper)] if str(self.wrapper) in entries else []
-            after = self.loaded_state()
-        return {"ok": True, **self.describe(), "removed": removed, "shared_kept": shared,
-                "unloaded": not (after["loaded"] and after["ours"]),
+            final = self.loaded_state()
+            unloaded = self.confirmed_unloaded(final)
+        return {"ok": unloaded, **self.describe(), "removed": removed, "shared_kept": shared, "unloaded": unloaded,
                 "preserved": "local snapshots, the log, the archive, private configuration, a profile-owned wrapper"}
 
     def status(self, brief=False):
@@ -470,6 +557,8 @@ class Schedule:
             return f"{self.name} {word}"
         out = {"read_only": True, **self.describe(), "loaded": state["loaded"], "loaded_path": state.get("path"),
                "ours": state["ours"], "schedule": ", ".join("%02d:00" % h for h in HOURS), "files": files}
+        if state.get("detail"):
+            out["detail"] = state["detail"]
         if self.platform == "linux":
             out["enabled"], out["active"] = state.get("enabled"), state.get("active")
         return out

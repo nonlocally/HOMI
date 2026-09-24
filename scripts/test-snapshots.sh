@@ -18,7 +18,8 @@ T="$(mktemp -d /tmp/homi-snap.XXXXXX)"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s\n' "$*"; }
-cleanup() { rm -rf "$T"; }
+# Only the main shell cleans up: a subshell that dies (set -u) must not run this trap and take the fixtures with it.
+cleanup() { [ "$BASHPID" = "$$" ] || return 0; rm -rf "$T"; }
 trap cleanup EXIT
 
 FAKEHOME="$T/home with spaces"; mkdir -p "$FAKEHOME"
@@ -46,10 +47,49 @@ case "\$1" in
     if [ -e "$T/bootstrap-fails-once" ]; then rm -f "$T/bootstrap-fails-once"; exit 5; fi
     printf '%s\n' "\$p" > "\$D/\$l" ;;
   bootout)
-    l="\${2##*/}"; rm -f "\$D/\$l" ;;
+    l="\${2##*/}"; [ -e "$T/bootout-fails" ] && { echo "Boot-out failed: 5: Input/output error" >&2; exit 5; }
+    rm -f "\$D/\$l" ;;
   print)
-    l="\${2##*/}"; [ -e "\$D/\$l" ] || exit 113
+    [ -e "$T/launchctl-broken" ] && { echo "Could not find domain for gui" >&2; exit 125; }
+    l="\${2##*/}"; [ -e "\$D/\$l" ] || { echo "Could not find service" >&2; exit 113; }
     printf '%s = {\n\tpath = %s\n\tstate = waiting\n}\n' "\$l" "\$(cat "\$D/\$l")" ;;
+esac
+exit 0
+EOF
+SYSTEMD="$T/systemd"; mkdir -p "$SYSTEMD"     # fake user manager: <unit> holds "enabled=X active=Y", <unit>.path its file
+cat > "$FAKEBIN/systemctl" <<EOF
+#!/usr/bin/env bash
+D="$SYSTEMD"
+printf 'systemctl %s\n' "\$*" >> "$LOGF"
+[ -e "$T/systemd-broken" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
+[ "\$1" = --user ] && shift
+cmd="\$1"; shift
+now=0; [ "\${1:-}" = --now ] && { now=1; shift; }
+unit="\${1:-}"
+ufile() { printf '%s/systemd/user/%s' "\${XDG_CONFIG_HOME:-\$HOME/.config}" "\$1"; }
+flag() { sed -n "s/.*\$2=\([01]\).*/\1/p" "\$D/\$1" 2>/dev/null; }
+setflags() { printf 'enabled=%s active=%s\n' "\$2" "\$3" > "\$D/\$1"; }
+case "\$cmd" in
+  daemon-reload)
+    for s in "\$D"/*.path; do [ -e "\$s" ] || continue; u="\$(basename "\$s" .path)"
+      [ -e "\$(cat "\$s")" ] || rm -f "\$s" "\$D/\$u"; done ;;
+  show)
+    while [ "\${1:-}" = -p ]; do shift 2; done; unit="\${1:-}"
+    if [ -e "\$D/\$unit" ]; then
+      e="\$(flag "\$unit" enabled)"; a="\$(flag "\$unit" active)"
+      printf 'LoadState=loaded\nFragmentPath=%s\nActiveState=%s\nUnitFileState=%s\n' "\$(cat "\$D/\$unit.path")" "\$([ "\$a" = 1 ] && echo active || echo inactive)" "\$([ "\$e" = 1 ] && echo enabled || echo disabled)"
+    else printf 'LoadState=not-found\nFragmentPath=\nActiveState=inactive\nUnitFileState=\n'; fi ;;
+  enable)
+    if [ -e "$T/systemd-enable-fails-once" ]; then rm -f "$T/systemd-enable-fails-once"; echo "Failed to enable unit" >&2; exit 1; fi
+    [ -e "\$(ufile "\$unit")" ] || { echo "Failed to enable unit: Unit file \$unit does not exist." >&2; exit 1; }
+    printf '%s\n' "\$(ufile "\$unit")" > "\$D/\$unit.path"
+    a="\$(flag "\$unit" active)"; [ "\$now" = 1 ] && a=1; setflags "\$unit" 1 "\${a:-0}" ;;
+  disable)
+    [ -e "$T/systemd-disable-fails" ] && { echo "Failed to disable unit" >&2; exit 1; }
+    a="\$(flag "\$unit" active)"; [ "\$now" = 1 ] && a=0; [ -e "\$D/\$unit" ] && setflags "\$unit" 0 "\${a:-0}" ;;
+  start) [ -e "\$D/\$unit" ] || { printf '%s\n' "\$(ufile "\$unit")" > "\$D/\$unit.path"; setflags "\$unit" 0 0; }
+         setflags "\$unit" "\$(flag "\$unit" enabled)" 1 ;;
+  stop)  [ -e "\$D/\$unit" ] && setflags "\$unit" "\$(flag "\$unit" enabled)" 0 ;;
 esac
 exit 0
 EOF
@@ -265,8 +305,8 @@ printf '%s' "$name" | grep -Eq '^snap-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}$' && o
 echo "== the explicit owned schedule: one GLOBAL fake launchd shared by every home, named as an explicit fixture"
 rm -f "$LOGF"
 ACCOUNT_HOME="$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
-HOME_A="$T/home-a"; HOME_B="$T/home-b"; HOME_C="$T/home-c"; HOME_E="$T/home-e"; HOME_F="$T/home-f"; HOME_G="$T/home-g"
-mkdir -p "$HOME_A" "$HOME_B" "$HOME_C" "$HOME_E" "$HOME_F" "$HOME_G"
+HOME_A="$T/home-a"; HOME_B="$T/home-b"; HOME_C="$T/home-c"; HOME_E="$T/home-e"; HOME_F="$T/home-f"; HOME_G="$T/home-g"; HOME_H="$T/home-h"; HOME_L="$T/home-l"
+mkdir -p "$HOME_A" "$HOME_B" "$HOME_C" "$HOME_E" "$HOME_F" "$HOME_G" "$HOME_H" "$HOME_L"
 sched() { # <home> <verb> [args...]
   local h="$1"; shift
   python3 "$SCHED" "$@" --home "$h" --runtime "$HERE/profiles/runtime" --platform darwin --manager "$FAKEBIN/launchctl" 2>&1
@@ -378,6 +418,79 @@ out="$(python3 "$SCHED" install --home "$HOME_G" --runtime "$HERE/profiles/runti
 [ $rc -ne 0 ] && printf '%s' "$out" | grep -q -- '--manager' && ok "a non-native --platform cannot mutate without an explicit --manager fixture" || bad "non-native mutation (rc=$rc out: $out)"
 out="$(python3 "$SCHED" preview --home "$HOME_G" --runtime "$HERE/profiles/runtime" --platform linux 2>&1)"
 printf '%s' "$out" | grep -q 'OnCalendar=\*-\*-\* 03,09,15,21:00:00' && printf '%s' "$out" | grep -q 'Persistent=true' && ok "…while rendering the Linux persistent 03/09/15/21 timer is fine" || bad "linux timer rendering (out: $out)"
+
+echo "== the rendered environment carries the selected HOME and supplied XDG roots, nothing else ambient"
+out="$(XDG_STATE_HOME="$T/xdg-a" SECRET_TOKEN=hunter2 sched "$HOME_A" preview)"
+printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin); plist = next(f["content"] for f in d["files"] if f["path"].endswith(".plist"))
+assert "<key>XDG_STATE_HOME</key>" in plist and sys.argv[1] in plist, "XDG_STATE_HOME not baked"
+assert "<key>HOME</key>" in plist and sys.argv[2] in plist, "HOME not baked"
+assert "SECRET_TOKEN" not in plist and "hunter2" not in plist, "ambient env leaked"
+assert d["label"] != sys.argv[3], "XDG state root did not scope the label"' "$T/xdg-a" "$HOME_A" "$LA" 2>/dev/null && ok "macOS: plist bakes HOME and a supplied XDG_STATE_HOME, no ambient variable, and scopes the label" || bad "plist env rendering (out: $out)"
+out="$(XDG_CONFIG_HOME="$T/xdg-cfg" HOME="$HOME_L" python3 "$SCHED" preview --home "$HOME_L" --runtime "$HERE/profiles/runtime" --platform linux 2>&1)"
+printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin); svc = next(f["content"] for f in d["files"] if f["path"].endswith(".service"))
+assert "Environment=\"HOME=%s\"" % sys.argv[1] in svc, svc
+assert "Environment=\"XDG_CONFIG_HOME=%s\"" % sys.argv[2] in svc, svc
+assert all(f["path"].startswith(sys.argv[2] + "/systemd/user/") for f in d["files"] if f["path"].endswith((".service", ".timer"))), "units not under XDG_CONFIG_HOME"' "$HOME_L" "$T/xdg-cfg" 2>/dev/null && ok "Linux: the service bakes a quoted HOME and XDG_CONFIG_HOME, and the units live under that root" || bad "service env rendering (out: $out)"
+out="$(XDG_STATE_HOME="relative/state" sched "$HOME_A" preview)"; rc=$?
+[ $rc -ne 0 ] && printf '%s' "$out" | grep -q "absolute" && ok "a relative XDG root is refused rather than baked" || bad "relative XDG accepted (rc=$rc out: $out)"
+out="$(HOME="$HOME_A" bash "$SNAP" schedule preview --runtime "$HERE/profiles/runtime" --platform darwin 2>&1)"
+printf '%s' "$out" | jq_ "assert d['label'] == '$LA'" 2>/dev/null && ok "the homi-snapshot schedule dispatch keeps the invocation HOME's scope" || bad "dispatch scope (out: $out)"
+
+echo "== an unload the manager refuses keeps every file and entry, and a retry finishes the job"
+out="$(sched "$HOME_H" install)"; LH="$(label_of "$HOME_H")"; PH="$(plist_of "$HOME_H")"; WH="$HOME_H/.local/bin/homi-snapshot"
+[ -e "$LAUNCHD/$LH" ] && ok "H installed and loaded" || bad "install H (out: $out)"
+touch "$T/bootout-fails"; n="$(calls)"
+out="$(sched "$HOME_H" uninstall)"; rc=$?
+[ $rc -ne 0 ] && printf '%s' "$out" | jq_ 'assert d["ok"] is False and d["unloaded"] is False' 2>/dev/null && ok "a refused bootout makes uninstall answer ok:false, unloaded:false" || bad "refused bootout result (rc=$rc out: $out)"
+[ -f "$PH" ] && [ -x "$WH" ] && ok "…every file is still there" || bad "files removed despite the loaded job"
+python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries']; assert e[sys.argv[2]]['owner']=='snapshots-schedule' and e[sys.argv[3]]['owner']=='snapshots-schedule'" "$HOME_H/.local/state/homi/profiles/ownership.json" "$PH" "$WH" 2>/dev/null && ok "…and the ledger still owns them" || bad "ledger entries dropped despite the loaded job"
+[ -e "$LAUNCHD/$LH" ] && ok "…while the job is still loaded (as the manager says)" || bad "manager state inconsistent"
+rm -f "$T/bootout-fails"
+out="$(sched "$HOME_H" uninstall)"; rc=$?
+[ $rc -eq 0 ] && [ ! -e "$LAUNCHD/$LH" ] && [ ! -e "$PH" ] && [ ! -e "$WH" ] && ok "the retry unloads and removes both files" || bad "retry (rc=$rc out: $out)"
+
+echo "== a service manager that errors is unknown, never absent, before anything destructive"
+out="$(sched "$HOME_A" install)"; [ -e "$LAUNCHD/$LA" ] && ok "A reinstalled for the ambiguity cases" || bad "reinstall A (out: $out)"
+touch "$T/launchctl-broken"; n="$(calls)"
+out="$(sched "$HOME_A" status)"
+printf '%s' "$out" | jq_ 'assert d["loaded"] is None' 2>/dev/null && ok "status reports loaded: null when the manager errors" || bad "broken status (out: $out)"
+out="$(sched "$HOME_A" uninstall)"; rc=$?
+[ $rc -ne 0 ] && [ -f "$PA" ] && ! grep -q 'bootout' <(tail -n +$((n+1)) "$LOGF") && ok "uninstall refuses on an unknown manager state: no bootout, files kept" || bad "broken uninstall (rc=$rc out: $out)"
+out="$(python3 "$SCHED" install --home "$HOME_A" --runtime "$T/runtime2" --platform darwin --manager "$FAKEBIN/launchctl" 2>&1)"; rc=$?
+[ $rc -ne 0 ] && ! grep -q 'bootout\|bootstrap' <(tail -n +$((n+1)) "$LOGF") && ok "an update refuses too" || bad "broken update (rc=$rc out: $out)"
+rm -f "$T/launchctl-broken"
+out="$(sched "$HOME_A" uninstall)"; rc=$?
+[ $rc -eq 0 ] && [ ! -e "$LAUNCHD/$LA" ] && ok "A uninstalls once the manager answers again" || bad "uninstall A after recovery (rc=$rc out: $out)"
+
+echo "== Linux: a failed reactivation restores enablement and activity separately (fake systemd fixture)"
+lsched() { HOME="$HOME_L" python3 "$SCHED" "$@" --home "$HOME_L" --runtime "$HERE/profiles/runtime" --platform linux --manager "$FAKEBIN/systemctl" 2>&1; }
+UL="$(lsched preview | jq_ 'print(d["unit"])').timer"
+lstate() { cat "$SYSTEMD/$UL" 2>/dev/null | tr '\n' ' '; }
+out="$(lsched install)"; rc=$?
+[ $rc -eq 0 ] && [ "$(lstate)" = "enabled=1 active=1 " ] && ok "Linux install enables and starts the timer" || bad "linux install (rc=$rc state: $(lstate) out: $out)"
+TL="$HOME_L/.config/systemd/user/$UL"; SL="${TL%.timer}.service"; v1="$(cat "$HOME_L/.local/bin/homi-snapshot")"
+grep -q "Environment=\"HOME=$HOME_L\"" "$SL" && ok "…the installed service carries the selected HOME" || bad "service HOME missing: $(grep Environment "$SL" | tr '\n' ' ')"
+printf 'enabled=1 active=0\n' > "$SYSTEMD/$UL"; touch "$T/systemd-enable-fails-once"
+out="$(HOME="$HOME_L" python3 "$SCHED" install --home "$HOME_L" --runtime "$T/runtime2" --platform linux --manager "$FAKEBIN/systemctl" 2>&1)"; rc=$?
+[ $rc -ne 0 ] && [ "$(cat "$HOME_L/.local/bin/homi-snapshot")" = "$v1" ] && ok "a failed Linux update restores the previous files" || bad "linux failed update (rc=$rc out: $out)"
+[ "$(lstate)" = "enabled=1 active=0 " ] && ok "…and an enabled-but-inactive timer is enabled and inactive again, not started" || bad "enabled-inactive collapsed to: $(lstate)"
+printf 'enabled=0 active=1\n' > "$SYSTEMD/$UL"; touch "$T/systemd-enable-fails-once"
+out="$(HOME="$HOME_L" python3 "$SCHED" install --home "$HOME_L" --runtime "$T/runtime2" --platform linux --manager "$FAKEBIN/systemctl" 2>&1)"; rc=$?
+[ $rc -ne 0 ] && [ "$(lstate)" = "enabled=0 active=1 " ] && ok "…and a disabled-but-active timer is disabled and active again, not enabled" || bad "disabled-active collapsed to: $(lstate) (rc=$rc out: $out)"
+printf 'enabled=1 active=1\n' > "$SYSTEMD/$UL"; touch "$T/systemd-disable-fails"
+out="$(lsched uninstall)"; rc=$?
+[ $rc -ne 0 ] && [ -f "$TL" ] && [ -f "$SL" ] && [ "$(lstate)" = "enabled=1 active=1 " ] && ok "a refused disable keeps the units and the timer's state" || bad "linux refused disable (rc=$rc out: $out)"
+rm -f "$T/systemd-disable-fails"
+out="$(lsched uninstall)"; rc=$?
+[ $rc -eq 0 ] && [ ! -f "$TL" ] && [ ! -f "$SL" ] && [ ! -e "$SYSTEMD/$UL" ] && ok "the retry disables, stops and removes both units" || bad "linux retry (rc=$rc out: $out)"
+touch "$T/systemd-broken"
+out="$(lsched status)"
+printf '%s' "$out" | jq_ 'assert d["loaded"] is None' 2>/dev/null && ok "a Linux manager that cannot be reached reads as unknown" || bad "linux broken status (out: $out)"
+rm -f "$T/systemd-broken"
 
 echo
 echo "pass=$pass fail=$fail"

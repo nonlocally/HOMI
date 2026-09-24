@@ -112,12 +112,28 @@ Ownership boundaries:
   or qualification installation can never reach the account's real job.
 - Before anything is loaded or unloaded, the service manager is asked which
   file it loaded the label from. A job of our label loaded from another file
-  is a collision: install, update and uninstall refuse and change nothing.
+  is a collision: install, update and uninstall refuse and change nothing. A
+  manager that cannot be run, or answers with an error or an unreadable
+  reply, is *unknown*, never "absent": every mutation refuses on unknown.
+- Uninstall confirms the job is really gone (macOS: absent; Linux: disabled
+  and inactive) after asking the manager to unload it and *before* it
+  deletes a single file or ledger entry. Until that confirmation every file
+  and entry stays and the answer is not ok, so a retry can finish the job.
 - An uninstall that finds no schedule-owned ledger entries is inert and never
   calls the service manager.
-- An update that fails to activate restores the previous files and loads the
-  previous schedule again when one was loaded; an identical owned schedule
-  that is already loaded is neither rewritten nor restarted.
+- An update that fails to activate restores the previous files and the
+  previous activation: on macOS the previous job is loaded again; on Linux
+  enablement and activity are restored separately to what they were (an
+  enabled-but-inactive or disabled-but-active timer stays that way). An
+  identical owned schedule that is already loaded is neither rewritten nor
+  restarted.
+- The job's environment is rendered, not inherited: the selected `HOME`, the
+  supplied `XDG_CONFIG_HOME` and `XDG_STATE_HOME` (the same roots that scope
+  the label, validated as absolute paths, so the run snapshots the selected
+  state), a fixed `PATH`, `TMUX_TMPDIR`, and the UTF-8 locale. Nothing else
+  from the ambient environment is baked in. The `homi-snapshot schedule`
+  dispatch passes the invocation `HOME` explicitly, so an isolated wrapper
+  stays scoped.
 - `--platform` renders either platform for `preview`, but `install` and
   `uninstall` only drive the host's own manager unless an explicit
   `--manager PATH` fixture is given (that is how the tests run a fake
@@ -159,7 +175,11 @@ across two isolated homes: scoped and default labels, install, identical-repeat
 without restart, uninstall of one home leaving the other loaded, an inert
 uninstall with nothing owned, a foreign loaded path refused, a failed
 reactivation restoring files and the previous job, a shared profile-owned
-wrapper retained, edited-file and unowned-file refusals, and a non-native
-platform refused for mutation. It never touches real snapshots, a real volume,
-a tmux server, or a service manager. Real launchd firing, a real external
-volume, and Linux timers remain environment-specific checks.
+wrapper retained, edited-file and unowned-file refusals, a non-native
+platform refused for mutation, a refused unload that keeps every file and
+entry until a retry succeeds, a manager that errors reading as unknown, the
+rendered environment, and a fake systemd fixture whose enabled/active flags
+are independent (a failed Linux update restores each separately; a refused
+disable keeps the units). It never touches real snapshots, a real volume, a
+tmux server, or a service manager. Real launchd firing, a real external
+volume, and real systemd remain environment-specific checks.
