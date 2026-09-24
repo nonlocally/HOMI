@@ -1,0 +1,41 @@
+# CLI and delivery semantics
+
+`homi` is the product entry point; existing `communicate` operations retain their
+meaning. Resolve names within the selected address space. Failure must not create
+a substitute agent or target another route silently.
+
+| Operation | Meaning |
+|---|---|
+| `homi claim NAME` | Durable identity/mailbox; no model launch implied. |
+| `homi spawn NAME --cli claude --cwd DIR` | Start and bind an execution. |
+| `homi send NAME MESSAGE` | Durable mail. |
+| `homi inbox NAME` | Stored JSONL inbox; reading does not imply acknowledgement. |
+| `homi ask NAME QUESTION --timeout SEC` | Existing durable request/reply path. |
+| `homi seat ls` | Execution endpoints for the configured seat driver. |
+| `homi bus register` | Exact current session on the configured broker. |
+| `homi bus agents --json` | Registered sessions on that broker. |
+| `homi bus send ID --bus NAME -- MESSAGE` | Bus delivery with membership checks. |
+| `homi native agents` | Existing native socket/SSH routing table. |
+| `homi native route NAME MESSAGE` | Native session route. |
+| `homi profile preview --terminal --mesh` | Preview optional configuration. |
+
+Run `homi start` for an unmanaged daemon or `homi setup --service` for persistence.
+A supervisor may restart a managed daemon after `homi stop`; use service uninstall
+to remove persistence. `homi daemon install|uninstall` selects the compatible daemon
+lifecycle. `homi uninstall` is package lifecycle. Ordinary uninstall preserves saved
+identities, mail, histories and credentials.
+
+## Receipts
+
+- **Stored:** a mailbox or broker accepted the message durably.
+- **Submitted:** a provider socket, queue or terminal accepted input; retain any
+  uncertainty about consumption.
+- **Replied:** a response correlated to the request arrived.
+
+Not every transport implements every level. Legacy weak reply fallbacks are not
+strong correlation. Codex queue success does not establish wake or consumption by
+the exact session. Screen capture is execution observation, not an agent reply.
+
+Native filesystem/SSH trust, broker membership, and remote seat control are separate
+capabilities. A bus invitation does not authorize arbitrary shell control. A pane
+is not a container; select isolation explicitly when needed.

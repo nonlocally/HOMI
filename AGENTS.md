@@ -1,77 +1,54 @@
-# communicate — repository briefing
+# HOMI — repository briefing
 
-An **agent router**: every AI coding agent gets an identity (a name) and an
-address (a unix socket); messages route between them across machines over
-Tailscale + SSH. Claude Code and Codex only, on purpose. `docs/MECHANISM.md`
-holds the reverse-engineered wire protocol; `README.md` the user story.
+HOMI continues Communicate: native Claude/Codex session routing, explicit buses,
+and durable HOMI identities/mailboxes are packaged as one product. Reuse the
+existing implementations. Do not invent a transport or migrate every identity
+merely to unify naming.
 
-## The three planes
+## Boundaries
 
-1. **communicate** (bash + python, `bin/` + `lib/*.sh` + `lib/cc_peer.py`) —
-   rendezvous routing: sidecars, sockets, ssh bridges, codex lanes, wake
-   triggers. Standalone; distributed as `@aadarwal/communicate`
-   (`packages/communicate/` + `plugins/communicate/`).
-   Explicit buses add `lib/bus.py`, `lib/bus_broker.py`, and `lib/bus_ui.html`:
-   opt-in session registration, scoped membership, an HTTPS gateway, and dashboard.
-2. **homi** (`lib/homi*.py`, `lib/homi.sh`, `packages/homi/`) — the durable
-   plane: identities that outlive processes, mailboxes, store→wake, device
-   links, seats, federation, move. NOT part of the communicate distribution;
-   unification is a later goal.
-3. **Distribution** (`plugins/communicate/`, `packages/communicate/`,
-   `.agents/`) — the dual-ecosystem plugin (Claude Code + Codex) and the npx
-   installer. One payload, sibling manifests. Repo-havers register the checkout
-   directly with `communicate setup-repo` (git pull, then setup-repo refreshes caches); the npm
-   package's `setup` is the no-repo path.
+- `bin/homi`: public entry point. Durable operations by default; `bus` and `native`
+  explicitly select their address spaces; `profile` is optional.
+- `bin/communicate`, `lib/*.sh`, `lib/cc_peer.py`: compatible native routing.
+- `lib/bus.py`, `lib/bus_broker.py`, `lib/bus_ui.html`, `packages/bus-graph`:
+  exact-session registration, membership, broker, graph and human inbox.
+- `lib/homi*.py`, `lib/homi.sh`: persistent identity, mail, seats and remote links.
+  Message permission and seat-control permission remain separate.
+- `packages/communicate`: combined CLI/MCP distribution and installation.
+  `packages/homi` is the legacy entry; compatibility package names remain.
+- `plugins/communicate`, `.agents`: compatible Claude/Codex plugin identities.
+- `profiles`: optional terminal/mesh defaults, helpers and owned configuration.
 
-## Operating on the bus (for any agent working here)
+Browser, phone, research and application workspaces are outside the release.
+Preserve the bus graph/dashboard/inbox: those are communication interfaces.
 
-- **Register explicitly:** `communicate bus register` attaches this current
-  session to general; `--bus photonics` joins only photonics. Verify its exact
-  registration ID with `bus agents --bus photonics --json`. Never use a newest
-  session guess or headless `codex peer` as a substitute for self.
-- **Explicit-bus interface:** `communicate bus dashboard --open` shows permitted
-  buses/agents. `bus send ID --bus NAME -- TEXT` enforces shared membership;
-  `bus receipt ID` distinguishes persistence, endpoint delivery and queueing.
-  Invite/connect/revoke and the network boundary are documented in `docs/BUSES.md`.
-  Native `agents`/`route` below remain a separate filesystem/SSH trust path.
+## Agent operations
 
-- **See who's here:** `communicate agents` (or the native ListAgents inside
-  Claude Code). `communicate whereis <name>` resolves one name.
-- **Talk:** `communicate route <name> "<msg>"`; from inside Claude Code prefer
-  the native SendMessage tool for Claude→Claude (it attests your permission
-  mode, so the receiver's inbound gate holds less). Reply to the `from` socket
-  of any cross-session message you receive.
-- **Need the answer?** `communicate ask <name> "<q>"` — blocks for the reply;
-  its in-band `[reply-to …]` block teaches the receiver how to answer (works on
-  Claude sessions and local Codex sessions by thread name). If a message YOU
-  receive ends with `[reply-to …]`, answer exactly as it instructs.
-- **Codex lanes:** existing session → `communicate codex queue <dev> <name>
-  "<msg>"` (async; reply stays in that session; Codex ≥ 0.151); fresh headless
-  answer → `communicate codex ask <dev> "<q>"` (sync, thread continuity);
-  peer in ListAgents → `communicate codex peer <dev> [name]`.
-- **Rename:** your `/rename` name IS your bus name (the sidecar mirrors it).
-  Joining the bus = numeric-filename sidecar + live pid + answering socket +
-  newline-JSON frames — see
-  `plugins/communicate/skills/communicate/references/wire-protocol.md`.
-- **Other devices:** `communicate link <dev>` to check substrate;
-  `communicate claude bridge <dev> [sel]` (from inside a Claude session) to
-  make a remote session a native peer; `communicate down` tears down
-  everything communicate started.
-- **PATH fallback** (harnesses that don't auto-PATH plugin bins):
-  `~/.local/share/communicate/current/vendor/bin/communicate`, or the repo's
-  `bin/communicate`.
+Inspect `homi bus status --no-start --json` before registration. Use the configured
+hub; local/self-hosted and invited remote operation are distinct choices. Register
+this exact session, never a newest-transcript guess or a new headless process
+presented as self. Preserve supplied reply identities and correlation.
 
-## Developing here
+`homi native agents`, `homi agents`, and `homi bus agents --json` expose their
+respective native, durable and broker rosters. Do not silently mix their addresses.
+Use files/stdin for awkward messages rather than interpolating shell syntax.
+Queue acceptance, runtime submission and a correlated reply are different results.
 
-- Tests are `scripts/test-*.sh` — deterministic, no network unless stated;
-  `scripts/test-communicate-dist.sh` covers the distribution end to end.
-- Package work: `npm --prefix packages/communicate run vendor` rebuilds the
-  payload (the vendor script is the allowlist — it throws if anything
-  homi-flavored would land); `npm --prefix packages/communicate test` runs the
-  MCP + setup smokes.
-- Style: bash is shellcheck-clean, `die()` on misuse, never interpolate user
-  text into a shell parse (NUL-delimited payloads + python argv adapters);
-  python is stdlib-only. No secrets in the repo — `.webui_secret_key`-style
-  leaks were purged once already.
-- Installer discipline: `~/.claude/settings.json` is merge-not-clobber with a
-  backup; `~/.codex/config.toml` is never hand-edited (use the codex CLI).
+## Development discipline
+
+Runtime state and credentials stay outside source and artifacts. Preserve state,
+command and service identifiers unless a tested migration changes them. Installers
+merge owned settings, retain backups, and remove only objects they still own.
+Ordinary uninstall preserves identity, mail and user data.
+
+Use isolated homes, state, sockets, ports and tmux servers in tests. Never run live
+launchd/systemd mutation suites as ordinary unit tests. Missing prerequisites are
+unqualified coverage, not successful qualification. Start with affected existing
+suites and changed-boundary tests, then test CLI/MCP/install from the packed artifact.
+
+`scripts/build-release.py` produces the locked runtime archive. Fresh-client plugin
+discovery and absence of source-checkout fallback require runtime acceptance;
+manifest lint alone is insufficient. See `docs/RELEASING.md`.
+
+Before publication, audit retained Git history as well as source and artifacts.
+Do not expose personal deployment details through universal instructions.
