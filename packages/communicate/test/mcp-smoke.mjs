@@ -38,10 +38,10 @@ const entry = process.env.COMM_MCP_TEST_ENTRY || path.join(pkgDir, "src", "cli.m
 const descriptor = process.env.COMM_MCP_TEST_DESCRIPTOR
   ? JSON.parse(readFileSync(process.env.COMM_MCP_TEST_DESCRIPTOR)).mcpServers.communicate : null;
 // Real client hosts filter their MCP environment. Only the descriptor may carry
-// installation paths; retain PATH for the fake providers and an isolated port.
+// installation paths and its isolated port; retain PATH for fake providers.
 const child = spawn(descriptor?.command || process.env.COMM_MCP_TEST_COMMAND || "node",
   descriptor?.args || [entry, "serve"], { env: descriptor
-    ? { HOME: taskHome, PATH: env.PATH, COMM_BUS_PORT: "0", ...descriptor.env } : env,
+    ? { HOME: taskHome, PATH: env.PATH, ...descriptor.env } : env,
     stdio: ["pipe", "pipe", "pipe"] });
 let buf = "", stderr = ""; const pending = new Map();
 child.stderr.on("data", (d) => { stderr += d; });

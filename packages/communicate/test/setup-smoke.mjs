@@ -34,7 +34,7 @@ writeFileSync(sp, JSON.stringify({ sentinel: "keep-me", enabledPlugins: { "exist
 const env = { ...process.env, HOME: fakeHome, CLAUDE_CONFIG_DIR: path.join(fakeHome, ".claude"),
   CLAUDE_TEST_VERSION: pluginVersion, COMMUNICATE_DATA: data, COMM_STATE: path.join(fakeHome, "state"),
   CODEX_HOME: path.join(fakeHome, ".codex"), HOMI_SOCK_DIR: path.join(fakeHome, "sockets"),
-  HOMI_SESSIONS_DIR: path.join(fakeHome, "sessions"),
+  HOMI_SESSIONS_DIR: path.join(fakeHome, "sessions"), XDG_RUNTIME_DIR: path.join(fakeHome, "runtime"), COMM_BUS_PORT: "0",
   PATH: path.join(fakeHome, "bin") + path.delimiter + process.env.PATH };
 for (const key of ["CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HOMI_SOCK", "COMMUNICATE_HOME"]) delete env[key];
 const runCli = (...args) => spawnSync("node", [cli, ...args], { encoding: "utf8", env });
@@ -56,6 +56,8 @@ if (s.sentinel !== "keep-me" || !s.enabledPlugins["existing@mkt"] || !s.permissi
 if (s.extraKnownMarketplaces?.communicate?.source?.source !== "directory") die("marketplace key wrong: " + JSON.stringify(s.extraKnownMarketplaces));
 const marketPath = s.extraKnownMarketplaces.communicate.source.path;
 const ledger = JSON.parse(readFileSync(path.join(data,"install.json"),"utf8"));
+if (ledger.integration.environment.COMM_BUS_PORT !== "0" || ledger.integration.environment.XDG_RUNTIME_DIR !== env.XDG_RUNTIME_DIR)
+  die("projection omitted explicit port/runtime isolation");
 if (marketPath !== path.join(ledger.integration.root,"plugins")) die("marketplace path wrong: " + marketPath);
 const installedVersion = JSON.parse(readFileSync(path.join(marketPath,"communicate/.claude-plugin/plugin.json"))).version;
 if (s.enabledPlugins["communicate@communicate"] !== true) die("plugin not enabled");

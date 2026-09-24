@@ -13,7 +13,12 @@ function runtimeEnvironment() {
   const env = { HOME: absolute(home()), COMMUNICATE_DATA: absolute(dataRoot()), COMM_STATE: absolute(stateRoot()),
     CLAUDE_CONFIG_DIR: absolute(process.env.CLAUDE_CONFIG_DIR || path.join(home(), '.claude')),
     CODEX_HOME: absolute(process.env.CODEX_HOME || path.join(home(), '.codex')) };
-  for (const key of ['HOMI_SOCK_DIR', 'HOMI_SESSIONS_DIR']) if (process.env[key]) env[key] = absolute(process.env[key]);
+  for (const key of ['HOMI_SOCK_DIR', 'HOMI_SESSIONS_DIR', 'XDG_RUNTIME_DIR']) if (process.env[key]) env[key] = absolute(process.env[key]);
+  if (process.env.COMM_BUS_PORT !== undefined) {
+    if (!/^\d+$/.test(process.env.COMM_BUS_PORT) || Number(process.env.COMM_BUS_PORT) > 65535)
+      throw new Error('COMM_BUS_PORT must be an integer from 0 through 65535');
+    env.COMM_BUS_PORT = String(Number(process.env.COMM_BUS_PORT));
+  }
   for (const key of ['HOMI_TMUX_SOCKET', 'HOMI_SELF']) if (process.env[key]) env[key] = process.env[key];
   return env;
 }
