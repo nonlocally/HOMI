@@ -390,15 +390,58 @@ class Qualification:
                 shutil.copytree(previous, old_copy, symlinks=True)
                 self.cli(old_copy, "setup", "--no-clients", "--no-service")
                 old = self.installed()
+                # Create state through the old installed CLI, not just through
+                # the candidate before switching payloads.
+                self.start(old)
+                self.run(self.data / "bin/homi", "claim", "qualification-upgrade")
+                self.run(self.data / "bin/homi", "send", "qualification-upgrade", "--",
+                         "saved by the previous release: '$HOME' and literal --from")
+                self.stop()
+                bus = self.state / "bus"
+                bus.mkdir(mode=0o700, exist_ok=True)
+                hub = "https://qualification.invalid"
+                thread = "11111111-1111-4111-8111-111111111111"
+                session = "codex:" + thread
+                # Inert saved enrollment/adapter fixtures only. No provider,
+                # broker, worker, enrollment or network command is invoked.
+                fixtures = {
+                    "client.json": {"default": hub, "connections": {hub: {
+                        "url": hub, "principal": "fixture-device", "token": "not-a-real-credential", "local": False}}},
+                    "registrations.json": {hub + "|" + session: {
+                        "id": "fixture-agent", "url": hub, "session_key": session, "kind": "codex",
+                        "thread": thread, "name": "saved-adapter", "status": "offline",
+                        "binary": str(self.base / "tools/codex"), "codex_home": self.env["CODEX_HOME"],
+                        "description": "inert upgrade fixture", "buses": [], "reply_until": 0}},
+                }
+                for name, value in fixtures.items():
+                    target = bus / name
+                    target.write_text(json.dumps(value, indent=2) + "\n")
+                    target.chmod(0o600)
+                preserved = [mail, self.state / "homi/mail/qualification-upgrade/inbox.jsonl",
+                             bus / "client.json", bus / "registrations.json"]
+                before = {path: path.read_bytes() for path in preserved}
+                identities = self.state / "homi/identities.json"
+                identities_before = json.loads(identities.read_text())
+                def preserved_state(stage):
+                    for path, content in before.items():
+                        require(path.read_bytes() == content, f"{stage} changed saved state: {path.relative_to(self.state)}")
+                    require(json.loads(identities.read_text()) == identities_before, f"{stage} changed saved identities")
+                    require(not (bus / "worker.json").exists() and not (bus / "server.json").exists(),
+                            f"{stage} unexpectedly started a bus worker or broker")
+                row["saved_state_sha256"] = {str(path.relative_to(self.state)): sha(path) for path in preserved}
                 self.cli(copy, "update", "--no-clients", "--no-service")
                 require(self.installed() == installed and old != installed, "upgrade did not select candidate release")
-                require(mail.read_bytes() == mail_before, "upgrade changed durable mailbox")
+                preserved_state("upgrade")
                 row["upgraded_daemon"] = self.start(installed)
                 self.stop()
+                preserved_state("upgraded daemon restart")
                 self.run(self.data / "bin/homi", "rollback")
                 require(self.installed() == old, "rollback did not select previous release")
-                require(mail.read_bytes() == mail_before, "rollback changed durable mailbox")
+                preserved_state("rollback")
                 self.cli(copy, "update", "--no-clients", "--no-service")
+                require(self.installed() == installed, "second upgrade did not reselect candidate release")
+                row["final_mcp"] = self.mcp(installed)
+                preserved_state("second upgrade")
         else:
             self.report["checks"].append({"name": "different-release upgrade and rollback", "status": "unqualified",
                                           "reason": "Pass --previous-runtime with a distinct real release; same-artifact update is tested separately."})
