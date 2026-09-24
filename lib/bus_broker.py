@@ -35,6 +35,8 @@ MAX_PRINCIPALS = 1024
 MAX_BUSES = 256
 MAX_ACCOUNT_BUSES = 32
 MAX_ACCOUNT_INVITES = 128
+MAX_ACTIVE_EVENTS_PER_BUS = 8
+MAX_EVENT_HISTORY = 20
 MAX_INVITES = 4096
 MAX_RECORDS = 20000
 MAX_SSO_REPLAYS = 4096
@@ -57,7 +59,8 @@ DEVICE_FIELDS = {"hostname": 253, "platform": 64, "tailscale_hostname": 253, "ta
 ACTIVE = ("accepted", "leased")
 TERMINAL = ("delivered", "queued", "failed", "expired", "cancelled")
 CHAT_OPS = frozenset(("chat_open", "chat_list", "chat_messages", "chat_send", "chat_read"))
-ACCOUNT_OPS = frozenset(("create", "member_add", "member_remove", "invite", "invite_revoke"))
+ACCOUNT_OPS = frozenset(("create", "member_add", "member_remove", "invite", "invite_revoke",
+                         "event_create", "event_revoke", "event_remove"))
 CHAT_FIELDS = {"chat_open": {"bus", "agent"}, "chat_list": set(), "chat_messages": {"chat", "after", "limit"},
                "chat_send": {"chat", "request_id", "message"}, "chat_read": {"chat", "through"}}
 
@@ -228,6 +231,17 @@ class Broker:
                 CREATE TABLE IF NOT EXISTS account_memberships(
                   user TEXT NOT NULL, bus TEXT NOT NULL REFERENCES buses(name),
                   PRIMARY KEY(user,bus));
+                CREATE TABLE IF NOT EXISTS event_invites(
+                  id TEXT PRIMARY KEY, digest TEXT NOT NULL UNIQUE,
+                  bus TEXT NOT NULL REFERENCES buses(name), created_at REAL NOT NULL,
+                  expires_at REAL NOT NULL, max_uses INTEGER NOT NULL,
+                  uses INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0,
+                  issuer_user TEXT);
+                CREATE TABLE IF NOT EXISTS event_joins(
+                  event TEXT NOT NULL REFERENCES event_invites(id),
+                  principal TEXT NOT NULL REFERENCES principals(id),
+                  joined_at REAL NOT NULL, removed INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY(event,principal));
                 CREATE TABLE IF NOT EXISTS grants(
                   principal TEXT NOT NULL REFERENCES principals(id),
                   bus TEXT NOT NULL REFERENCES buses(name), PRIMARY KEY(principal,bus));
@@ -617,7 +631,18 @@ class Broker:
                 try:
                     db.execute("BEGIN IMMEDIATE")
                     now = self.clock()
-                    p = self._auth(db, token, reader, reader_hash, view) if token else None
+                    try:
+                        p = self._auth(db, token, reader, reader_hash, view) if token else None
+                    except BusError as error:
+                        # Released clients retry unauthorized personal invites
+                        # anonymously to recover a revoked installation. A shared
+                        # event code must not silently replace its account with
+                        # a guest after a bad/stale existing device credential.
+                        if (error.code == "unauthorized" and request["op"] == "redeem"
+                                and isinstance(request.get("invite"), str)
+                                and request["invite"].startswith("event1.")):
+                            raise BusError("event join requires valid existing device credentials; use a separate installation for a guest", "forbidden") from None
+                        raise
                     if p is not None and p["browser_reader"] is not None:
                         # A valid reduced view is a revocation observation even
                         # when the requested operation is subsequently denied.
@@ -759,8 +784,118 @@ class Broker:
         db.execute("UPDATE invites SET expires_at=MIN(expires_at,?) WHERE digest=?", (now, _digest(secret)))
         return {"revoked": True, "bus": invitation["bus"]}
 
+    def _event_record(self, db, event, now):
+        result = {key: event[key] for key in ("id", "bus", "created_at", "expires_at", "max_uses", "uses")}
+        result["revoked"] = bool(event["revoked"])
+        result["active"] = not event["revoked"] and event["expires_at"] > now and event["uses"] < event["max_uses"]
+        result["participants"] = [{"principal": row["principal"], "user": row["user"], "device": row["device"],
+                                   "joined_at": row["joined_at"],
+                                   "removed": bool(row["removed"] or row["revoked"] or
+                                                   not self._granted(db, row["principal"], event["bus"]))}
+                                  for row in db.execute("""SELECT j.*,p.user,p.device,p.revoked FROM event_joins j
+                                    JOIN principals p ON p.id=j.principal WHERE j.event=?
+                                    ORDER BY j.joined_at,j.principal""", (event["id"],))]
+        return result
+
+    def _managed_event(self, db, p, value):
+        event = db.execute("SELECT * FROM event_invites WHERE id=?", (_text(value, "event", 128),)).fetchone()
+        if event is None:
+            raise BusError("unknown event", "not_found")
+        self._managed_bus(db, p, event["bus"])
+        return event
+
+    def _op_event_create(self, db, p, r, now):
+        bus = self._managed_bus(db, p, _bus(r.get("bus")))
+        if bus["name"] == "general" or bus["visibility"] != "private":
+            raise BusError("event codes require a private bus", "forbidden")
+        ttl, limit = r.get("ttl", 14400), r.get("max_uses", 40)
+        if type(ttl) is not int or not 60 <= ttl <= 86400:
+            raise BusError("event ttl must be 60 to 86400 integer seconds")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise BusError("event device limit must be an integer from 1 to 100")
+        if (db.execute("SELECT COUNT(*) FROM event_invites").fetchone()[0] >= MAX_RECORDS
+                or db.execute("""SELECT COUNT(*) FROM event_invites WHERE bus=? AND revoked=0
+                    AND expires_at>? AND uses<max_uses""", (bus["name"], now)).fetchone()[0] >= MAX_ACTIVE_EVENTS_PER_BUS):
+            raise BusError("event invitation limit reached", "limit")
+        event, secret = "e_" + uuid.uuid4().hex, "event1." + secrets.token_urlsafe(32)
+        # Separate from personal invites: an older broker must reject a shared
+        # code, never redeem it as a one-use invitation attributed to an owner.
+        db.execute("""INSERT INTO event_invites(id,digest,bus,created_at,expires_at,max_uses,issuer_user)
+                      VALUES(?,?,?,?,?,?,?)""", (event, _digest(secret), bus["name"], now, now + ttl, limit, self._account_user(p)))
+        row = db.execute("SELECT * FROM event_invites WHERE id=?", (event,)).fetchone()
+        return {"event": self._event_record(db, row, now), "invite": secret, "bus": bus["name"], "expires_at": now + ttl}
+
+    def _op_event_revoke(self, db, p, r, now):
+        event = self._managed_event(db, p, r.get("event"))
+        db.execute("UPDATE event_invites SET revoked=1 WHERE id=?", (event["id"],))
+        # Admission closes; already enrolled devices deliberately keep access.
+        return {"event": event["id"], "bus": event["bus"], "revoked": True}
+
+    def _op_event_remove(self, db, p, r, now):
+        event = self._managed_event(db, p, r.get("event"))
+        principal = _text(r.get("principal"), "principal", 128)
+        joined = db.execute("SELECT 1 FROM event_joins WHERE event=? AND principal=?", (event["id"], principal)).fetchone()
+        if joined is None:
+            raise BusError("unknown event participant", "not_found")
+        # Block replay through any event that already admitted this same device
+        # on this bus. A removed device must not restore the grant via another
+        # idempotent retry. Other buses and the device credential stay intact.
+        db.execute("""UPDATE event_joins SET removed=1 WHERE principal=? AND event IN
+                      (SELECT id FROM event_invites WHERE bus=?)""", (principal, event["bus"]))
+        db.execute("DELETE FROM grants WHERE principal=? AND bus=?", (principal, event["bus"]))
+        db.execute("DELETE FROM memberships WHERE bus=? AND agent IN (SELECT id FROM agents WHERE principal=?)",
+                   (event["bus"], principal))
+        self._cancel_invalid(db, now)
+        return {"event": event["id"], "principal": principal, "bus": event["bus"], "removed": True}
+
+    def _redeem_event(self, db, p, token, r, event, now):
+        if event["revoked"] or event["expires_at"] <= now:
+            raise BusError("event code is expired or closed", "forbidden")
+        if p is not None and (p["browser_reader"] is not None or p["is_admin"]):
+            raise BusError("event codes enroll participant devices, not browser or operator credentials", "forbidden")
+        device = _text(r.get("device", "device"), "device", 128)
+        metadata = _device_metadata(r.get("device_metadata", {}))
+        joined = None if p is None else db.execute("SELECT * FROM event_joins WHERE event=? AND principal=?",
+                                                   (event["id"], p["id"])).fetchone()
+        if joined is not None:
+            if joined["removed"] or not self._granted(db, p["id"], event["bus"]):
+                raise BusError("this device's event access was removed", "forbidden")
+            # Retrying an authenticated join uses no extra slot, and can never
+            # restore a removed grant or implicitly republish an agent.
+            return self._enrollment_result(db, p["id"], token)
+        if event["uses"] >= event["max_uses"]:
+            raise BusError("event device limit reached", "limit")
+        if db.execute("SELECT COUNT(*) FROM event_joins").fetchone()[0] >= MAX_RECORDS:
+            raise BusError("event enrollment record limit reached", "limit")
+        if p is None:
+            if db.execute("SELECT COUNT(*) FROM principals").fetchone()[0] >= MAX_PRINCIPALS:
+                raise BusError("device enrollment limit reached", "limit")
+            principal, user, token = "p_" + uuid.uuid4().hex, "guest-" + uuid.uuid4().hex, secrets.token_urlsafe(32)
+            db.execute("INSERT INTO principals(id,device,created_at,user,device_metadata) VALUES(?,?,?,?,?)",
+                       (principal, device, now, user, json.dumps(metadata)))
+            db.execute("INSERT INTO tokens VALUES(?,?)", (_digest(token), principal))
+        else:
+            # The authenticated bearer, never a claimed login/device name,
+            # establishes this existing principal's account and device label.
+            principal = p["id"]
+            if "device_metadata" in r:
+                db.execute("UPDATE principals SET device_metadata=? WHERE id=?", (json.dumps(metadata), principal))
+        db.execute("INSERT OR IGNORE INTO grants VALUES(?,?)", (principal, event["bus"]))
+        db.execute("INSERT INTO event_joins(event,principal,joined_at) VALUES(?,?,?)", (event["id"], principal, now))
+        db.execute("UPDATE event_invites SET uses=uses+1 WHERE id=?", (event["id"],))
+        return self._enrollment_result(db, principal, token)
+
+    def _enrollment_result(self, db, principal, token):
+        current = db.execute("SELECT * FROM principals WHERE id=?", (principal,)).fetchone()
+        buses = ([b[0] for b in db.execute("SELECT name FROM buses ORDER BY name")] if current["is_admin"] else
+                 [b[0] for b in db.execute("SELECT bus FROM grants WHERE principal=? ORDER BY bus", (principal,))])
+        return {"token": token, "principal": principal, "buses": buses, "server_id": self.server_id, **self._device_info(current)}
+
     def _redeem(self, db, p, token, r, now):
         secret = _text(r.get("invite"), "invite", 512)
+        event = db.execute("SELECT * FROM event_invites WHERE digest=?", (_digest(secret),)).fetchone()
+        if event is not None:
+            return self._redeem_event(db, p, token, r, event, now)
         invite = db.execute("SELECT * FROM invites WHERE digest=? AND redeemed_at IS NULL AND expires_at>?",
                             (_digest(secret), now)).fetchone()
         if invite is None:
@@ -793,11 +928,7 @@ class Broker:
                 db.execute("UPDATE principals SET device_metadata=? WHERE id=?", (json.dumps(metadata), principal))
         db.execute("INSERT OR IGNORE INTO grants VALUES(?,?)", (principal, invite["bus"]))
         db.execute("UPDATE invites SET redeemed_at=?,principal=? WHERE digest=?", (now, principal, _digest(secret)))
-        buses = [b[0] for b in db.execute("SELECT bus FROM grants WHERE principal=? ORDER BY bus", (principal,))]
-        if p is not None and p["is_admin"]:
-            buses = [b[0] for b in db.execute("SELECT name FROM buses ORDER BY name")]
-        info = self._device_info(db.execute("SELECT * FROM principals WHERE id=?", (principal,)).fetchone())
-        return {"token": token, "principal": principal, "buses": buses, "server_id": self.server_id, **info}
+        return self._enrollment_result(db, principal, token)
 
     def _op_device(self, db, p, r, now):
         if p["browser_reader"] is not None:
@@ -892,14 +1023,22 @@ class Broker:
             role = self._bus_role(db, p, definition)
             account_owned = definition["owner_user"] is not None and bus != "general"
             manage_members = account_owned and role in ("admin", "owner")
+            event_join = bus != "general" and definition["visibility"] == "private" and role in ("admin", "owner")
             row = {"name": bus, "visibility": definition["visibility"], "agents": agents,
                    "owner_user": definition["owner_user"], "role": role,
                    "capabilities": {"invite": role == "admin" or (account_owned and role in ("owner", "member")),
-                                    "manage_members": manage_members, "leave": account_owned and role == "member"}}
+                                    "manage_members": manage_members, "leave": account_owned and role == "member",
+                                    "event_join": event_join}}
             if manage_members:
                 row["members"] = [{"user": definition["owner_user"], "role": "owner"}] + [
                     {"user": member[0], "role": "member"} for member in db.execute(
                         "SELECT user FROM account_memberships WHERE bus=? ORDER BY user", (bus,))]
+            if event_join:
+                # Bounded recent history; no plaintext code or token digest is
+                # exposed. Exact event IDs still permit managing older entries.
+                row["events"] = [self._event_record(db, event, now) for event in db.execute(
+                    "SELECT * FROM event_invites WHERE bus=? ORDER BY created_at DESC,id DESC LIMIT ?",
+                    (bus, MAX_EVENT_HISTORY))]
             buses.append(row)
         self._snapshot_graphs(db, buses)
         result = {"server_id": self.server_id, "is_admin": bool(p["is_admin"]),
