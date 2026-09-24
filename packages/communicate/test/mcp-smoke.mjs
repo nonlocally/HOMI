@@ -9,14 +9,14 @@ import path from "node:path";
 import { communicateCli, packageVersion } from "../src/paths.mjs";
 
 const pkgDir = fileURLToPath(new URL("..", import.meta.url));
-const taskHome = mkdtempSync(path.join(os.tmpdir(), "comm-mcp-"));
+const taskHome = process.env.COMM_MCP_TEST_PINNED_HOME || mkdtempSync(path.join(os.tmpdir(), "comm-mcp-"));
 const env = { ...process.env, HOME: taskHome, COMM_STATE: path.join(taskHome, "state"),
   COMM_BUS_PORT: "0", COMMUNICATE_DATA: process.env.COMM_MCP_TEST_DATA || path.join(taskHome, "data"),
   PATH: path.join(taskHome, "bin") + path.delimiter + process.env.PATH };
 for (const key of ["CODEX_HOME", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "COMM_CODEX_INDEX",
   "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MESSAGING_SOCKET", "COMMUNICATE_HOME"]) delete env[key];
 mkdirSync(path.join(taskHome, ".codex"), { recursive: true });
-mkdirSync(path.join(taskHome, "bin"));
+mkdirSync(path.join(taskHome, "bin"), { recursive: true });
 writeFileSync(path.join(taskHome, "bin", "tailscale"), '#!/bin/sh\nprintf \'%s\\n\' \'{"Self":{"HostName":"mcp-fixture","DNSName":"mcp-fixture.test.ts.net."}}\'\n', { mode: 0o755 });
 const senderThread = "11111111-1111-4111-8111-111111111111";
 const recipientThread = "22222222-2222-4222-8222-222222222222";
@@ -35,7 +35,14 @@ with open(os.path.join(os.environ["HOME"], "queued.jsonl"), "a") as f:
 
 // Override the entry point to test a packed artifact with the same protocol checks.
 const entry = process.env.COMM_MCP_TEST_ENTRY || path.join(pkgDir, "src", "cli.mjs");
-const child = spawn(process.env.COMM_MCP_TEST_COMMAND || "node", [entry, "serve"], { env, stdio: ["pipe", "pipe", "pipe"] });
+const descriptor = process.env.COMM_MCP_TEST_DESCRIPTOR
+  ? JSON.parse(readFileSync(process.env.COMM_MCP_TEST_DESCRIPTOR)).mcpServers.communicate : null;
+// Real client hosts filter their MCP environment. Only the descriptor may carry
+// installation paths; retain PATH for the fake providers and an isolated port.
+const child = spawn(descriptor?.command || process.env.COMM_MCP_TEST_COMMAND || "node",
+  descriptor?.args || [entry, "serve"], { env: descriptor
+    ? { HOME: taskHome, PATH: env.PATH, COMM_BUS_PORT: "0", ...descriptor.env } : env,
+    stdio: ["pipe", "pipe", "pipe"] });
 let buf = "", stderr = ""; const pending = new Map();
 child.stderr.on("data", (d) => { stderr += d; });
 child.stdout.on("data", (d) => {
@@ -142,6 +149,6 @@ try {
   child.kill();
   for (const { timer } of pending.values()) clearTimeout(timer);
   spawnSync(communicateCli, ["bus", "stop"], { env, encoding: "utf8", timeout: 15000 });
-  rmSync(taskHome, { recursive: true, force: true });
+  if (!process.env.COMM_MCP_TEST_PINNED_HOME) rmSync(taskHome, { recursive: true, force: true });
 }
 process.exit(failed ? 1 : 0);

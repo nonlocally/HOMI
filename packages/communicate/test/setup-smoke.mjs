@@ -23,7 +23,8 @@ cached = root / 'claude-cached-version'
 if args[:2] == ['plugin', 'update'] and not cached.exists(): sys.exit(1)
 if args[:2] in (['plugin', 'update'], ['plugin', 'install']):
     if (root / 'claude-fail-refresh').exists(): sys.exit(1)
-    if not (root / 'claude-keep-stale').exists(): cached.write_text(os.environ['CLAUDE_TEST_VERSION'])
+    if args[1] == 'update' and (root / 'claude-skip-update').exists(): sys.exit(0)
+    if not (root / 'claude-keep-stale').exists(): cached.write_text(json.loads((pathlib.Path(json.loads((root / ".claude/settings.json").read_text())["extraKnownMarketplaces"]["communicate"]["source"]["path"]) / "communicate/.claude-plugin/plugin.json").read_text())["version"])
 if args == ['plugin', 'list', '--json']:
     print(json.dumps([{'id': 'communicate@communicate', 'scope': 'user', 'version': cached.read_text()}]))
 `, {mode: 0o755});
@@ -54,9 +55,11 @@ const s = JSON.parse(readFileSync(sp, "utf8"));
 if (s.sentinel !== "keep-me" || !s.enabledPlugins["existing@mkt"] || !s.permissions) die("merge clobbered existing keys");
 if (s.extraKnownMarketplaces?.communicate?.source?.source !== "directory") die("marketplace key wrong: " + JSON.stringify(s.extraKnownMarketplaces));
 const marketPath = s.extraKnownMarketplaces.communicate.source.path;
-if (marketPath !== path.join(data, "current", "vendor", "plugins")) die("marketplace path wrong: " + marketPath);
+const ledger = JSON.parse(readFileSync(path.join(data,"install.json"),"utf8"));
+if (marketPath !== path.join(ledger.integration.root,"plugins")) die("marketplace path wrong: " + marketPath);
+const installedVersion = JSON.parse(readFileSync(path.join(marketPath,"communicate/.claude-plugin/plugin.json"))).version;
 if (s.enabledPlugins["communicate@communicate"] !== true) die("plugin not enabled");
-if (readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== pluginVersion) die("Claude cache was not installed via CLI");
+if (readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== installedVersion) die("Claude cache was not installed via CLI");
 if (!readdirSync(path.join(fakeHome, ".claude")).some((f) => f.startsWith("settings.json.communicate-backup-"))) die("no backup written");
 if (!lstatSync(path.join(data, "current")).isSymbolicLink()) die("current is not a symlink");
 if (!existsSync(path.join(data, "current", "vendor", "bin", "communicate"))) die("payload CLI missing");
@@ -79,10 +82,10 @@ if (stabilized.status !== 0) die("stabilized MCP/bus failed: " + stabilized.stdo
 // Agent CLIs copy plugins into caches, outside the release directory. Their
 // launchers must still use the stabilized artifact even with a stale repo hint.
 const cached = path.join(fakeHome, "plugin cache", "communicate");
-cpSync(path.join(data, "current/vendor/plugins/communicate"), cached, { recursive: true });
+cpSync(path.join(marketPath, "communicate"), cached, { recursive: true });
 writeFileSync(path.join(data, "repo-path"), "/missing/legacy-checkout\n");
 const cachedMcp = spawnSync("node", [path.join(pkgDir, "test/mcp-smoke.mjs")], {
-  encoding: "utf8", env: { ...env, COMM_MCP_TEST_ENTRY: path.join(cached, "bin/communicate-mcp"), COMM_MCP_TEST_COMMAND: "bash", COMM_MCP_TEST_DATA: data }, timeout: 45000,
+  encoding: "utf8", env: { ...env, COMM_MCP_TEST_DESCRIPTOR: path.join(cached, ".mcp.json"), COMM_MCP_TEST_DATA: data, COMM_MCP_TEST_PINNED_HOME: fakeHome }, timeout: 45000,
 });
 if (cachedMcp.status !== 0) die("cached plugin MCP escaped release: " + cachedMcp.stdout + cachedMcp.stderr);
 const cachedCli = spawnSync("bash", [path.join(cached, "bin/communicate"), "agents"], { env, encoding: "utf8", timeout: 15000 });
@@ -91,8 +94,14 @@ if (cachedCli.status !== 0) die("cached plugin CLI escaped release: " + cachedCl
 // A versioned cache can remain stale even when enabledPlugins is true.
 writeFileSync(path.join(fakeHome, "claude-cached-version"), "0.1.0");
 r = runCli("setup", "--claude");
-if (r.status !== 0 || readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== pluginVersion)
+if (r.status !== 0 || readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== installedVersion)
   die("setup did not refresh stale Claude cache");
+writeFileSync(path.join(fakeHome, "claude-cached-version"), "0.1.0");
+writeFileSync(path.join(fakeHome, "claude-skip-update"), "");
+r = runCli("setup", "--claude");
+if (r.status !== 0 || readFileSync(path.join(fakeHome, "claude-cached-version"), "utf8") !== installedVersion)
+  die("setup did not reinstall an unchanged cache after a successful update");
+rmSync(path.join(fakeHome, "claude-skip-update"));
 writeFileSync(path.join(fakeHome, "claude-fail-refresh"), "");
 if (runCli("setup", "--claude").status === 0) die("failed Claude refresh reported success");
 rmSync(path.join(fakeHome, "claude-fail-refresh"));

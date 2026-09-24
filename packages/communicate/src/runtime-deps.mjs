@@ -16,8 +16,15 @@ const resolvePackage = (from, name) => {
   return null;
 };
 
-export const hasRuntimeDependencies = (root) =>
-  Object.keys(manifest(root).dependencies || {}).every((name) => resolvePackage(root, name));
+export const hasRuntimeDependencies = (root, { localOnly = false } = {}) => {
+  const modules = path.join(root, "node_modules");
+  if (localOnly && !existsSync(modules)) return false;
+  const boundary = localOnly ? realpathSync(modules) + path.sep : null;
+  return Object.keys(manifest(root).dependencies || {}).every((name) => {
+    const resolved = resolvePackage(root, name);
+    return resolved && (!localOnly || resolved.startsWith(boundary));
+  });
+};
 
 export function copyRuntimeDependencies(root, destination) {
   const store = path.join(destination, "node_modules", ".communicate-deps");

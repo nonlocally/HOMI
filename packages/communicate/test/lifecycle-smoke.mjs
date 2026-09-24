@@ -22,7 +22,8 @@ const a=process.argv.slice(2), home=process.env.HOME;
 if (a[0]==='--version') { console.log('fixture'); process.exit(0); }
 if (fs.existsSync(path.join(home,'fail-client'))) process.exit(9);
 if (a[0]==='plugin' && a[1]==='list') {
- const p=path.join(process.env.COMMUNICATE_DATA,'current/vendor/plugins/communicate/.claude-plugin/plugin.json');
+ const market=JSON.parse(fs.readFileSync(path.join(home,'.claude/settings.json'))).extraKnownMarketplaces.communicate.source.path;
+ const p=path.join(market,'communicate/.claude-plugin/plugin.json');
  console.log(JSON.stringify([{id:'communicate@communicate',scope:'user',version:JSON.parse(fs.readFileSync(p)).version}]));
 }
 `, { mode: 0o755 });
@@ -125,8 +126,9 @@ if (a.includes('bootstrap') || a.includes('start')) {
   fs.writeFileSync(settings, JSON.stringify(modified));
   run(installed, ["uninstall", "--claude"]);
   assert(JSON.parse(fs.readFileSync(settings)).extraKnownMarketplaces.communicate.source.path.includes("different-checkout"), "uninstall removed a replacement registration");
-  modified.extraKnownMarketplaces.communicate.source.path = path.join(data, "current/vendor/plugins");
+  modified.extraKnownMarketplaces.communicate.source.path = path.join(JSON.parse(fs.readFileSync(path.join(data,"install.json"))).integration.root, "plugins");
   fs.writeFileSync(settings, JSON.stringify(modified));
+  run(installed, ["setup", "--claude"]);
   run(installed, ["uninstall"]);
   assert(fs.existsSync(untouched), "uninstall removed durable mail");
   assert(JSON.parse(fs.readFileSync(settings)).enabledPlugins["other@other"], "uninstall damaged another plugin");

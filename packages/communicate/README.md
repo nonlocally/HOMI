@@ -39,7 +39,10 @@ homi setup --dry-run               # preview without changing the installation
 ```
 
 The service uses launchd on macOS or systemd --user on Linux. An existing managed
-service is refreshed on update unless `--no-service` is supplied. Setup preserves
+service is refreshed on update unless `--no-service` is supplied. Isolated homes
+use scoped service names. Optional provider/session variables are inherited only
+when requested with `--service-inherit=NAME`; the dry run shows the selected
+paths and environment. Setup preserves
 its device name when a daemon already answers. `homi doctor` reports the invoked
 package, installed payload and source commit, actual running daemon source,
 client registration, and optional dependencies without starting a daemon.
@@ -68,9 +71,12 @@ retain their distinct meanings; none implies that a model completed the task.
 
 The plugin includes skills, slash commands, and MCP tools. Existing native/bus
 MCP names and their order remain unchanged; durable tools use `homi_` names.
-`homi serve` runs this combined MCP interface. The packaged plugin resolves its
-own release or the stable installed release, including when an agent client
-copies it into a cache. It does not fall back to an old checkout or npm registry.
+`homi serve` runs this combined MCP interface. Setup creates a client projection
+under the data directory's `integrations/` folder, leaving the release unchanged.
+Its MCP descriptor names the stable installed entry point and explicitly carries
+the selected data, state, and client configuration paths, including when a host
+filters the child process environment. A content and configuration hash identifies
+the cache version. It does not fall back to an old checkout or npm registry.
 
 ## Local, self-hosted, and hosted communication
 
@@ -116,6 +122,15 @@ Claude settings are backed up. Uninstall and purge always preserve identities,
 mail, credentials, and runtime configuration under
 `${COMM_STATE:-~/.local/state/communicate}`. They do not rewrite external model
 state or restart already-open agent sessions.
+
+Upgrading a retained Communicate 0.1.x/0.2.x installation preserves its original
+payload. Without a newly managed daemon service, rollback can restore that
+legacy communication package and refresh its client integrations. It does not
+modify the old payload to add new HOMI commands. Keep the new release archive:
+after a legacy rollback, use its `bin/homi` for lifecycle commands because the
+old package has no combined `homi` entry point. A legacy rollback with a managed
+daemon service stops before changing anything; restore or remove that service
+explicitly first, since its old communication package contains no daemon.
 
 ## Development and compatibility
 
