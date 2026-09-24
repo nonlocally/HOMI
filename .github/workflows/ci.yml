@@ -42,7 +42,10 @@ jobs:
       - name: Retained core and integration checks
         run: bash scripts/test-release-core.sh
       - name: Optional configuration checks
-        run: python3 scripts/test-profiles.py
+        run: |
+          python3 scripts/test-profiles.py
+          python3 scripts/test-homi-box.py
+          bash scripts/test-snapshots.sh
       - name: Build immutable runtime
         run: python3 scripts/build-release.py
       - name: Qualify the extracted runtime without checkout fallback
@@ -60,4 +63,32 @@ jobs:
         with:
           name: homi-qualification-${{ runner.os }}-node${{ matrix.node }}
           path: ${{ runner.temp }}/homi-artifact-qualification.json
+          if-no-files-found: warn
+
+  dashboard:
+    needs: core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: homi-runtime-Linux-node20
+          path: ${{ runner.temp }}/homi-ui-artifact
+      - name: Install isolated browser test dependencies
+        run: |
+          python -m pip install playwright==1.63.0
+          python -m playwright install --with-deps chromium
+      - name: Qualify shipped dashboard assets
+        run: |
+          tar -xzf "$RUNNER_TEMP/homi-ui-artifact/homi-$(cat VERSION).tar.gz" -C "$RUNNER_TEMP/homi-ui-artifact"
+          python scripts/qualify-browser.py "$RUNNER_TEMP/homi-ui-artifact/homi-$(cat VERSION)" --evidence "$RUNNER_TEMP/homi-ui-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: homi-dashboard-qualification
+          path: ${{ runner.temp }}/homi-ui-evidence
           if-no-files-found: warn

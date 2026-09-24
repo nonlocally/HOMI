@@ -47,6 +47,12 @@ provider or previous-release checks into passes. See
 [Provider and client qualification](PROVIDER-QUALIFICATION.md) for the opt-in
 artifact harness, fresh installed-plugin acceptance, and two-device proof.
 
+The dashboard job uses Playwright 1.63.0 with Chromium against the built archive's
+actual assets. Run the same gate locally with
+`uv run --with playwright==1.63.0 python scripts/qualify-browser.py /path/to/runtime --evidence /private/new-ui-evidence`
+after installing its Chromium binary. It covers graph/conductor and human-inbox
+behavior using isolated API fixtures; it does not establish real model delivery.
+
 ## Publication
 
 Audit all retained Git refs/history, current source and archive. Verify historical
