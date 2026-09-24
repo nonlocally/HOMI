@@ -61,6 +61,14 @@ class ProofTests(unittest.TestCase):
             self.assertEqual(gate.import_artifact_bus(root).VALUE, "fixture")
             self.assertEqual(gate.artifact(root), before)
             self.assertFalse((source.parent / "__pycache__").exists())
+            link = root / "internal-link"
+            link.symlink_to("vendor/lib/bus.py")
+            self.assertEqual(gate.artifact(root), before)
+            link.unlink()
+            link.symlink_to("../outside-artifact")
+            with self.assertRaisesRegex(RuntimeError, "unsafe artifact symlink"):
+                gate.artifact(root)
+            link.unlink()
             (source.parent / "unexpected.pyc").write_bytes(b"unexpected")
             with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
                 gate.artifact(root)

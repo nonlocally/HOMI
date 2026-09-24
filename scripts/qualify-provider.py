@@ -34,8 +34,11 @@ def require(value, message):
 def artifact(root):
     require(not (root / ".git").exists(), "use an extracted release, not a checkout")
     manifest = json.loads((root / "release.json").read_text())
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            require(path.resolve().is_relative_to(root) and path.exists(), "unsafe artifact symlink")
     actual = {str(path.relative_to(root)) for path in root.rglob("*")
-              if path.is_file() and path != root / "release.json"}
+              if path.is_file() and not path.is_symlink() and path != root / "release.json"}
     require(actual == set(manifest["files"]), "artifact file inventory mismatch")
     for name, expected in manifest["files"].items():
         path = (root / name).resolve()
