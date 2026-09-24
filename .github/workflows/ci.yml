@@ -47,7 +47,9 @@ jobs:
           python3 scripts/test-homi-box.py
           bash scripts/test-snapshots.sh
       - name: Build immutable runtime
-        run: python3 scripts/build-release.py
+        run: |
+          python3 scripts/test-build-release.py
+          python3 scripts/build-release.py
       - name: Qualify the extracted runtime without checkout fallback
         run: |
           mkdir -p "$RUNNER_TEMP/homi-artifact"
