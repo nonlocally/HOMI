@@ -27,7 +27,8 @@ if (a[0]==='plugin' && a[1]==='list') {
 }
 `, { mode: 0o755 });
 const env = { ...process.env, HOME: home, COMMUNICATE_DATA: data, COMM_STATE: state,
-  CLAUDE_CONFIG_DIR: path.join(home, ".claude"), PATH: path.join(home, "bin") + path.delimiter + process.env.PATH };
+  CLAUDE_CONFIG_DIR: path.join(home, ".claude"), CODEX_HOME: path.join(home, ".codex"),
+  XDG_CONFIG_HOME: path.join(home, ".config"), PATH: path.join(home, "bin") + path.delimiter + process.env.PATH };
 for (const key of ["CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_THREAD_ID", "HOMI_SOCK", "HOMI_SOCK_DIR", "HOMI_SESSIONS_DIR"]) delete env[key];
 const assert = (condition, text) => { if (!condition) throw new Error(text); };
 const run = (entry, args, ok = true) => {

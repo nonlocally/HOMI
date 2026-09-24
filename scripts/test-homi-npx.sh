@@ -17,6 +17,7 @@ export HOMI_SOCK_DIR="$T/socks"
 export HOMI_SESSIONS_DIR="$T/sessions"
 export HOMI_SELF="npxhost"
 export HOMI_TICK=1
+unset HOMI_SOCK HOMI_DAEMON_DIR CLAUDE_CODE_MESSAGING_SOCKET
 FAKEHOME="$T/home"
 mkdir -p "$HOMI_SESSIONS_DIR" "$FAKEHOME"
 
