@@ -102,6 +102,12 @@ Terminal selection additionally requires Bash 4+ and fzf;
 mesh adds jq and SSH. Selected Claude Code and Codex use their Homebrew casks;
 Ghostty and the font are installed only when selected.
 
+Package availability follows [Homebrew's platform requirements](https://docs.brew.sh/Installation).
+The fresh-package CI check uses macOS 15 with Apple Silicon;
+the core runtime matrix also uses macOS 14 with existing dependencies.
+If Homebrew cannot supply a dependency, setup reports its error and stops;
+it does not silently opt into an unsupported source build.
+
 On Linux, system-tool recipes use `apt-get` where available. Provider clients use
 their official native installers. Missing Ghostty on Linux requires manual
 installation; the plan reports it before applying changes. A system without a

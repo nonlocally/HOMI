@@ -127,7 +127,9 @@ jobs:
           if-no-files-found: warn
 
   homebrew:
-    runs-on: macos-14
+    # Current Homebrew bottles require a supported macOS release. Keep the
+    # independent core matrix on macOS 14 to exercise older runtime support.
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -167,5 +169,8 @@ jobs:
         if: always()
         with:
           name: homi-onboarding-qualification
-          path: ${{ runner.temp }}/homi-onboarding-evidence
+          path: |
+            ${{ runner.temp }}/homi-onboarding-evidence/report.json
+            ${{ runner.temp }}/homi-onboarding-evidence/command-*.log
+            ${{ runner.temp }}/homi-onboarding-evidence/interactive-cancel.log
           if-no-files-found: warn

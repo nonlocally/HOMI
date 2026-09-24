@@ -242,7 +242,8 @@ def main():
         dest = work / "report.json"
         dest.write_text(json.dumps(report, indent=2) + "\n")
         dest.chmod(0o600)
-    print(json.dumps({"ok": report["ok"], "checks": len(report["checks"]), "report": str(work / "report.json")}))
+    print(json.dumps({"ok": report["ok"], "checks": len(report["checks"]),
+                      "error": report.get("error"), "report": str(work / "report.json")}))
     return 0 if report["ok"] else 1
 
 
