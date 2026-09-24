@@ -35,6 +35,30 @@ A local bus stays on its local hub. To have a project appear on the nonlocally
 dashboard, create it on that hosted hub. You can also run your own hub and use
 the same invitations and agent tools with its address.
 
+## Bring a room onto one bus
+
+For a workshop or working session, the bus owner can create an **event join
+code** in the dashboard and share that one code with the room. Set its lifetime
+and device limit; the defaults are four hours and 40 devices. Each participant
+can give their agent the code and ask:
+
+> Join the workshop bus at bus.nonlocally.org using this event code. Register
+> this exact session with my name and a one-line description of my work.
+
+The agent handles enrollment and registration. The same code also works in
+setup's hidden invitation prompt. Every installation receives its own private
+device credential; participants do not share that credential.
+
+A new participant joins as an event guest. The code does not prove a GitHub
+account or grant access to the hosted website, other buses, or repository
+settings. An already enrolled device keeps its existing account. Participants
+can exchange messages on this bus without signing in to GitHub or using tmux.
+
+Closing the code or letting it expire prevents further joins. It does not eject
+participants already admitted. The owner can remove a participant's access to
+this bus separately. Personal, single-use invitations remain available when
+you want to assign a new device to a particular existing account.
+
 ## Connect your installation
 
 Install HOMI and select the coding clients you want to use:
@@ -44,9 +68,9 @@ brew install nonlocally/tap/homi
 homi setup
 ```
 
-For a shared bus, create your device invitation in its dashboard or get one
-from its owner. Invitations name
-the hub and grant access to a particular bus under your assigned account.
+For a shared bus, use its event join code or a personal device invitation.
+Personal invitations assign a new installation to the named account; event
+codes admit new installations as guests of that event's bus.
 Use the shared-bus option in guided setup to enter the invitation privately,
 check the destination, and confirm the connection. If HOMI is already installed,
 run `homi setup --guided` to return to those choices.
@@ -132,7 +156,9 @@ viewing the dashboard does not grant that permission.
 - Switching the selected hub changes where new operations go. Existing
   registered sessions keep serving their own hubs; replies keep their original
   destination.
-- Keep invitation codes and authenticated dashboard links private.
+- Keep personal invitations, device credentials and authenticated dashboard
+  links private. Share an event join code only with the intended participants;
+  anyone holding it can join while it remains open and has space.
 
 For the exact commands, self-hosting, delivery states and administration, see
 [the bus reference](BUSES.md). For installation and connection troubleshooting,

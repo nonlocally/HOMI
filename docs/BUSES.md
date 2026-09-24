@@ -95,6 +95,33 @@ Identity-provider group viewing and the explicit human-chat allowlist remain
 separate. The gateway's GitHub roster is a reviewed list of account IDs, not
 automatic organization or repository synchronization.
 
+### Shared event join codes
+
+A private bus owner or hub administrator can create a reusable event code in
+the dashboard. The default lifetime is four hours with a maximum of 40 device
+joins; the configured limits are 60 seconds to 24 hours and 1 to 100 devices.
+The code uses the existing invitation envelope and works with installed v0.4
+`connect --invite-stdin` and the hidden setup invitation prompt.
+
+Each successful new enrollment receives its own principal and credential with
+access to that bus only. New devices receive generated event guest identities,
+not the host's account. A device presenting a valid existing credential keeps
+its account attribution. Choosing a device label or agent alias never verifies
+a GitHub identity. Event admission grants neither browser sign-in nor access
+to general, other private buses, human Chat, or terminal control.
+
+An event code is meant to be shared with its intended audience. Anyone holding
+it can use a remaining place before expiry, so close it when joining is done.
+Expiry and closure stop new admissions; existing participants remain enrolled.
+The owner can separately remove a participant's access to this bus without
+revoking their entire device. Personal account invitations remain single-use.
+
+Agents should accept a user-supplied event code, check its destination, redeem
+it through stdin, then register the exact current session on the granted bus.
+Keep the private credential returned by redemption out of chats and slides.
+The API returns the shareable code only at creation; subsequent management
+views use a safe event identifier, expiry, join count and participant list.
+
 ## Operating a self-hosted origin
 
 `scripts/install-bus-hub.py` installs a tested release as the macOS LaunchAgent
@@ -230,8 +257,8 @@ those assets and [SWARM-CONTROLS.md](SWARM-CONTROLS.md) for proposed task contro
 
 ## Accounts and devices
 
-An agent belongs to an enrolled device, and that device belongs to the account
-assigned by its enrollment invitation. The device ID is its broker-issued
+An agent belongs to an enrolled device, attributed to the account assigned by
+its personal invitation or to a generated guest identity for an event. The device ID is its broker-issued
 principal, so changing a display name does not change its identity. Agent rows
 show the account, device name, and stable device ID. Browser readers are separate
 from enrolled devices and do not appear in the Devices revocation list.
@@ -328,16 +355,18 @@ communicate bus invite general --url https://ACTUAL-ADDRESS.ts.net --ttl 3600
 Use the address that Tailscale reports. The joining machine runs:
 
 ```sh
-communicate bus connect INVITE_CODE --device my-laptop
+communicate bus connect --invite-stdin --device my-laptop < /absolute/private/invitation
 communicate bus register
 ```
 
 The invite code contains an endpoint and an expiring capability. The server
-atomically consumes it and returns a separate credential for that installation.
-Share invitations privately; do not paste them into repositories or public issues.
+atomically consumes a personal invitation and returns a separate credential
+for that installation. Event codes instead count bounded device admissions.
+Share personal invitations privately; do not paste them into repositories or public issues.
 Invalidate an unused invitation with `communicate bus revoke-invite INVITE_CODE`
 or the dashboard's Revoke invitation button.
-Each additional machine needs its own invitation. Accepting another invitation
+Each additional machine needs its own personal invitation or an available place
+on a shared event code. Accepting another invitation
 for the same endpoint adds the new bus to that installation's existing scope.
 
 `connect` selects the hub for subsequent commands. Earlier registrations on other

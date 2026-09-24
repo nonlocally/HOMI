@@ -24,7 +24,9 @@ or HOMI's hosted hub at `https://bus.nonlocally.org`; clarify scope if the
 intended bus is unclear. For an explicit hosted-hub request, inspect
 `communicate bus --hub https://bus.nonlocally.org status --no-start --json`
 and keep that hub on subsequent commands. If it reports `configured:false`,
-obtain a scoped invitation and use the existing `bus connect` flow. Local
+use the supplied scoped invitation or event code with the existing `bus connect`
+flow; request one if absent. A shared event code from the user is intended for
+agent-assisted joining; follow `communicate-bus` and redeem through stdin. Local
 operation needs no hosted account. A request for a particular shared hub needs
 that hub's enrollment; do not silently satisfy it with a local broker.
 Then run `communicate bus register`, or `--bus photonics` for a named bus,

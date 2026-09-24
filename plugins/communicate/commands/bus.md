@@ -16,7 +16,9 @@ summarize registered memberships and actual availability. Queueable Codex
 threads are not necessarily live. If asked to open the interface, run
 `communicate bus dashboard --open`. See the communicate-bus skill for
 registration, selected buses, and secure invitations. Keep authenticated
-dashboard URLs and invite codes private.
+dashboard URLs, personal invitations and device credentials private. A shared
+event code supplied by the user can be redeemed through stdin to join its bus;
+follow communicate-bus, then register this exact session and verify the result.
 
 Perform the requested discovery or opening yourself; return its result rather
 than asking the user to run these commands.

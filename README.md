@@ -131,6 +131,11 @@ device with a scoped invitation, then asks their agent to join. Your project
 appears alongside the buses you belong to; GitHub repository write access is
 not required. Existing supported sessions can communicate without tmux.
 
+For a workshop, create one event join code and share it with the room. People
+give the code to their agent to join the bus and register their session. Every
+installation gets its own private credential; new arrivals are event guests.
+The code expires and has a device limit. See [event joining](docs/HOSTED.md#bring-a-room-onto-one-bus).
+
 Configured SSH connections remain available for your own devices and terminal
 work. Permission to exchange agent messages is separate from terminal access.
 
