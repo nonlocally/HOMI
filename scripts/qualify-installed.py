@@ -262,32 +262,35 @@ class Qualification:
 
     def profile(self):
         cli = self.data / "bin/homi"
+        selected = ["--terminal", "--mesh", "--accounts", "--box", "--snapshots"]
         rc = self.home / ".bashrc"
         original = b"# original shell config without newline"
         rc.write_bytes(original)
         with self.check("profile preview is inert"):
             before = files(self.home)
-            result = json.loads(self.run(cli, "profile", "preview", "--terminal", "--mesh").stdout)
+            result = json.loads(self.run(cli, "profile", "preview", *selected).stdout)
             require(result["read_only"] and result["actions"], "profile preview missing")
             require(files(self.home) == before, "profile preview changed HOME")
         with self.check("profile install/repeat/uninstall/reinstall") as row:
-            self.run(cli, "profile", "install", "--terminal", "--mesh")
+            self.run(cli, "profile", "install", *selected)
             ledger = self.home / ".local/state/homi/profiles/ownership.json"
             record = json.loads(ledger.read_text())
             backup = record["entries"][str(rc)]["original"]["backup"]
             private = self.home / ".config/homi/profiles/local.sh"
             private.write_text("# private overlay retained\n")
             rc.write_bytes(rc.read_bytes() + b"# later user edit\n")
-            self.run(cli, "profile", "install", "--terminal", "--mesh")
+            self.run(cli, "profile", "install", *selected)
             require(json.loads(ledger.read_text())["entries"][str(rc)]["original"]["backup"] == backup, "repeat install discarded first backup")
             require(rc.read_text().count("# >>> HOMI profile") == 1, "duplicate managed profile block")
             require("HOMI mesh" in self.run(self.home / ".local/bin/homi-mesh", "help").stdout, "installed mesh helper fails")
             self.run(cli, "profile", "uninstall")
             require(rc.read_bytes() == original + b"\n# later user edit\n", "profile uninstall lost unrelated content")
             require(private.read_text() == "# private overlay retained\n", "profile uninstall changed private overlay")
-            self.run(cli, "profile", "install", "--terminal", "--mesh")
+            self.run(cli, "profile", "install", *selected)
             require(rc.read_text().count("# >>> HOMI profile") == 1, "profile reinstall duplicated block")
             row["payload"] = json.loads(ledger.read_text())["payload"]
+        with self.check("installed optional modules are self-contained and inert") as row:
+            row.update(self.profile_helpers())
         with self.check("fresh interactive Bash startup") as row:
             command = 'for fn in t cx cxx cxc cdx cdxx cdxxs mesh; do declare -F "$fn" >/dev/null || exit 9; done; printf "READY\\n%s\\n%s\\n" "$HOME" "$HOMI_PROFILE_RUNTIME"; command -v homi-workstation'
             observations = {}
@@ -306,6 +309,25 @@ class Qualification:
                 require(result.stdout.strip() == str(self.home), "zsh did not use its temporary home")
                 require(not (self.home / ".zshrc").exists() and not (self.home / ".zprofile").exists(), "profile unexpectedly modified zsh startup")
                 row["support"] = "Interactive helpers require Bash 4+; zsh is not automatically integrated or replaced."
+
+    def profile_helpers(self):
+        record = json.loads((self.home / ".local/state/homi/profiles/ownership.json").read_text())
+        payload = Path(record["payload"])
+        before = files(payload)
+        commands = self.home / ".local/bin"
+        require("homi-account" in self.run(commands / "homi-account", "help").stdout, "installed account help fails")
+        require("homi-box" in self.run(commands / "homi-box", "help").stdout, "installed box help fails")
+        preview = json.loads(self.run(commands / "homi-snapshot", "schedule", "preview", "--home", self.home).stdout)
+        require(preview["read_only"] and preview["scope"] == "scoped", "snapshot preview did not use isolated ownership")
+        require(not any(e.get("owner") == "snapshots-schedule" for e in record["entries"].values()), "profile selection activated a schedule")
+        message = "artifact reply 'literal' $HOME; preserved bytes"
+        self.run(commands / "homi-account-pane", "reply", "artifact-correlation", message)
+        reply = self.home / ".local/state/homi/pane/replies/artifact-correlation"
+        require(reply.read_text().rstrip("\n") == message, "installed file reply changed message bytes")
+        require(reply.stat().st_mode & 0o077 == 0, "installed file reply is not private")
+        require(files(payload) == before, "optional helpers changed immutable profile payload")
+        return {"payload": str(payload), "schedule_scope": preview["scope"],
+                "loaded_schedule": False, "file_reply": "literal private correlated file"}
 
     def execute(self, runtime, previous=None):
         with self.check("archive manifest and complete payload") as row:
@@ -348,6 +370,7 @@ class Qualification:
             require(not (self.data / "bin/homi").exists(), "uninstall retained owned executable")
             require(mail.read_bytes() == mail_before, "uninstall changed durable mailbox")
             self.run(self.home / ".local/bin/homi-mesh", "help")
+            self.profile_helpers()
             self.cli(copy, "setup", "--no-clients", "--no-service")
             installed = self.installed()
             require(mail.read_bytes() == mail_before, "reinstall changed durable mailbox")

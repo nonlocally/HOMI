@@ -25,6 +25,12 @@ run. No user services or current terminal sessions are changed.
 Fresh login and non-login Bash startup must resolve helpers from the installed
 profile; fresh zsh is checked to remain unchanged. Profile configuration and
 ownership/backups must be private to the owner.
+All optional modules are selected during the profile lifecycle check. Their
+installed help, scoped snapshot preview, and private literal file reply work
+without contacting providers or a service manager, including after core
+uninstall. The immutable profile payload must remain unchanged. This proves
+package independence, not actual account handoff, container execution, or
+scheduled snapshots.
 
 To qualify an upgrade and rollback, supply a second **real** release:
 
