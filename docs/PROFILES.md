@@ -153,3 +153,10 @@ Actual Ghostty rendering, real provider resume/account handoff, Linux service
 behavior, VNC, and cross-device access remain separate environment-dependent
 acceptance checks. Do not report them as passed merely because source/import
 or isolated tests succeeded.
+
+Where Ghostty is installed, qualify its actual parser against the release with
+`python3 scripts/qualify-ghostty.py /path/to/homi-0.3.0`. This installs the artifact's
+terminal profile in a temporary home, validates the generated include, checks the
+loaded settings, and requires rejection of a deliberately invalid option. It opens
+no window and checks neither rendering nor whether the requested font is available.
+Missing Ghostty reports `unqualified`; this optional gate is separate from CI.
