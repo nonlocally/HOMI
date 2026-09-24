@@ -77,6 +77,20 @@ function fixture() {
   return {ok:true,server_id:'fixture',is_admin:true,buses:[{name:'general',visibility:'open',agents:[claude,codex]},{name:'photonics',visibility:'private',agents:[claude,unsafe]}],principals:[{id:'p1',device_id:'p1',user:null,device:'guest-laptop',buses:['photonics'],revoked:false}]};
 }
 
+function accountFixture(user='owner') {
+  const capabilities=(invite=false,manage_members=false,leave=false)=>({invite,manage_members,leave});
+  const owner=user==='owner';
+  return {ok:true,server_id:'account-fixture',browser_session:true,read_only:true,is_admin:false,
+    can_create_bus:true,user,users:[{id:'owner'},{id:'colleague'},{id:'new-person'}],
+    chat:{enabled:false,buses:[]},buses:[
+      {name:'general',visibility:'open',owner_user:null,role:'viewer',capabilities:capabilities(),agents:[]},
+      {name:'study',visibility:'private',owner_user:'owner',role:owner?'owner':'member',
+        capabilities:capabilities(true,owner,!owner),agents:[],
+        ...(owner ? {members:[{user:'owner',role:'owner'},{user:'colleague',role:'member'}]} : {})},
+      {name:'other-study',visibility:'private',owner_user:'someone-else',role:'member',
+        capabilities:capabilities(true,false,true),agents:[]}]};
+}
+
 (async () => {
   const p=page();await flush();
   assert.deepEqual(p.history,['/'],'consume fragment before sending any requests');
@@ -121,6 +135,120 @@ function fixture() {
   assert.equal(member.ids['devices-button'].hidden,true);
   assert.equal(member.ids['actions-heading'].hidden,true);
   console.log('ok member view hides administrative actions');
+
+  const ownerData=accountFixture(), owner=page({snapshot:ownerData,origin:'https://bus.example'});await flush();
+  assert.equal(owner.ids['create-button'].hidden,false);
+  assert.equal(owner.ids['devices-button'].hidden,true,'account owner cannot revoke broker devices');
+  assert.equal(owner.ids['inbox-button'].hidden,true,'private bus ownership does not grant human chat');
+  owner.setHandler(request=>{
+    const bus=ownerData.buses.find(b=>b.name===request.bus);
+    if (request.op==='create') ownerData.buses.push({name:request.bus,owner_user:'owner',role:'owner',agents:[],
+      capabilities:{invite:true,manage_members:true,leave:false},members:[{user:'owner',role:'owner'}]});
+    if (request.op==='member_add') bus.members.push({user:request.user,role:'member'});
+    if (request.op==='member_remove') bus.members=bus.members.filter(m=>m.user!==request.user);
+    return request.op==='snapshot' ? ownerData : {ok:true};
+  });
+  await owner.ids['create-button'].fire('click');owner.ids['new-bus'].value='new-study';
+  await owner.ids['create-form'].fire('submit');
+  assert.equal(owner.ids['page-title'].textContent,'new-study');
+  assert.equal(owner.ids['members-button'].hidden,false);
+  assert.equal(owner.ids['leave-button'].hidden,true,'owner cannot leave own bus');
+  await owner.ids['bus-nav'].children[2].fire('click');await owner.ids['members-button'].fire('click');
+  assert.equal(owner.ids['member-list'].children[0].children[1].textContent,'Owner');
+  assert.deepEqual(owner.ids['member-user'].children.map(el=>el.value),['','new-person']);
+  owner.ids['member-user'].value='new-person';await owner.ids['member-form'].fire('submit');
+  assert.ok(owner.requests.some(r=>r.op==='member_add' && r.bus==='study' && r.user==='new-person'));
+  const removePerson=children(owner.ids['member-list']).find(el=>el.attrs['aria-label']==='Remove new-person from study');
+  await removePerson.fire('click');
+  assert.ok(owner.requests.some(r=>r.op==='member_remove' && r.bus==='study' && r.user==='new-person'));
+  assert.equal(ownerData.buses[1].members.length,2);
+  assert.equal(owner.ids['actions-heading'].hidden,true,'owner receives no global agent removal action');
+  console.log('ok admitted browser creates private bus and manages only its members without admin or chat authority');
+
+  owner.ids['members-dialog'].close();await owner.ids['invite-button'].fire('click');
+  assert.deepEqual(owner.ids['invite-bus'].children.map(el=>el.value),['study','other-study','new-study']);
+  assert.deepEqual(owner.ids['invite-user'].children.map(el=>el.value),['','owner','colleague']);
+  owner.ids['invite-user'].value='new-person';let accountRequestCount=owner.requests.length;
+  await owner.ids['invite-form'].fire('submit');
+  assert.equal(owner.requests.length,accountRequestCount,'admitted non-member cannot receive owned-bus invitation');
+  owner.ids['invite-user'].value='colleague';
+  owner.setHandler(r=>r.op==='invite' ? {ok:true,invite:'fixture-owner-invite',expires_at:Date.now()/1000+60} : ownerData);
+  await owner.ids['invite-form'].fire('submit');
+  assert.equal(owner.requests.at(-1).user,'colleague');assert.equal(owner.requests.at(-1).bus,'study');
+  ownerData.buses[1].members=ownerData.buses[1].members.filter(m=>m.user!=='colleague');
+  await owner.ids.refresh.fire('click');
+  assert.equal(owner.ids['invite-output'].textContent,'','removed member clears displayed invitation');
+  assert.equal(owner.ids['invite-user'].value,'owner');
+  owner.ids['invite-bus'].value='other-study';await owner.ids['invite-bus'].fire('change');
+  assert.deepEqual(owner.ids['invite-user'].children.map(el=>el.value),['','owner'],'member of another owner bus can invite only own device');
+  console.log('ok invitation bus and recipient choices follow per-bus membership, including removal while open');
+
+  const colleagueData=accountFixture('colleague'), colleague=page({snapshot:colleagueData,origin:'https://bus.example'});await flush();
+  await colleague.ids['bus-nav'].children[2].fire('click');
+  assert.equal(colleague.ids['members-button'].hidden,true);assert.equal(colleague.ids['leave-button'].hidden,false);
+  await colleague.ids['invite-button'].fire('click');
+  assert.equal(colleague.ids['invite-user'].value,'colleague');assert.equal(colleague.ids['invite-user'].disabled,true);
+  colleague.ids['invite-user'].value='owner';accountRequestCount=colleague.requests.length;
+  await colleague.ids['invite-form'].fire('submit');assert.equal(colleague.requests.length,accountRequestCount);
+  colleague.ids['invite-dialog'].close();
+  colleague.setHandler(r=>{if(r.op==='member_remove') colleagueData.buses=colleagueData.buses.filter(b=>b.name!==r.bus);return r.op==='snapshot'?colleagueData:{ok:true};});
+  await colleague.ids['leave-button'].fire('click');
+  assert.ok(colleague.requests.some(r=>r.op==='member_remove' && r.bus==='study' && r.user==='colleague'));
+  assert.equal(colleague.ids['page-title'].textContent,'All buses');
+  assert.ok(colleagueData.buses.some(b=>b.name==='other-study'),'leaving one bus preserves the other');
+  console.log('ok ordinary member can enroll only own device and leave only own scoped membership');
+
+  const revokedData=accountFixture(), revoked=page({snapshot:revokedData,origin:'https://bus.example'});await flush();
+  await revoked.ids['bus-nav'].children[2].fire('click');await revoked.ids['members-button'].fire('click');
+  const oldRemove=children(revoked.ids['member-list']).find(el=>el.tagName==='button');
+  revokedData.can_create_bus=false;revokedData.buses[1].capabilities={invite:false,manage_members:false,leave:false};
+  revoked.setHandler(()=>revokedData);await revoked.ids.refresh.fire('click');accountRequestCount=revoked.requests.length;
+  assert.equal(revoked.ids['member-list'].children.length,0);assert.equal(revoked.ids['member-submit'].disabled,true);
+  await oldRemove.fire('click');revoked.ids['member-user'].value='new-person';await revoked.ids['member-form'].fire('submit');
+  await revoked.ids['create-button'].fire('click');
+  assert.equal(revoked.requests.length,accountRequestCount,'old member controls cannot dispatch after capability revocation');
+  assert.equal(revoked.ids['create-dialog'].open,false);assert.equal(revoked.ids['members-button'].hidden,true);
+  const labelsOnly=accountFixture();delete labelsOnly.can_create_bus;
+  for(const bus of labelsOnly.buses) delete bus.capabilities;
+  const labelPage=page({snapshot:labelsOnly});await flush();await labelPage.ids['bus-nav'].children[2].fire('click');
+  assert.equal(labelPage.ids['create-button'].hidden,true);assert.equal(labelPage.ids['invite-button'].hidden,true);
+  assert.equal(labelPage.ids['members-button'].hidden,true,'role labels and matching owner names do not imply authority');
+  console.log('ok permission revocation invalidates open member controls; role labels alone grant nothing');
+
+  const changedInvite=page({snapshot:accountFixture(),origin:'https://bus.example'});await flush();
+  await changedInvite.ids['invite-button'].fire('click');let resolveChanged;
+  changedInvite.setHandler(()=>new Promise(resolve=>{resolveChanged=resolve;}));
+  const changedPending=changedInvite.ids['invite-form'].fire('submit');await flush();
+  changedInvite.ids['invite-bus'].value='other-study';await changedInvite.ids['invite-bus'].fire('change');
+  resolveChanged({ok:true,invite:'obsolete-scope-secret',expires_at:Date.now()/1000+60});await changedPending;
+  assert.equal(changedInvite.ids['invite-output'].textContent,'');assert.equal(changedInvite.ids['invite-result'].hidden,true);
+  assert.equal(changedInvite.ids['invite-submit'].disabled,false);
+  console.log('ok changing invitation scope rejects an in-flight credential for the previous bus');
+
+  const denied=page({snapshot:accountFixture()});await flush();
+  denied.setHandler(()=>({ok:false,status:403,error:'Membership changes are not permitted'}));
+  await denied.ids['create-button'].fire('click');denied.ids['new-bus'].value='denied';await denied.ids['create-form'].fire('submit');
+  assert.equal(denied.ids['create-dialog'].open,true);assert.equal(denied.ids['page-title'].textContent,'All buses');
+  assert.ok(denied.ids['create-error'].textContent.includes('not permitted'));
+  denied.ids['create-dialog'].close();await denied.ids['bus-nav'].children[2].fire('click');await denied.ids['members-button'].fire('click');
+  denied.ids['member-user'].value='new-person';await denied.ids['member-form'].fire('submit');
+  assert.ok(denied.ids['member-error'].textContent.includes('not permitted'));
+  assert.equal(denied.ids['member-list'].children.length,2,'failed write does not add a phantom member');
+  console.log('ok broker-denied creation and member changes remain visible failures without optimistic state');
+
+  const labelledData=accountFixture();
+  labelledData.users.forEach(user=>{user.label='<label-' + user.id + '>';});
+  const labelled=page({snapshot:labelledData,origin:'https://bus.example'});await flush();
+  await labelled.ids['bus-nav'].children[2].fire('click');await labelled.ids['members-button'].fire('click');
+  assert.equal(labelled.ids['member-user'].children[1].textContent,'<label-new-person>');
+  assert.equal(labelled.ids['member-user'].children[1].value,'new-person');
+  assert.ok(labelled.ids['page-description'].textContent.includes('<label-owner>'));
+  labelled.ids['member-user'].value='new-person';await labelled.ids['member-form'].fire('submit');
+  assert.ok(labelled.requests.some(r=>r.op==='member_add' && r.user==='new-person'));
+  labelled.ids['members-dialog'].close();await labelled.ids['invite-button'].fire('click');
+  assert.equal(labelled.ids['invite-user'].children[2].textContent,'<label-colleague>');
+  assert.equal(labelled.ids['invite-user'].children[2].value,'colleague');
+  console.log('ok account display labels are literal text while membership and invitation values remain canonical IDs');
 
   const readerData={...fixture(),is_admin:false,read_only:true,browser_session:true,user:'owui.00000000-0000-4000-8000-000000000001',display_name:'<img src=x onerror=alert(1)>',principals:undefined};
   const reader=page({snapshot:readerData});await flush();

@@ -17,7 +17,7 @@ import tempfile
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-SUITES = ("flow", "spectral", "conductor", "chat")
+SUITES = ("flow", "spectral", "conductor", "chat", "self-service")
 
 
 def main():
@@ -43,6 +43,7 @@ def main():
         (root / "lib").symlink_to(runtime / "vendor/lib", target_is_directory=True)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         env.pop("COMM_CHAT_SCREENSHOT", None)
+        env.pop("COMM_SELF_SERVICE_SCREENSHOT", None)
         for suite in SUITES:
             name = f"test-bus-{suite}-browser.py"
             shutil.copyfile(HERE / name, root / "scripts" / name)

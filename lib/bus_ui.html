@@ -63,7 +63,7 @@
     .heading-copy { min-width: 0; }
     h1 { font-size: 26px; line-height: 1.15; font-weight: 500; letter-spacing: -.025em; overflow-wrap: anywhere; }
     .subtitle { display: none; }
-    .heading-actions { display: flex; gap: 9px; flex: none; }
+    .heading-actions { display: flex; flex-wrap: wrap; gap: 9px; flex: none; }
     .button { display: inline-flex; justify-content: center; align-items: center; gap: 7px; border: 1px solid #33332f; border-radius: 6px; background: var(--surface); color: var(--ink-2); padding: 8px 13px; font-size: 12px; font-weight: 500; min-height: 35px; white-space: nowrap; }
     .button:hover { border-color: #57564f; color: var(--ink); }
     .button.primary { background: var(--ink); border-color: var(--ink); color: var(--plane); }
@@ -178,6 +178,8 @@
     .device-list { margin-top: 20px; max-height: 50vh; overflow: auto; }
     .device-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 0; border-top: 1px solid var(--line); }
     .device-row strong { font-size: 13px; font-weight: 500; }
+    #member-list strong { min-width: 0; overflow-wrap: anywhere; }
+    #member-list .role { display: inline-flex; flex-shrink: 0; }
     .device-row p { font-size: 11px; overflow-wrap: anywhere; }
     .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 10; width: max-content; max-width: calc(100vw - 32px); padding: 11px 17px; border: 1px solid #44443d; border-radius: 6px; background: #1b1b19; color: var(--ink); font-size: 12px; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
@@ -344,7 +346,7 @@
   </section>
   <div id="app" class="app" hidden>
     <header id="graph-topbar" class="graph-topbar" hidden>
-      <a id="graph-back" class="graph-back" href="/">← Directory</a>
+      <a id="graph-back" class="graph-back" href="/" title="Create buses, manage members and invite devices">← Manage buses</a>
       <select id="graph-bus" aria-label="Choose bus"></select>
       <div id="graph-search-slot"></div>
       <button id="graph-filter-toggle" class="text-button" aria-expanded="false" aria-controls="graph-filter-panel">Filters</button>
@@ -356,15 +358,15 @@
     <header class="sidebar">
       <div class="sidebar-top">
         <div class="brand">Agent bus</div>
-        <div class="top-actions"><span id="current-user" class="user-name" hidden></span><span id="role" class="role"></span><button id="create-button" class="text-button admin" hidden>New bus</button><button id="devices-button" class="text-button admin" hidden>Devices</button><button id="disconnect" class="text-button">Disconnect</button></div>
+        <div class="top-actions"><span id="current-user" class="user-name" hidden></span><span id="role" class="role"></span><button id="create-button" class="text-button" hidden>New bus</button><button id="devices-button" class="text-button admin" hidden>Devices</button><button id="disconnect" class="text-button">Disconnect</button></div>
       </div>
       <div class="sidebar-bottom">
-        <nav aria-label="Buses"><div class="sidebar-heading"><span>Buses</span><button class="text-button admin" id="sidebar-create" aria-label="Create a bus" hidden>New bus</button></div><div id="bus-nav" class="bus-nav"></div></nav>
+        <nav aria-label="Buses"><div class="sidebar-heading"><span>Buses</span><button class="text-button" id="sidebar-create" aria-label="Create a bus" hidden>New bus</button></div><div id="bus-nav" class="bus-nav"></div></nav>
         <div class="sidebar-help"><div class="connection"><span id="connection-dot" class="dot" aria-hidden="true"></span><span id="connection-text">Connecting…</span></div></div>
       </div>
     </header>
     <main class="main">
-      <div class="page-heading"><div class="heading-copy"><h1 id="page-title">All buses</h1><p class="subtitle" id="page-description"></p></div><div class="heading-actions"><button id="inbox-button" class="button" aria-haspopup="dialog" hidden>Inbox</button><button id="invite-button" class="button admin" hidden>Invite device</button><button id="register-button" class="button primary">Publish agent</button></div></div>
+      <div class="page-heading"><div class="heading-copy"><h1 id="page-title">All buses</h1><p class="subtitle" id="page-description"></p></div><div class="heading-actions"><button id="inbox-button" class="button" aria-haspopup="dialog" hidden>Inbox</button><button id="members-button" class="button" aria-haspopup="dialog" hidden>Members</button><button id="leave-button" class="text-button" hidden>Leave bus</button><button id="invite-button" class="button" hidden>Invite device</button><button id="register-button" class="button primary">Publish agent</button></div></div>
       <div class="stats"><div class="stat"><p class="stat-label">Live</p><p class="stat-value" id="live-count">0</p></div><div class="stat"><p class="stat-label">Queueable</p><p class="stat-value" id="queueable-count">0</p></div><div class="stat"><p class="stat-label">Publishing devices</p><p class="stat-value" id="device-count">0</p></div></div>
       <p id="stale-notice" class="notice" role="status" hidden></p>
       <section class="roster" aria-labelledby="roster-title">
@@ -375,7 +377,7 @@
         <p id="graph-unavailable" class="graph-unavailable" hidden>Graph unavailable. The agent list is still available; refresh to retry.</p>
         <div id="graph-panel" class="graph-panel" aria-label="Agent connection graph" hidden></div>
         <div id="table-wrap" class="table-wrap"><table><thead><tr><th scope="col">Agent</th><th scope="col" class="user-col">User</th><th scope="col" class="device-col">Device</th><th scope="col" class="membership-col">Buses</th><th scope="col">Status</th><th scope="col" class="last-seen-col">Last seen</th><th scope="col" id="actions-heading" hidden>Manage</th></tr></thead><tbody id="agent-rows"></tbody></table></div>
-        <div id="empty" class="empty" hidden><h3 id="empty-title">No published agents</h3><p id="empty-description">Enrolling a device does not list its agents here. Publish only the agents you want others to discover remotely.</p><div class="empty-actions"><button id="empty-invite" class="button admin" hidden>Invite device</button><button id="empty-register" class="button">Publish agent</button></div></div>
+        <div id="empty" class="empty" hidden><h3 id="empty-title">No published agents</h3><p id="empty-description">Enrolling a device does not list its agents here. Publish only the agents you want others to discover remotely.</p><div class="empty-actions"><button id="empty-invite" class="button" hidden>Invite device</button><button id="empty-register" class="button">Publish agent</button></div></div>
         <div class="roster-foot"><span id="shown-count">Showing 0 agents</span><span id="updated-at">Waiting for an update</span></div>
       </section>
       <section class="onboard" aria-labelledby="onboard-title"><div class="onboard-copy"><h3 id="onboard-title">Publish a remote recipient</h3><p id="onboard-phrase">Tell your agent: “Register yourself on the bus.”</p></div><div class="command"><code id="register-command">communicate bus register</code><button id="copy-command" class="copy-button" aria-label="Copy publication command">Copy</button></div></section>
@@ -385,7 +387,9 @@
 
   <dialog id="register-dialog" class="dialog" aria-labelledby="register-title"><div class="dialog-heading"><h2 id="register-title">Publish an agent</h2><button class="icon-button" data-close="register-dialog" aria-label="Close">×</button></div><p id="register-intro">Local Claude and Codex agents are already reachable on the same device. Tell the agent you want to make discoverable remotely:</p><p id="register-phrase" class="phrase"></p><h3>Command</h3><pre id="register-output" class="output"></pre><p id="register-access">Any agent on a device enrolled on general can contact its published recipients without publishing itself. The recipient can reply within that conversation.</p><p id="register-scope">General access is limited to admitted users and enrolled devices.</p><div class="dialog-actions"><button class="button" data-close="register-dialog">Done</button><button id="copy-register" class="button primary">Copy command</button></div></dialog>
 
-  <dialog id="create-dialog" class="dialog" aria-labelledby="create-title"><form id="create-form"><div class="dialog-heading"><h2 id="create-title">New bus</h2><button type="button" class="icon-button" data-close="create-dialog" aria-label="Close">×</button></div><p>A private bus requires invitations for the devices and explicit membership for both agents before they can message one another.</p><div class="field"><label for="new-bus">Name</label><input id="new-bus" placeholder="photonics" pattern="[a-z0-9][a-z0-9._\-]{0,62}" maxlength="63" required autocomplete="off"><small>Up to 63 lowercase letters, numbers, dots, hyphens, or underscores.</small></div><p>Agents also published on general remain discoverable there.</p><p id="create-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="button" data-close="create-dialog">Cancel</button><button id="create-submit" class="button primary" type="submit">Create bus</button></div></form></dialog>
+  <dialog id="create-dialog" class="dialog" aria-labelledby="create-title"><form id="create-form"><div class="dialog-heading"><h2 id="create-title">New private bus</h2><button type="button" class="icon-button" data-close="create-dialog" aria-label="Close">×</button></div><p>Create a space for your agents and collaborators. You choose its members, then invite their devices. Each agent joins explicitly.</p><div class="field"><label for="new-bus">Name</label><input id="new-bus" placeholder="photonics" pattern="[a-z0-9][a-z0-9._\-]{0,62}" maxlength="63" required autocomplete="off"><small>Up to 63 lowercase letters, numbers, dots, hyphens, or underscores.</small></div><p>GitHub access does not join anyone to your private bus. Agents also published on general remain discoverable there.</p><p id="create-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="button" data-close="create-dialog">Cancel</button><button id="create-submit" class="button primary" type="submit">Create bus</button></div></form></dialog>
+
+  <dialog id="members-dialog" class="dialog" aria-labelledby="members-title"><div class="dialog-heading"><h2 id="members-title">Bus members</h2><button type="button" class="icon-button" data-close="members-dialog" aria-label="Close">×</button></div><p id="members-description">Choose who can join this private bus. Adding a member does not publish their agents or grant control of their devices.</p><div id="member-list" class="device-list"></div><form id="member-form"><div class="field"><label for="member-user">Add a collaborator</label><select id="member-user" required></select><small>These accounts already have access to this service. Private bus membership is a separate choice.</small></div><p id="member-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="button" data-close="members-dialog">Done</button><button id="member-submit" class="button primary" type="submit">Add member</button></div></form></dialog>
 
   <dialog id="invite-dialog" class="dialog" aria-labelledby="invite-title"><form id="invite-form"><div class="dialog-heading"><h2 id="invite-title">Invite a device</h2><button type="button" class="icon-button" data-close="invite-dialog" aria-label="Close">×</button></div><p>This invitation enrolls one device on the selected bus. It does not publish any agents. Share it privately.</p><div id="invite-user-field" class="field" hidden><label for="invite-user">User</label><select id="invite-user"></select><small>The device and its agents will belong to this user.</small></div><div class="field"><label for="invite-bus">Bus</label><select id="invite-bus"></select></div><p id="invite-access">On general, the device’s agents can contact published recipients without publishing themselves.</p><div class="field"><label for="invite-url">Broker URL</label><input id="invite-url" type="url" required spellcheck="false"><small>Use an HTTPS address the recipient can reach.</small></div><p id="invite-scope" class="scope"></p><label id="local-only-label" class="check" hidden><input id="local-only" type="checkbox">This invitation is for this device only.</label><div class="field"><label for="invite-ttl">Expires in</label><select id="invite-ttl"><option value="3600">1 hour</option><option value="86400">24 hours</option><option value="604800">7 days</option></select></div><p id="invite-error" class="form-error" role="alert"></p><div id="invite-result" hidden><h3>Connect this device</h3><pre id="invite-output" class="output"></pre><p id="invite-expiry" class="small muted"></p><button id="copy-invite" class="button" type="button">Copy command</button> <button id="revoke-invite" class="button danger" type="button" hidden>Revoke invitation</button></div><div class="dialog-actions"><button type="button" class="button" data-close="invite-dialog">Done</button><button id="invite-submit" class="button primary" type="submit">Create invitation</button></div></form></dialog>
 
@@ -427,7 +431,7 @@
       $('graph-search-slot').append($('search-control'));
       $('graph-filter-panel').append($('status-filters'),$('identity-filters'));
     }
-    let toastTimer, activeInvite='', inviteEpoch=0;
+    let toastTimer, activeInvite='', inviteEpoch=0, memberBus=null;
     function getToken() {
       const fragment = new URLSearchParams(location.hash.slice(1));
       const token = fragment.get('token');
@@ -815,6 +819,31 @@
       setFilterOptions('device-filter',deviceChoices,state.device,'All devices');
     }
     function configuredUsers() {return state.data && Array.isArray(state.data.users) ? state.data.users : [];}
+    function accountLabel(id) {const user=configuredUsers().find(user => user.id === id);return user && user.label || id;}
+    function busRecord(name) {return buses().find(bus => bus.name === name);}
+    function canCreateBus() {
+      return Boolean(state.data && (state.data.can_create_bus === true ||
+        (state.data.can_create_bus === undefined && state.data.is_admin)));
+    }
+    function busCapability(name, capability) {
+      const bus=busRecord(name);
+      if (!bus) return false;
+      if (bus.capabilities && Object.hasOwn(bus.capabilities,capability)) return bus.capabilities[capability] === true;
+      // Older brokers expose only global administrator permissions. A role
+      // label or a matching user name never grants a new account capability.
+      return Boolean(state.data.is_admin && capability === 'invite');
+    }
+    function inviteBuses() {return buses().filter(bus => busCapability(bus.name,'invite'));}
+    function canInviteHere() {return state.bus === null ? inviteBuses().length > 0 : busCapability(state.bus,'invite');}
+    function inviteUsers(name) {
+      const bus=busRecord(name);
+      if (!bus || !busCapability(name,'invite')) return [];
+      if (bus.owner_user && busCapability(name,'manage_members')) {
+        return (bus.members || []).map(member => ({id:member.user}));
+      }
+      if (state.data.is_admin) return configuredUsers();
+      return state.data.user ? [{id:state.data.user}] : [];
+    }
     function enrolledDevices() {
       return (state.data && state.data.principals || []).filter(principal => !principal.revoked && !principal.is_admin && (state.bus === null || (principal.buses || []).includes(state.bus)))
         .map(principal => ({...principal,device_id:principal.device_id || principal.id}));
@@ -914,7 +943,7 @@
       const enrollmentNote=enrolled ? enrolled + (enrolled === 1 ? ' device is enrolled' : ' devices are enrolled') + ', but no agents are ' + participation + ' here. ' : 'Enrolling a device does not list its agents here. ';
       $('empty-description').textContent=filteredOut ? 'Try a different user, device, name, or status filter.' : accountNote + enrollmentNote + (privateBus ? 'Invite the devices and have both agents explicitly join this private bus.' : 'Local reachability is automatic. Agents on enrolled general devices can send without appearing here. Publish only the agents you want others to discover remotely.');
       $('empty-register').hidden=filteredOut;
-      $('empty-invite').hidden=filteredOut || !state.data.is_admin;
+      $('empty-invite').hidden=filteredOut || !canInviteHere();
     }
     function renderGraph(agents) {
       const query=state.bus === null ? '' : '?bus=' + encodeURIComponent(state.bus);
@@ -952,12 +981,17 @@
         document.title=(state.bus || 'All buses') + ' · Agent graph';
       }
       for (const element of document.querySelectorAll('.admin')) element.hidden=!admin;
+      for (const id of ['create-button','sidebar-create']) $(id).hidden=!canCreateBus();
+      $('invite-button').hidden=!canInviteHere();
+      $('members-button').hidden=state.bus === null || !busCapability(state.bus,'manage_members');
+      $('leave-button').hidden=state.bus === null || !busCapability(state.bus,'leave');
       const readerName=state.data.browser_session ? state.data.display_name || state.data.user || '' : '';
       $('current-user').textContent=readerName;$('current-user').title=readerName;$('current-user').hidden=!readerName;
-      $('role').textContent=admin ? 'Broker admin' : state.data.read_only ? 'Directory reader' : 'Bus member';
+      $('role').textContent=admin ? 'Broker admin' : busCapability(state.bus,'manage_members') ? 'Bus owner' : canCreateBus() ? 'Signed-in member' : state.data.read_only ? 'Directory reader' : 'Bus member';
       $('page-title').textContent=state.bus === null ? 'All buses' : state.bus;
       const privateBus=state.bus !== null && state.bus !== 'general';
-      $('page-description').textContent=privateBus ? 'Invited devices and explicitly joined agents.' : 'Published recipients for admitted users and enrolled devices.';
+      const selected=busRecord(state.bus);
+      $('page-description').textContent=privateBus ? (selected.owner_user ? 'Private bus · Owner: ' + accountLabel(selected.owner_user) : 'Invited devices and explicitly joined agents.') : 'Published recipients for admitted users and enrolled devices.';
       $('roster-title').textContent=privateBus ? 'Joined agents' : 'Published agents';
       $('directory-note').textContent=privateBus ? 'Only invited devices and explicitly joined agents can communicate on this bus.' : 'Agents listed for remote messages. Local Claude and Codex agents remain reachable automatically.';
       $('register-button').textContent=privateBus ? 'Add agent' : 'Publish agent';
@@ -966,6 +1000,14 @@
       $('register-command').textContent=registerCommand(); $('onboard-phrase').textContent='Tell your agent: “' + registerPhrase() + '”';
       $('broker-address').textContent=location.origin;
       renderNav(); renderIdentityFilters();renderRows();
+      if ($('members-dialog').open) renderMembers();
+      if ($('invite-dialog').open && !busCapability($('invite-bus').value,'invite')) {
+        $('invite-dialog').close();toast('Your invitation access changed. Choose an available bus.');
+      } else if ($('invite-dialog').open) {
+        const selectedUser=$('invite-user').value;
+        if (selectedUser && !inviteUsers($('invite-bus').value).some(user => user.id === selectedUser)) resetInvite();
+        updateInviteUsers();
+      }
     }
     async function refresh(allowBootstrap=true) {
       if (!state.token || state.pending) return;
@@ -1002,7 +1044,45 @@
       $('register-scope').textContent=privateBus ? 'Joining this bus does not publish the agent on general.' : 'General access is limited to admitted users and enrolled devices.';
       $('register-phrase').textContent=registerPhrase();$('register-output').textContent=registerCommand();$('register-dialog').showModal();
     }
-    function openCreate() { $('create-error').textContent='';$('new-bus').value='';$('create-dialog').showModal(); }
+    function openCreate() { if (!canCreateBus()) return; $('create-error').textContent='';$('new-bus').value='';$('create-dialog').showModal(); }
+    function renderMembers() {
+      const bus=busRecord(memberBus), allowed=busCapability(memberBus,'manage_members');
+      const list=$('member-list');list.replaceChildren();
+      $('members-title').textContent='Members of ' + (memberBus || 'this bus');
+      if (!bus || !allowed) {
+        $('members-description').textContent='You no longer have permission to manage this bus.';
+        $('member-submit').disabled=true;$('member-user').disabled=true;return;
+      }
+      $('members-description').textContent='Choose who can join this private bus. Adding a member does not publish their agents or grant control of their devices.';
+      const members=bus.members || [];
+      for (const member of members) {
+        const row=node('div','device-row'), label=node('strong','',accountLabel(member.user));label.title=member.user;
+        row.append(label);
+        if (member.role === 'owner' || member.user === bus.owner_user) row.append(node('span','role','Owner'));
+        else {
+          const remove=node('button','button small danger','Remove');
+          remove.setAttribute('aria-label','Remove ' + accountLabel(member.user) + ' from ' + bus.name);
+          remove.addEventListener('click',async () => {
+            if (!busCapability(bus.name,'manage_members') || !confirm('Remove ' + accountLabel(member.user) + ' from ' + bus.name + '? Access to other buses stays unchanged.')) return;
+            remove.disabled=true;$('member-error').textContent='';
+            try {await api('member_remove',{bus:bus.name,user:member.user});await refresh();toast('Member removed from ' + bus.name);}
+            catch(error) {$('member-error').textContent=error.message;remove.disabled=false;}
+          });
+          row.append(remove);
+        }
+        list.append(row);
+      }
+      const chosen=$('member-user').value, users=configuredUsers().filter(user => !members.some(member => member.user === user.id));
+      $('member-user').replaceChildren();
+      const prompt=node('option','','Select a collaborator');prompt.value='';prompt.disabled=true;$('member-user').append(prompt);
+      for (const user of users) {const option=node('option','',user.label || user.id);option.value=user.id;$('member-user').append(option);}
+      $('member-user').value=users.some(user => user.id === chosen) ? chosen : '';
+      $('member-user').disabled=!users.length;$('member-submit').disabled=!users.length;
+    }
+    function openMembers() {
+      if (!busCapability(state.bus,'manage_members')) return;
+      memberBus=state.bus;$('member-error').textContent='';renderMembers();$('members-dialog').showModal();
+    }
     function isLoopback(url) { return url.hostname === 'localhost' || url.hostname.endsWith('.localhost') || url.hostname === '[::1]' || /^127\./.test(url.hostname); }
     function inviteURL() {
       const url=new URL($('invite-url').value.trim());
@@ -1021,17 +1101,23 @@
       $('invite-scope').textContent=local ? 'Local address: this URL is reachable only on this device. For someone else, use the broker’s reachable HTTPS address.' : 'The recipient must be able to reach and trust this broker. For a private Tailscale address, they also need network access.';
       $('invite-access').textContent=$('invite-bus').value && $('invite-bus').value !== 'general' ? 'Both devices must be invited and both agents must explicitly join this private bus.' : 'On general, the device’s agents can contact published recipients without publishing themselves. Publish only the agents that should be discoverable remotely.';
     }
+    function updateInviteUsers() {
+      const users=inviteUsers($('invite-bus').value), previous=$('invite-user').value;
+      $('invite-user-field').hidden=!users.length;$('invite-user').required=Boolean(users.length);$('invite-user').replaceChildren();
+      const prompt=node('option','','Select a user');prompt.value='';prompt.disabled=true;$('invite-user').append(prompt);
+      for (const user of users) {const option=node('option','',accountLabel(user.id));option.value=user.id;$('invite-user').append(option);}
+      const preferred=previous || (state.user.startsWith('user:') ? state.user.slice(5) : state.data.user || '');
+      $('invite-user').value=users.some(user => user.id === preferred) ? preferred : users.length === 1 ? users[0].id : '';
+      $('invite-user').disabled=users.length === 1;
+    }
     function openInvite() {
+      if (!canInviteHere()) return;
       resetInvite();
       $('invite-error').textContent='';$('invite-url').value=location.origin;$('local-only').checked=false;$('invite-bus').replaceChildren();
-      const users=configuredUsers();$('invite-user-field').hidden=!users.length;$('invite-user').required=Boolean(users.length);$('invite-user').replaceChildren();
-      const prompt=node('option','','Select a user');prompt.value='';prompt.disabled=true;$('invite-user').append(prompt);
-      for (const user of users) {const option=node('option','',user.id);option.value=user.id;$('invite-user').append(option);}
-      const selectedUser=state.user.startsWith('user:') ? state.user.slice(5) : '';
-      $('invite-user').value=users.some(user => user.id === selectedUser) ? selectedUser : '';
-      for (const bus of buses()) {const option=node('option','',bus.name);option.value=bus.name;$('invite-bus').append(option);}
-      if (buses().some(bus => bus.name === chosenBus())) $('invite-bus').value=chosenBus();
-      updateScope();$('invite-dialog').showModal();
+      const allowed=inviteBuses();
+      for (const bus of allowed) {const option=node('option','',bus.name);option.value=bus.name;$('invite-bus').append(option);}
+      $('invite-bus').value=allowed.some(bus => bus.name === chosenBus()) ? chosenBus() : allowed[0].name;
+      $('invite-user').value='';updateInviteUsers();updateScope();$('invite-dialog').showModal();
     }
     function encodeInvite(url,invite) {
       const bytes=new TextEncoder().encode(JSON.stringify({url,invite}));
@@ -1104,13 +1190,34 @@
     $('create-button').addEventListener('click',openCreate);
     $('create-form').addEventListener('submit',async event => {
       event.preventDefault();$('create-submit').disabled=true;$('create-error').textContent='';
-      try {const bus=$('new-bus').value.trim();await api('create',{bus});state.bus=bus;$('create-dialog').close();toast('Created ' + bus);await refresh();}
+      try {if (!canCreateBus()) throw new Error('You no longer have permission to create a bus.');const bus=$('new-bus').value.trim();await api('create',{bus});state.bus=bus;$('create-dialog').close();toast('Created ' + bus);await refresh();}
       catch(error) {$('create-error').textContent=error.message;} finally {$('create-submit').disabled=false;}
+    });
+    $('members-button').addEventListener('click',openMembers);
+    $('members-dialog').addEventListener('close',() => {memberBus=null;$('member-error').textContent='';});
+    $('member-form').addEventListener('submit',async event => {
+      event.preventDefault();const bus=memberBus,user=$('member-user').value;
+      $('member-submit').disabled=true;$('member-error').textContent='';
+      try {
+        if (!busCapability(bus,'manage_members')) throw new Error('You no longer have permission to manage this bus.');
+        if (!configuredUsers().some(value => value.id === user)) throw new Error('Choose an available collaborator.');
+        await api('member_add',{bus,user});await refresh();toast('Member added to ' + bus);
+      } catch(error) {$('member-error').textContent=error.message;}
+      finally {if ($('members-dialog').open) renderMembers();}
+    });
+    $('leave-button').addEventListener('click',async () => {
+      const bus=state.bus;
+      if (!busCapability(bus,'leave') || !confirm('Leave ' + bus + '? Your devices and agents will lose access to this bus. Other buses stay unchanged.')) return;
+      $('leave-button').disabled=true;
+      try {await api('member_remove',{bus,user:state.data.user});state.bus=null;await refresh();toast('Left ' + bus);}
+      catch(error) {toast(error.message);}
+      finally {$('leave-button').disabled=false;}
     });
     $('invite-button').addEventListener('click',openInvite);
     $('empty-invite').addEventListener('click',openInvite);
-    $('invite-url').addEventListener('input',() => {$('local-only').checked=false;updateScope();});
-    $('invite-bus').addEventListener('change',updateScope);$('invite-ttl').addEventListener('change',updateScope);$('invite-user').addEventListener('change',updateScope);
+    $('invite-url').addEventListener('input',() => {resetInvite();$('local-only').checked=false;updateScope();});
+    $('invite-bus').addEventListener('change',() => {resetInvite();updateInviteUsers();updateScope();});
+    for (const id of ['invite-ttl','invite-user']) $(id).addEventListener('change',() => {resetInvite();updateScope();});
     $('invite-form').addEventListener('submit',async event => {
       event.preventDefault();$('invite-submit').disabled=true;$('invite-error').textContent='';
       const epoch=inviteEpoch;
@@ -1118,7 +1225,9 @@
         const url=inviteURL();
         if (isLoopback(url) && !$('local-only').checked) throw new Error('Acknowledge that this invitation only works on this device, or use a reachable HTTPS address.');
         const bus=$('invite-bus').value;
-        const values={bus,ttl:Number($('invite-ttl').value)}, users=configuredUsers();
+        if (!busCapability(bus,'invite')) throw new Error('You do not have permission to invite a device to this bus.');
+        const values={bus,ttl:Number($('invite-ttl').value)}, users=inviteUsers(bus);
+        if (!state.data.is_admin && !users.length) throw new Error('Your account is not eligible for a device invitation.');
         if (users.length) {
           if (!users.some(user => user.id === $('invite-user').value)) throw new Error('Choose the user who owns this device.');
           values.user=$('invite-user').value;
