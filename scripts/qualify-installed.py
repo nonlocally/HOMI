@@ -317,7 +317,7 @@ class Qualification:
         commands = self.home / ".local/bin"
         require("homi-account" in self.run(commands / "homi-account", "help").stdout, "installed account help fails")
         require("homi-box" in self.run(commands / "homi-box", "help").stdout, "installed box help fails")
-        preview = json.loads(self.run(commands / "homi-snapshot", "schedule", "preview", "--home", self.home).stdout)
+        preview = json.loads(self.run(commands / "homi-snapshot", "schedule", "preview").stdout)
         require(preview["read_only"] and preview["scope"] == "scoped", "snapshot preview did not use isolated ownership")
         require(not any(e.get("owner") == "snapshots-schedule" for e in record["entries"].values()), "profile selection activated a schedule")
         message = "artifact reply 'literal' $HOME; preserved bytes"
