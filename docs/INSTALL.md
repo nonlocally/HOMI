@@ -49,3 +49,25 @@ Migration requires an ownership/backup record. Verify executable, plugin and dae
 paths in a fresh client: falling back to an old checkout does not qualify the new
 installation. Disable conflicting legacy integration reversibly only on designated
 test machines, preserving their configuration and active work.
+
+Codex setup records the previous local marketplace, installed/enabled state and
+the exact user configuration for `communicate@communicate` in its private install
+ledger. It retains custom tool policies while enabling the new installation, and
+restores the first recorded original on uninstall. Updates and rollback preserve
+that original. Later user edits to the owned plugin table cause setup, rollback
+or uninstall to refuse replacement until the settings are reconciled; they are
+never silently overwritten.
+
+This requires Codex's installed/enabled JSON listing and versioned configuration
+API, verified with Codex CLI 0.156.1. No model request is made during installation.
+Unsupported clients, nonlocal prior marketplaces and plugin settings supplied by
+another profile or managed layer fail preflight before registration is replaced.
+An older install ledger without original plugin-state evidence cannot safely
+infer it: preserve the current settings and restore/manage that registration
+manually before retrying. `homi doctor` distinguishes missing, installed-disabled
+and installed-enabled plugins.
+
+Keep client configuration unchanged while setup, rollback or uninstall runs.
+Configuration API writes check their expected version, but the clients' separate
+plugin registration commands do not provide an atomic transaction with concurrent
+edits made by another process.

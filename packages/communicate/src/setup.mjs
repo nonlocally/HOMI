@@ -5,11 +5,13 @@ import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, sym
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { copyRuntimeDependencies, hasRuntimeDependencies } from "./runtime-deps.mjs";
 import { home, dataRoot, currentLink, ledgerPath, readJson, writeJson, hash, linkTarget, switchCurrent,
   withInstallLock, executable, stateRoot, daemonRequest, installService, uninstallService, unloadService, loadService, assertManagedPath, installLockStatus } from "./lifecycle.mjs";
 import { communicateCli } from "./paths.mjs";
 import { buildIntegration, removeIntegration } from "./integration.mjs";
+import { readCodexSettings, writeCodexSettings } from "./codex-settings.mjs";
 
 const pkgDir = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
@@ -191,7 +193,41 @@ function codexMarketplace(strict = false) {
     return (Array.isArray(rows) ? rows : rows.marketplaces || []).find((m) => m.name === MARKET_ID) || null;
   } catch { if (strict) throw new Error("Could not parse Codex marketplace ownership"); return null; }
 }
-function codexInstall(dry, integration) {
+function codexPlugin() {
+  const result = clientExec("codex", ["plugin", "list", "--marketplace", MARKET_ID, "--json"]);
+  if (result.status !== 0) throw new Error("Could not inspect Codex installed plugin state; no client changes made");
+  let rows;
+  try { rows = JSON.parse(result.stdout); } catch { throw new Error("Could not parse Codex installed plugin state"); }
+  if (!Array.isArray(rows.installed)) throw new Error("Codex plugin list must expose installed/enabled state; update Codex before setup");
+  const matches = rows.installed.filter((row) => row.pluginId === PLUGIN_ID);
+  if (matches.length > 1 || (matches.length && (matches[0].installed !== true || typeof matches[0].enabled !== "boolean")))
+    throw new Error("Codex installed plugin state is ambiguous; no client changes made");
+  return { installed: matches.length === 1, enabled: matches[0]?.enabled ?? false };
+}
+
+const codexRoot = (market) => market?.marketplaceSource?.source || market?.root;
+const sameLocalRoot = (a, b) => typeof a === "string" && typeof b === "string" &&
+  (existsSync(a) ? realpathSync(a) : path.resolve(a)) === (existsSync(b) ? realpathSync(b) : path.resolve(b));
+async function snapshotCodex({ preflight = true } = {}) {
+  if (!executable("codex")) return null;
+  assertManagedPath(path.join(codexHome(), "config.toml"));
+  const market = codexMarketplace(true), plugin = codexPlugin();
+  if (market && market.marketplaceSource?.sourceType !== "local")
+    throw new Error("Codex HOMI marketplace is not a verified local source; preserve/export it before switching installations");
+  if (plugin.installed && !market) throw new Error("Installed Codex HOMI plugin has no restorable marketplace; no client changes made");
+  return { market, ...plugin, settings: await readCodexSettings({ preflight }) };
+}
+
+function checkCodexOwnership(record, snapshot) {
+  if (!record) return;
+  if (!record.original || !("ownedSettings" in record))
+    throw new Error("Earlier installer did not record original Codex plugin settings. Preserve the current configuration and restore/manage its registration manually before retrying; no client changes made.");
+  if (!sameLocalRoot(codexRoot(snapshot?.market), record.marketRoot) || !snapshot?.installed ||
+      !isDeepStrictEqual(snapshot.settings, record.ownedSettings))
+    throw new Error("Codex plugin registration or settings changed after setup. User edits are preserved; reconcile the owned registration/settings before setup, rollback or uninstall.");
+}
+
+async function codexInstall(dry, integration, before) {
   assertManagedPath(path.join(codexHome(), "config.toml"));
   log(`Codex configuration: ${codexHome()}${process.env.CODEX_HOME ? " (CODEX_HOME)" : ""}`);
   const marketRoot = integration?.root || path.join(currentLink(), "vendor");
@@ -216,39 +252,68 @@ function codexInstall(dry, integration) {
       throw new Error(`codex ${c.join(" ")} failed (${out.trim().slice(0, 200)})`);
     }
   }
+  if (!dry) {
+    // `plugin add` enables a plugin. Keep every prior per-tool policy and
+    // restore only the installer-owned enabled change on later uninstall.
+    const wanted = { ...(before?.settings || {}), enabled: true };
+    const current = await readCodexSettings();
+    if (!isDeepStrictEqual(current, wanted) && !isDeepStrictEqual(current, { enabled: true }))
+      throw new Error("Codex plugin settings changed during registration; refusing to replace custom settings");
+    await writeCodexSettings(wanted, current);
+    const installed = codexPlugin();
+    if (!installed.installed || !installed.enabled) throw new Error("Codex plugin did not become installed and enabled");
+  }
   log("Codex: start a NEW thread to see the skills and MCP tools.");
   return true;
 }
 
-function codexUninstall(dry, record = {}) {
+async function codexUninstall(dry, record = {}) {
   assertManagedPath(path.join(codexHome(), "config.toml"));
   if (!executable("codex")) { log("kept Codex registration: its CLI is unavailable to verify ownership"); return false; }
   const market = codexMarketplace(true);
   const ownedRoot = record.marketRoot || path.join(currentLink(), "vendor");
-  if (!market || (market.root !== ownedRoot && market.marketplaceSource?.source !== ownedRoot)) {
+  if (!market || !sameLocalRoot(codexRoot(market), ownedRoot)) {
     log("kept Codex registration and released installer ownership: it no longer points at this installation"); return true;
   }
-  const cmds = [["plugin", "remove", PLUGIN_ID], ["plugin", "marketplace", "remove", MARKET_ID]];
-  if (!hasCodex()) return false;
-  for (const c of cmds) {
-    if (dry) { log(`[dry-run] would run: codex ${c.join(" ")}`); continue; }
-    const r = clientExec("codex", c);
-    log(`codex ${c.join(" ")} — ${r.status === 0 ? "ok" : "failed (may not have been installed)"}`);
-    if (c[1] === "marketplace" && r.status !== 0) throw new Error("Codex marketplace removal failed; installer ownership retained for retry");
+  const before = await snapshotCodex();
+  checkCodexOwnership(record, before);
+  if (dry) { log("[dry-run] would restore original Codex marketplace, installation and plugin settings"); return true; }
+  const failures = await restoreCodex(record.original);
+  if (failures.length) {
+    const compensation = await restoreCodex(before);
+    throw new Error(`Codex original state restoration failed; installer ownership retained. ${failures.join("; ")}${compensation.length ? "; current registration recovery needs attention: " + compensation.join("; ") : "; current registration restored"}`);
   }
-  if (!dry && record.previousRoot) {
-    const r = spawnSync("codex", ["plugin", "marketplace", "add", record.previousRoot], { encoding: "utf8", timeout: 30000 });
-    if (r.status !== 0) throw new Error(`Previous Codex marketplace could not be restored: ${record.previousRoot}`);
-  }
+  log("Codex original marketplace, installation and plugin settings restored");
   return true;
 }
 
-function restoreCodex(market) {
+async function restoreCodex(snapshot) {
   // CLI-owned registry files are never edited directly.
+  if (!snapshot) return [];
   const failures = [];
-  if (clientExec("codex", ["plugin", "marketplace", "remove", MARKET_ID]).status !== 0) failures.push("Codex marketplace removal");
-  const previous = market?.marketplaceSource?.source || market?.root;
-  if (previous && clientExec("codex", ["plugin", "marketplace", "add", previous]).status !== 0) failures.push("Codex marketplace restoration");
+  try {
+    const currentSettings = await readCodexSettings();
+    const expected = [snapshot.settings, { ...(snapshot.settings || {}), enabled: true }, { enabled: true }, null];
+    if (!expected.some((settings) => isDeepStrictEqual(currentSettings, settings)))
+      throw new Error("Codex plugin settings changed during activation; user edits preserved, reconcile the registration manually");
+    if (codexPlugin().installed && clientExec("codex", ["plugin", "remove", PLUGIN_ID]).status !== 0)
+      throw new Error("Codex plugin removal failed");
+    if (codexMarketplace(true) && clientExec("codex", ["plugin", "marketplace", "remove", MARKET_ID]).status !== 0)
+      throw new Error("Codex marketplace removal failed");
+    const previous = codexRoot(snapshot.market);
+    if (previous && clientExec("codex", ["plugin", "marketplace", "add", previous]).status !== 0)
+      throw new Error("Codex marketplace restoration failed");
+    if (snapshot.installed && clientExec("codex", ["plugin", "add", PLUGIN_ID]).status !== 0)
+      throw new Error("Codex installed plugin restoration failed");
+    const current = await readCodexSettings();
+    // Removal must leave either no table or the freshly-added default table.
+    if (current !== null && !isDeepStrictEqual(current, { enabled: true }))
+      throw new Error("Codex plugin settings changed during restoration; user edits preserved");
+    await writeCodexSettings(snapshot.settings, current);
+    const after = codexPlugin();
+    if (after.installed !== snapshot.installed || after.enabled !== snapshot.enabled)
+      throw new Error("Codex installed/enabled state did not restore exactly");
+  } catch (error) { failures.push(error.message); }
   return failures;
 }
 
@@ -296,7 +361,7 @@ export async function runSetup(argv) {
       stabilize(true);
       const integration = (f.claude || f.codex) ? buildIntegration(pkgDir, { dry: true }) : null;
       if (f.claude) claudeInstall(true, integration);
-      if (f.codex) codexInstall(true, integration);
+      if (f.codex) await codexInstall(true, integration);
       const saved = readJson(ledgerPath());
       if (!f.noService && (f.service || saved.service)) await installService(true, undefined, saved.service, { inherit: f.serviceInherit });
     }
@@ -310,7 +375,7 @@ export async function runSetup(argv) {
       if (f.claude && saved.clients.claude && claudeUninstall(false, saved.clients.claude)) {
         delete saved.clients.claude; writeJson(ledgerPath(), saved);
       }
-      if (f.codex && saved.clients.codex && codexUninstall(false, saved.clients.codex)) {
+      if (f.codex && saved.clients.codex && await codexUninstall(false, saved.clients.codex)) {
         delete saved.clients.codex; writeJson(ledgerPath(), saved);
       }
       if (!f.selective && await uninstallService(saved.service)) { delete saved.service; writeJson(ledgerPath(), saved); }
@@ -364,7 +429,8 @@ export async function runSetup(argv) {
     }
     const previous = linkTarget();
     const before = f.claude ? readSettings() : {};
-    const codexBefore = f.codex ? codexMarketplace() : null;
+    const codexBefore = f.codex ? await snapshotCodex() : null;
+    if (f.codex && codexBefore) checkCodexOwnership(saved.clients.codex, codexBefore);
     const dest = stabilize(false);
     // Completed staging is owned even if activation later fails. Keep it
     // inspectable and purgeable without claiming it is the active release.
@@ -389,7 +455,7 @@ export async function runSetup(argv) {
       linksBefore.set(file, existing);
       next.links[file] = target;
     }
-    let serviceChanged = false;
+    let serviceChanged = false, codexChanged = false;
     try {
       switchCurrent(dest);
       if (f.claude && claudeInstall(false, integration)) {
@@ -400,10 +466,13 @@ export async function runSetup(argv) {
           previousEnabled: adoptingCurrent ? undefined : before.enabledPlugins?.[PLUGIN_ID] };
         next.clients.claude.marketRoot = path.join(integration.root, "plugins");
       }
-      const previousRoot = codexBefore?.marketplaceSource?.source || codexBefore?.root;
-      if (f.codex && codexInstall(false, integration)) {
-        next.clients.codex ||= { previousRoot: previousRoot === path.join(currentLink(), "vendor") || saved.integrations.some((item) => item.root === previousRoot) ? undefined : previousRoot };
-        next.clients.codex.marketRoot = integration.root;
+      if (f.codex) {
+        codexChanged = !!codexBefore;
+        if (await codexInstall(false, integration, codexBefore)) {
+          next.clients.codex ||= { original: codexBefore };
+          next.clients.codex.marketRoot = integration.root;
+          next.clients.codex.ownedSettings = await readCodexSettings();
+        }
       }
       mkdirSync(bins, { recursive: true });
       for (const file of linksBefore.keys()) {
@@ -445,7 +514,7 @@ export async function runSetup(argv) {
         }
         writeSettings(now, false, "restore plugin settings after failed activation");
       }
-      if (f.codex) recoveryFailures.push(...restoreCodex(codexBefore));
+      if (codexChanged) recoveryFailures.push(...await restoreCodex(codexBefore));
       if (!recoveryFailures.length && integration?.created && !saved.integrations.some((item) => item.root === integration.root)) removeIntegration(integration);
       throw new Error(`Activation failed; previous payload restored. ${error.message}${recoveryFailures.length ? " Client registry recovery needs attention: " + recoveryFailures.join("; ") : ""}`);
     }
@@ -468,8 +537,13 @@ export async function runRollback(argv = []) {
   await withInstallLock(async () => {
     const from = linkTarget();
     const before = saved.clients?.claude ? readSettings() : null;
-    const codexBefore = saved.clients?.codex ? codexMarketplace() : null;
+    const codexBefore = saved.clients?.codex ? await snapshotCodex() : null;
+    if (saved.clients?.codex) {
+      if (!codexBefore) throw new Error("Codex CLI is required to restore its owned registration; no changes made");
+      checkCodexOwnership(saved.clients.codex, codexBefore);
+    }
     const integration = Object.keys(saved.clients || {}).length ? buildIntegration(saved.previous) : null;
+    let codexChanged = false;
     try {
       switchCurrent(saved.previous);
       if (saved.clients?.claude) {
@@ -477,8 +551,10 @@ export async function runRollback(argv = []) {
         saved.clients.claude.marketRoot = path.join(integration.root, "plugins");
       }
       if (saved.clients?.codex) {
-        codexInstall(false, integration);
+        codexChanged = true;
+        await codexInstall(false, integration, codexBefore);
         saved.clients.codex.marketRoot = integration.root;
+        saved.clients.codex.ownedSettings = await readCodexSettings();
       }
       if (saved.service) saved.service = await installService(false, () => switchCurrent(from), saved.service);
       saved.current = saved.previous; saved.previous = from;
@@ -500,7 +576,7 @@ export async function runRollback(argv = []) {
         }
         writeSettings(now, false, "restore client settings after failed rollback");
       }
-      if (saved.clients?.codex) failures.push(...restoreCodex(codexBefore));
+      if (codexChanged) failures.push(...await restoreCodex(codexBefore));
       if (!failures.length && integration?.created) removeIntegration(integration);
       throw new Error(`Rollback activation failed; original payload restored: ${error.message}${failures.length ? "; client registry recovery needs attention: " + failures.join("; ") : ""}`);
     }
@@ -538,8 +614,11 @@ export async function runDoctor() {
   rows.push(["claude marketplace", s.extraKnownMarketplaces?.[MARKET_ID]?.source?.path || "not registered"]);
   rows.push(["claude plugin enabled", s.enabledPlugins?.[PLUGIN_ID] ? "ok" : "not enabled"]);
   if (hasCodex()) {
-    const r = clientExec("codex", ["plugin", "list"]);
-    rows.push(["codex plugin", (r.stdout || "").includes("communicate") ? "ok" : "not installed (or codex plugin list unsupported)"]);
+    rows.push(["Codex CLI version", clientExec("codex", ["--version"]).stdout.trim()]);
+    try {
+      const state = codexPlugin();
+      rows.push(["codex plugin", !state.installed ? "not installed" : state.enabled ? "installed and enabled" : "installed but disabled"]);
+    } catch { rows.push(["codex plugin", "unknown (installed/enabled inspection unsupported or failed)"]); }
     rows.push(["codex marketplace", codexMarketplace()?.root || "not registered/unknown"]);
   } else rows.push(["codex plugin", "codex CLI not found"]);
   if (executable("claude")) {
